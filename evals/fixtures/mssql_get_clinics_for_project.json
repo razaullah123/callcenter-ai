@@ -1,0 +1,625 @@
+{
+  "args": {
+    "projectId": 12,
+    "LanguageID": 1
+  },
+  "ok": true,
+  "data": [
+    {
+      "ClinicID": 1,
+      "ClinicDescriptionN": "الباطنية"
+    },
+    {
+      "ClinicID": 2,
+      "ClinicDescriptionN": "الأطفال"
+    },
+    {
+      "ClinicID": 3,
+      "ClinicDescriptionN": "النساء والولادة"
+    },
+    {
+      "ClinicID": 4,
+      "ClinicDescriptionN": "الجراحة العامة"
+    },
+    {
+      "ClinicID": 5,
+      "ClinicDescriptionN": "الأمراض الجلدية والتجميل"
+    },
+    {
+      "ClinicID": 6,
+      "ClinicDescriptionN": "العيون"
+    },
+    {
+      "ClinicID": 7,
+      "ClinicDescriptionN": "انف واذن وحنجرة"
+    },
+    {
+      "ClinicID": 8,
+      "ClinicDescriptionN": "المسالك البولية"
+    },
+    {
+      "ClinicID": 9,
+      "ClinicDescriptionN": "الجهاز الهضمي"
+    },
+    {
+      "ClinicID": 11,
+      "ClinicDescriptionN": "المخ والاعصاب"
+    },
+    {
+      "ClinicID": 12,
+      "ClinicDescriptionN": "العظام"
+    },
+    {
+      "ClinicID": 14,
+      "ClinicDescriptionN": "السكر والغدد الصماء"
+    },
+    {
+      "ClinicID": 16,
+      "ClinicDescriptionN": "جراحة التجميل"
+    },
+    {
+      "ClinicID": 17,
+      "ClinicDescriptionN": "الاسنان"
+    },
+    {
+      "ClinicID": 18,
+      "ClinicDescriptionN": "جراحة المخ والاعصاب"
+    },
+    {
+      "ClinicID": 19,
+      "ClinicDescriptionN": "الاشعة"
+    },
+    {
+      "ClinicID": 20,
+      "ClinicDescriptionN": "التغذية"
+    },
+    {
+      "ClinicID": 21,
+      "ClinicDescriptionN": "القلب"
+    },
+    {
+      "ClinicID": 23,
+      "ClinicDescriptionN": "العلاج الطبيعي"
+    },
+    {
+      "ClinicID": 25,
+      "ClinicDescriptionN": "الطب العام"
+    },
+    {
+      "ClinicID": 26,
+      "ClinicDescriptionN": "طب الأسرة"
+    },
+    {
+      "ClinicID": 27,
+      "ClinicDescriptionN": "جراحة العامود الفقري"
+    },
+    {
+      "ClinicID": 28,
+      "ClinicDescriptionN": "التخاطب واعادة التأهيل"
+    },
+    {
+      "ClinicID": 29,
+      "ClinicDescriptionN": "التثقيف الصحي"
+    },
+    {
+      "ClinicID": 30,
+      "ClinicDescriptionN": "الكلى"
+    },
+    {
+      "ClinicID": 31,
+      "ClinicDescriptionN": "الطب النفسي"
+    },
+    {
+      "ClinicID": 32,
+      "ClinicDescriptionN": "علم النفس و السلوك"
+    },
+    {
+      "ClinicID": 35,
+      "ClinicDescriptionN": "الاوعية الدموية"
+    },
+    {
+      "ClinicID": 36,
+      "ClinicDescriptionN": "أمراض الدم"
+    },
+    {
+      "ClinicID": 37,
+      "ClinicDescriptionN": "العناية بالبشرة والشعر"
+    },
+    {
+      "ClinicID": 38,
+      "ClinicDescriptionN": "الحساسية والربو والمناعة"
+    },
+    {
+      "ClinicID": 39,
+      "ClinicDescriptionN": "عيادة الشم"
+    },
+    {
+      "ClinicID": 40,
+      "ClinicDescriptionN": "العقم"
+    },
+    {
+      "ClinicID": 41,
+      "ClinicDescriptionN": "صداع الراس"
+    },
+    {
+      "ClinicID": 42,
+      "ClinicDescriptionN": "عيادة الأشعة التدخلية العلاجية"
+    },
+    {
+      "ClinicID": 43,
+      "ClinicDescriptionN": "أمراض الجهاز التنفسي - 2"
+    },
+    {
+      "ClinicID": 44,
+      "ClinicDescriptionN": "عيادة أمراض القدم"
+    },
+    {
+      "ClinicID": 50,
+      "ClinicDescriptionN": "غسيل الكلى"
+    },
+    {
+      "ClinicID": 51,
+      "ClinicDescriptionN": "الطب الرياضي"
+    },
+    {
+      "ClinicID": 52,
+      "ClinicDescriptionN": "السمعيات"
+    },
+    {
+      "ClinicID": 55,
+      "ClinicDescriptionN": "علاج الألم"
+    },
+    {
+      "ClinicID": 56,
+      "ClinicDescriptionN": "عيادة الخزعة بالإبرة الدقيقة بدون أشعة"
+    },
+    {
+      "ClinicID": 57,
+      "ClinicDescriptionN": "عيادة الامتياز"
+    },
+    {
+      "ClinicID": 59,
+      "ClinicDescriptionN": "عيادة الأمراض المعدية"
+    },
+    {
+      "ClinicID": 60,
+      "ClinicDescriptionN": "منتجع العناية بالبشرة"
+    },
+    {
+      "ClinicID": 67,
+      "ClinicDescriptionN": "عيادة اعادة التأهيل"
+    },
+    {
+      "ClinicID": 72,
+      "ClinicDescriptionN": "عيادة طب الأسنان"
+    },
+    {
+      "ClinicID": 74,
+      "ClinicDescriptionN": "الجهاز الهضمي للأطفال"
+    },
+    {
+      "ClinicID": 84,
+      "ClinicDescriptionN": "عيادة الرضاعة الطبيعية"
+    },
+    {
+      "ClinicID": 87,
+      "ClinicDescriptionN": "أمراض الكبد"
+    },
+    {
+      "ClinicID": 88,
+      "ClinicDescriptionN": "أمراض النساء التجميلية"
+    },
+    {
+      "ClinicID": 90,
+      "ClinicDescriptionN": "عيادة جراحة الكف"
+    },
+    {
+      "ClinicID": 93,
+      "ClinicDescriptionN": "وحدة العلاج الوريدي والفيتامينات"
+    },
+    {
+      "ClinicID": 95,
+      "ClinicDescriptionN": "جراحة الوجه والفكين"
+    },
+    {
+      "ClinicID": 98,
+      "ClinicDescriptionN": "عيادة صحة المرأة"
+    },
+    {
+      "ClinicID": 101,
+      "ClinicDescriptionN": "عيادة العناية بالجروح"
+    },
+    {
+      "ClinicID": 106,
+      "ClinicDescriptionN": "الصدرية"
+    },
+    {
+      "ClinicID": 107,
+      "ClinicDescriptionN": "الروماتيزم"
+    },
+    {
+      "ClinicID": 108,
+      "ClinicDescriptionN": "علاج السمنة"
+    },
+    {
+      "ClinicID": 109,
+      "ClinicDescriptionN": "مركز التدريب"
+    },
+    {
+      "ClinicID": 110,
+      "ClinicDescriptionN": "وحدة علاج اضطراب النوم"
+    },
+    {
+      "ClinicID": 112,
+      "ClinicDescriptionN": "عيادة جراحة الأورام"
+    },
+    {
+      "ClinicID": 113,
+      "ClinicDescriptionN": "عيادة أورام القولون والمستقيم"
+    },
+    {
+      "ClinicID": 114,
+      "ClinicDescriptionN": "عيادة الغدة الدرقية وجارات الغدة"
+    },
+    {
+      "ClinicID": 117,
+      "ClinicDescriptionN": "عيادة العلاج بالأشعة التداخلية"
+    },
+    {
+      "ClinicID": 118,
+      "ClinicDescriptionN": "العلاج التلطيفي"
+    },
+    {
+      "ClinicID": 119,
+      "ClinicDescriptionN": "عيادة العلاج بالاشعاع"
+    },
+    {
+      "ClinicID": 120,
+      "ClinicDescriptionN": "عيادة جراحة الأورام- الاطفال"
+    },
+    {
+      "ClinicID": 121,
+      "ClinicDescriptionN": "عيادة جراحة أورام العظام"
+    },
+    {
+      "ClinicID": 122,
+      "ClinicDescriptionN": "عيادة أورام الانف والاذن والحنجرة"
+    },
+    {
+      "ClinicID": 123,
+      "ClinicDescriptionN": "عيادة أورام المخ"
+    },
+    {
+      "ClinicID": 124,
+      "ClinicDescriptionN": "عيادة أورام المسالك"
+    },
+    {
+      "ClinicID": 125,
+      "ClinicDescriptionN": "عيادة امراض اورام النساء"
+    },
+    {
+      "ClinicID": 126,
+      "ClinicDescriptionN": "عيادة الجراحة الصدرية والبلعوم"
+    },
+    {
+      "ClinicID": 127,
+      "ClinicDescriptionN": "عيادة جراحة الغدد الكظرية"
+    },
+    {
+      "ClinicID": 128,
+      "ClinicDescriptionN": "عيادة الغدة الدرقية وجارات الغدة الدرقية"
+    },
+    {
+      "ClinicID": 129,
+      "ClinicDescriptionN": "عيادة كشف وعلاج امراض الثدي"
+    },
+    {
+      "ClinicID": 130,
+      "ClinicDescriptionN": "الغدد الصماء الطفل"
+    },
+    {
+      "ClinicID": 131,
+      "ClinicDescriptionN": "عيادة تجميل الاسنان"
+    },
+    {
+      "ClinicID": 132,
+      "ClinicDescriptionN": "عياده طب كبار السن"
+    },
+    {
+      "ClinicID": 134,
+      "ClinicDescriptionN": "Blood Bank"
+    },
+    {
+      "ClinicID": 147,
+      "ClinicDescriptionN": "Neuro Intervention"
+    },
+    {
+      "ClinicID": 158,
+      "ClinicDescriptionN": "جراحة الاطفال"
+    },
+    {
+      "ClinicID": 180,
+      "ClinicDescriptionN": "الطبيب طلب بنفسه"
+    },
+    {
+      "ClinicID": 250,
+      "ClinicDescriptionN": "وحدة العناية المركزة للأطفال حديثي الولادة"
+    },
+    {
+      "ClinicID": 252,
+      "ClinicDescriptionN": "التغذية السريرية"
+    },
+    {
+      "ClinicID": 253,
+      "ClinicDescriptionN": "عيادات الليزر والشعر"
+    },
+    {
+      "ClinicID": 254,
+      "ClinicDescriptionN": "عيادة الام والجنين"
+    },
+    {
+      "ClinicID": 255,
+      "ClinicDescriptionN": "الأورام"
+    },
+    {
+      "ClinicID": 259,
+      "ClinicDescriptionN": "Medical Checkup Clinic"
+    },
+    {
+      "ClinicID": 260,
+      "ClinicDescriptionN": "عيادة الأعصاب للأطفال"
+    },
+    {
+      "ClinicID": 261,
+      "ClinicDescriptionN": "العلاج الطبيعي في قسم النساء والولادة"
+    },
+    {
+      "ClinicID": 262,
+      "ClinicDescriptionN": "عيادة البصريات"
+    },
+    {
+      "ClinicID": 263,
+      "ClinicDescriptionN": "عيادة العلاج الوظيفي"
+    },
+    {
+      "ClinicID": 264,
+      "ClinicDescriptionN": "عیادة الجبائر والاطراف"
+    },
+    {
+      "ClinicID": 501,
+      "ClinicDescriptionN": "طب الاسرة - الطب العام"
+    },
+    {
+      "ClinicID": 502,
+      "ClinicDescriptionN": "الأمراض المعدية"
+    },
+    {
+      "ClinicID": 503,
+      "ClinicDescriptionN": "الطب العام"
+    },
+    {
+      "ClinicID": 504,
+      "ClinicDescriptionN": "الحاج"
+    },
+    {
+      "ClinicID": 601,
+      "ClinicDescriptionN": "الجلدية"
+    },
+    {
+      "ClinicID": 602,
+      "ClinicDescriptionN": "النساء والولادة"
+    },
+    {
+      "ClinicID": 603,
+      "ClinicDescriptionN": "الأطفال"
+    },
+    {
+      "ClinicID": 604,
+      "ClinicDescriptionN": "السكر والغدد الصماء"
+    },
+    {
+      "ClinicID": 605,
+      "ClinicDescriptionN": "القلب"
+    },
+    {
+      "ClinicID": 606,
+      "ClinicDescriptionN": "انف واذن وحنجرة"
+    },
+    {
+      "ClinicID": 607,
+      "ClinicDescriptionN": "الأوعية الدموية والقدم السكرية"
+    },
+    {
+      "ClinicID": 608,
+      "ClinicDescriptionN": "العيون"
+    },
+    {
+      "ClinicID": 609,
+      "ClinicDescriptionN": "اطفال سكري وغدد صماء"
+    },
+    {
+      "ClinicID": 610,
+      "ClinicDescriptionN": "الأعصاب"
+    },
+    {
+      "ClinicID": 611,
+      "ClinicDescriptionN": "الجهاز الهضمي"
+    },
+    {
+      "ClinicID": 612,
+      "ClinicDescriptionN": "جراحه عامه"
+    },
+    {
+      "ClinicID": 613,
+      "ClinicDescriptionN": "العظام"
+    },
+    {
+      "ClinicID": 614,
+      "ClinicDescriptionN": "الصرع وجراحة الأعصاب والعمود الفقري"
+    },
+    {
+      "ClinicID": 615,
+      "ClinicDescriptionN": "الطب النفسي"
+    },
+    {
+      "ClinicID": 616,
+      "ClinicDescriptionN": "التغذية السريرية"
+    },
+    {
+      "ClinicID": 617,
+      "ClinicDescriptionN": "أمراض السمنة"
+    },
+    {
+      "ClinicID": 618,
+      "ClinicDescriptionN": "العلاج الطبيعي"
+    },
+    {
+      "ClinicID": 619,
+      "ClinicDescriptionN": "عيادة جراحات التجميل"
+    },
+    {
+      "ClinicID": 621,
+      "ClinicDescriptionN": "الطب الباطني"
+    },
+    {
+      "ClinicID": 622,
+      "ClinicDescriptionN": "أخصائي أمراض الكلى"
+    },
+    {
+      "ClinicID": 623,
+      "ClinicDescriptionN": "عيادة مضخة الانسولين"
+    },
+    {
+      "ClinicID": 624,
+      "ClinicDescriptionN": "المسالك البولية"
+    },
+    {
+      "ClinicID": 625,
+      "ClinicDescriptionN": "جراحة العامود الفقري"
+    },
+    {
+      "ClinicID": 626,
+      "ClinicDescriptionN": "الجهاز الهضمي"
+    },
+    {
+      "ClinicID": 627,
+      "ClinicDescriptionN": "الكلى"
+    },
+    {
+      "ClinicID": 628,
+      "ClinicDescriptionN": "الاوعية الدموية"
+    },
+    {
+      "ClinicID": 629,
+      "ClinicDescriptionN": "أمراض الدم"
+    },
+    {
+      "ClinicID": 630,
+      "ClinicDescriptionN": "الروماتيزم"
+    },
+    {
+      "ClinicID": 631,
+      "ClinicDescriptionN": "الأورام"
+    },
+    {
+      "ClinicID": 632,
+      "ClinicDescriptionN": "الصدرية"
+    },
+    {
+      "ClinicID": 633,
+      "ClinicDescriptionN": "جراحة المخ والاعصاب"
+    },
+    {
+      "ClinicID": 634,
+      "ClinicDescriptionN": "علاج الألم"
+    },
+    {
+      "ClinicID": 635,
+      "ClinicDescriptionN": "العقم"
+    },
+    {
+      "ClinicID": 636,
+      "ClinicDescriptionN": "جراحة التجميل"
+    },
+    {
+      "ClinicID": 637,
+      "ClinicDescriptionN": "عيادة أمراض الذكورة"
+    },
+    {
+      "ClinicID": 638,
+      "ClinicDescriptionN": "التخاطب واعادة التأهيل"
+    },
+    {
+      "ClinicID": 639,
+      "ClinicDescriptionN": "عيادة صحة المرأة"
+    },
+    {
+      "ClinicID": 640,
+      "ClinicDescriptionN": "Livecare PEDIATRIC NEUROLOGY"
+    },
+    {
+      "ClinicID": 641,
+      "ClinicDescriptionN": "Livecare PEDIATRIC Cardiology"
+    },
+    {
+      "ClinicID": 642,
+      "ClinicDescriptionN": "Livecare Allergy, Asthma and Immunology"
+    },
+    {
+      "ClinicID": 643,
+      "ClinicDescriptionN": "Livecare SLEEP DISORDER UNIT"
+    },
+    {
+      "ClinicID": 644,
+      "ClinicDescriptionN": "LIVECARE HEADACHE CLINIC"
+    },
+    {
+      "ClinicID": 645,
+      "ClinicDescriptionN": "LIVECARE Pediatric PULMO"
+    },
+    {
+      "ClinicID": 646,
+      "ClinicDescriptionN": "عيادة الطب النفسي السلوكي"
+    },
+    {
+      "ClinicID": 647,
+      "ClinicDescriptionN": "طوارئ"
+    },
+    {
+      "ClinicID": 648,
+      "ClinicDescriptionN": "LIVECARE Genetics"
+    },
+    {
+      "ClinicID": 649,
+      "ClinicDescriptionN": "الامراض المعدية"
+    },
+    {
+      "ClinicID": 650,
+      "ClinicDescriptionN": "طوارئ الاطفال"
+    },
+    {
+      "ClinicID": 651,
+      "ClinicDescriptionN": "عيادة السكر"
+    },
+    {
+      "ClinicID": 652,
+      "ClinicDescriptionN": "أطفال أذن وانف وحنجرة"
+    },
+    {
+      "ClinicID": 653,
+      "ClinicDescriptionN": "عيادة التخدير"
+    },
+    {
+      "ClinicID": 654,
+      "ClinicDescriptionN": "عيادة صحة الاجنة"
+    },
+    {
+      "ClinicID": 655,
+      "ClinicDescriptionN": "LIVECARE PEDIATRIC GASTROENTEROLOGY"
+    },
+    {
+      "ClinicID": 701,
+      "ClinicDescriptionN": "فريق الاستجابة السريع"
+    }
+  ]
+}

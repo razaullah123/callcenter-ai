@@ -1,0 +1,45 @@
+# Steps follow the harness auth stage (session.auth.stage). Spec: docs/flows/authenticate.md
+steps:
+  - id: mobile
+    stage: awaiting_mobile
+    tools: [mssql_get_patient_info]
+    auto_call:   # a clearly parsed mobile is looked up by the harness itself (no LLM round trip)
+      - {tool: mssql_get_patient_info, args: {mobileNo: parsed.mobile}, blocking: true}
+    instructions: |
+      If the caller has only greeted and not said what they need yet, greet them back and ask how you can help
+      (don't ask for the mobile number yet). Once they say what they need, acknowledge it in a few words and ask for
+      their registered mobile number to verify them — e.g. "أبشر، عشان أحجز لك أحتاج رقم جوالك المسجل".
+      Ask for the caller's registered mobile number — don't explain its format unless what they said was wrong
+      (then: 10 digits starting with 05).
+      As soon as they say it, call mssql_get_patient_info with mobileNo (use the parsed mobile).
+      If the result says no file is registered, tell them to contact the support team to register first,
+      then ask if there is anything else (they cannot be served without a file).
+      If the number was incomplete or unclear, ask them to say it again slowly, or to type it on the phone keypad
+      followed by the hash key (Arabic: "أو اكتبه بلوحة المفاتيح وبعده علامة المربع").
+
+  - id: identify
+    stage: awaiting_dob_and_name
+    instructions: |
+      Several files share this number. Ask for the caller's date of birth and first name in one question,
+      then call select_patient. If it does not match, ask once more, then the system transfers the call.
+
+  - id: send_otp
+    stage: send_otp
+    tools: [api_send_otp_request]
+    auto_call:
+      - {tool: api_send_otp_request, args: {Channel: "=WhatsApp"}, blocking: true}
+    instructions: |
+      Call api_send_otp_request now with Channel WhatsApp. Then tell the caller a code was sent to their
+      WhatsApp and ask for it.
+
+  - id: verify_otp
+    stage: awaiting_otp
+    tools: [api_verify_otp, api_send_otp_request]
+    auto_call:   # a clearly parsed code is verified by the harness itself
+      - {tool: api_verify_otp, args: {Otp: parsed.code}, blocking: true}
+    instructions: |
+      Ask for the code. When the caller says digits, call api_verify_otp with Otp (use the parsed code).
+      If the code was unclear, they can also type it on the keypad followed by the hash key.
+      If the code is wrong: say so and ask whether they want to repeat it or receive it by text message;
+      for a text message call api_send_otp_request with Channel SMS.
+      If they did not receive the WhatsApp message, offer SMS the same way.

@@ -1,0 +1,59 @@
+{
+  "args": {
+    "latitude": 24.695,
+    "longitude": 46.681,
+    "LanguageID": 1
+  },
+  "ok": true,
+  "data": {
+    "success": true,
+    "count": 5,
+    "search_location": {
+      "latitude": 24.695,
+      "longitude": 46.681
+    },
+    "LanguageID": 1,
+    "projects": [
+      {
+        "ProjectID": 12,
+        "ProjectNameN": "مُسْتَشْفَى العُلَيّا.\r\n",
+        "Latitude": "24.70415933\r\n",
+        "Longitude": "46.67712344\r\n",
+        "PhoneNumber": "+966115259999",
+        "distance_km": 1.09
+      },
+      {
+        "ProjectID": 11,
+        "ProjectNameN": "مستشفى النساء والولادة\r\n",
+        "Latitude": "24.70441742217276",
+        "Longitude": "46.67674567554396",
+        "PhoneNumber": "+966115259999",
+        "distance_km": 1.13
+      },
+      {
+        "ProjectID": 95,
+        "ProjectNameN": "الرعاية الصحية المنزلية\r\n",
+        "Latitude": "24.70441742217276",
+        "Longitude": "46.67674567554396",
+        "PhoneNumber": "+966115259999",
+        "distance_km": 1.13
+      },
+      {
+        "ProjectID": 16,
+        "ProjectNameN": "مستشفى التخصصي\r\n",
+        "Latitude": "24.71921098\r\n",
+        "Longitude": "46.65725859\r\n",
+        "PhoneNumber": "+966112833333",
+        "distance_km": 3.61
+      },
+      {
+        "ProjectID": 140,
+        "ProjectNameN": "مستشفى صحة المرأة\r\n",
+        "Latitude": "24.7229156\r\n",
+        "Longitude": "46.65408124\r\n",
+        "PhoneNumber": "+966112099999",
+        "distance_km": 4.13
+      }
+    ]
+  }
+}

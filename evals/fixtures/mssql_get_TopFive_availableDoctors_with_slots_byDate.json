@@ -1,0 +1,418 @@
+{
+  "args": {
+    "projectId": 12,
+    "clinicId": 1,
+    "date": "2026-09-28"
+  },
+  "ok": true,
+  "data": {
+    "success": true,
+    "count": 5,
+    "page": 1,
+    "pageSize": 5,
+    "projectId": 12,
+    "clinicId": 1,
+    "date": "2026-09-28",
+    "hasNextPage": true,
+    "hasPreviousPage": false,
+    "doctors": [
+      {
+        "doctorId": "951",
+        "doctorName": "cmc package booking",
+        "doctorNameN": ".",
+        "2026-09-28": [
+          {
+            "startTime": "08:00",
+            "endTime": "09:00"
+          },
+          {
+            "startTime": "09:00",
+            "endTime": "10:00"
+          },
+          {
+            "startTime": "10:00",
+            "endTime": "11:00"
+          },
+          {
+            "startTime": "11:00",
+            "endTime": "12:00"
+          },
+          {
+            "startTime": "12:00",
+            "endTime": "13:00"
+          },
+          {
+            "startTime": "13:00",
+            "endTime": "14:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "14315",
+        "doctorName": "alaa farez mahmoud esmaeil",
+        "doctorNameN": "علاء فريز محمود اسماعيل",
+        "2026-09-28": [
+          {
+            "startTime": "09:00",
+            "endTime": "09:15"
+          },
+          {
+            "startTime": "09:15",
+            "endTime": "09:30"
+          },
+          {
+            "startTime": "09:45",
+            "endTime": "10:00"
+          },
+          {
+            "startTime": "10:00",
+            "endTime": "10:15"
+          },
+          {
+            "startTime": "10:15",
+            "endTime": "10:30"
+          },
+          {
+            "startTime": "10:30",
+            "endTime": "10:45"
+          },
+          {
+            "startTime": "10:45",
+            "endTime": "11:00"
+          },
+          {
+            "startTime": "11:00",
+            "endTime": "11:15"
+          },
+          {
+            "startTime": "11:15",
+            "endTime": "11:30"
+          },
+          {
+            "startTime": "12:30",
+            "endTime": "12:45"
+          },
+          {
+            "startTime": "13:00",
+            "endTime": "13:15"
+          },
+          {
+            "startTime": "13:15",
+            "endTime": "13:30"
+          },
+          {
+            "startTime": "13:30",
+            "endTime": "13:45"
+          },
+          {
+            "startTime": "13:45",
+            "endTime": "14:00"
+          },
+          {
+            "startTime": "14:15",
+            "endTime": "14:30"
+          },
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "5018",
+        "doctorName": "rubeena quadri",
+        "doctorNameN": "روبينا قادري",
+        "2026-09-28": [
+          {
+            "startTime": "09:15",
+            "endTime": "09:30"
+          },
+          {
+            "startTime": "09:45",
+            "endTime": "10:00"
+          },
+          {
+            "startTime": "10:00",
+            "endTime": "10:15"
+          },
+          {
+            "startTime": "10:15",
+            "endTime": "10:30"
+          },
+          {
+            "startTime": "10:30",
+            "endTime": "10:45"
+          },
+          {
+            "startTime": "10:45",
+            "endTime": "11:00"
+          },
+          {
+            "startTime": "11:00",
+            "endTime": "11:15"
+          },
+          {
+            "startTime": "11:15",
+            "endTime": "11:30"
+          },
+          {
+            "startTime": "11:30",
+            "endTime": "11:45"
+          },
+          {
+            "startTime": "11:45",
+            "endTime": "12:00"
+          },
+          {
+            "startTime": "12:00",
+            "endTime": "12:15"
+          },
+          {
+            "startTime": "12:15",
+            "endTime": "12:30"
+          },
+          {
+            "startTime": "12:30",
+            "endTime": "12:45"
+          },
+          {
+            "startTime": "12:45",
+            "endTime": "13:00"
+          },
+          {
+            "startTime": "13:00",
+            "endTime": "13:15"
+          },
+          {
+            "startTime": "13:15",
+            "endTime": "13:30"
+          },
+          {
+            "startTime": "13:30",
+            "endTime": "13:45"
+          },
+          {
+            "startTime": "13:45",
+            "endTime": "14:00"
+          },
+          {
+            "startTime": "14:00",
+            "endTime": "14:15"
+          },
+          {
+            "startTime": "14:15",
+            "endTime": "14:30"
+          },
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          },
+          {
+            "startTime": "16:15",
+            "endTime": "16:30"
+          },
+          {
+            "startTime": "16:30",
+            "endTime": "16:45"
+          },
+          {
+            "startTime": "16:45",
+            "endTime": "17:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "41",
+        "doctorName": "nursing service / technician",
+        "doctorNameN": "nursing service / technician",
+        "2026-09-28": [
+          {
+            "startTime": "11:00",
+            "endTime": "11:15"
+          },
+          {
+            "startTime": "11:15",
+            "endTime": "11:30"
+          },
+          {
+            "startTime": "11:30",
+            "endTime": "11:45"
+          },
+          {
+            "startTime": "11:45",
+            "endTime": "12:00"
+          },
+          {
+            "startTime": "12:00",
+            "endTime": "12:15"
+          },
+          {
+            "startTime": "12:15",
+            "endTime": "12:30"
+          },
+          {
+            "startTime": "12:30",
+            "endTime": "12:45"
+          },
+          {
+            "startTime": "12:45",
+            "endTime": "13:00"
+          },
+          {
+            "startTime": "13:00",
+            "endTime": "13:15"
+          },
+          {
+            "startTime": "13:15",
+            "endTime": "13:30"
+          },
+          {
+            "startTime": "13:30",
+            "endTime": "13:45"
+          },
+          {
+            "startTime": "13:45",
+            "endTime": "14:00"
+          },
+          {
+            "startTime": "14:00",
+            "endTime": "14:15"
+          },
+          {
+            "startTime": "14:15",
+            "endTime": "14:30"
+          },
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "446847",
+        "doctorName": "mohammed ali assiri ",
+        "doctorNameN": "محمد العسيري",
+        "2026-09-28": [
+          {
+            "startTime": "12:00",
+            "endTime": "12:30"
+          },
+          {
+            "startTime": "12:30",
+            "endTime": "13:00"
+          },
+          {
+            "startTime": "13:00",
+            "endTime": "13:30"
+          },
+          {
+            "startTime": "13:30",
+            "endTime": "14:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "16:00"
+          },
+          {
+            "startTime": "16:00",
+            "endTime": "16:30"
+          },
+          {
+            "startTime": "16:30",
+            "endTime": "17:00"
+          },
+          {
+            "startTime": "17:00",
+            "endTime": "17:30"
+          },
+          {
+            "startTime": "17:30",
+            "endTime": "18:00"
+          },
+          {
+            "startTime": "18:00",
+            "endTime": "18:30"
+          },
+          {
+            "startTime": "18:30",
+            "endTime": "19:00"
+          },
+          {
+            "startTime": "19:00",
+            "endTime": "19:30"
+          },
+          {
+            "startTime": "19:30",
+            "endTime": "20:00"
+          }
+        ]
+      }
+    ],
+    "totalCount": 8,
+    "totalPages": 2
+  }
+}

@@ -1,0 +1,6 @@
+pyproject.toml
+hmg_voice_agent.egg-info/PKG-INFO
+hmg_voice_agent.egg-info/SOURCES.txt
+hmg_voice_agent.egg-info/dependency_links.txt
+hmg_voice_agent.egg-info/requires.txt
+hmg_voice_agent.egg-info/top_level.txt

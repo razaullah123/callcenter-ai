@@ -1,0 +1,204 @@
+{
+  "args": {
+    "projectId": 12,
+    "clinicId": 1
+  },
+  "ok": true,
+  "data": {
+    "success": true,
+    "count": 5,
+    "page": 1,
+    "pageSize": 5,
+    "projectId": 12,
+    "clinicId": 1,
+    "hasNextPage": false,
+    "hasPreviousPage": false,
+    "clinics": [
+      {
+        "doctorId": "41",
+        "doctorName": "NURSING SERVICE / TECHNICIAN",
+        "doctorNameN": "NURSING SERVICE / TECHNICIAN",
+        "2026-09-27": [
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "5018",
+        "doctorName": "RUBEENA QUADRI",
+        "doctorNameN": "روبينا قادري",
+        "2026-09-27": [
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          },
+          {
+            "startTime": "16:00",
+            "endTime": "16:15"
+          },
+          {
+            "startTime": "16:15",
+            "endTime": "16:30"
+          }
+        ]
+      },
+      {
+        "doctorId": "12565",
+        "doctorName": "SAMER YOUSEF ABUALRUB",
+        "doctorNameN": "سامر يوسف",
+        "2026-09-27": [
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          },
+          {
+            "startTime": "16:00",
+            "endTime": "16:15"
+          },
+          {
+            "startTime": "16:15",
+            "endTime": "16:30"
+          },
+          {
+            "startTime": "16:45",
+            "endTime": "17:00"
+          },
+          {
+            "startTime": "17:00",
+            "endTime": "17:15"
+          },
+          {
+            "startTime": "17:45",
+            "endTime": "18:00"
+          },
+          {
+            "startTime": "18:15",
+            "endTime": "18:30"
+          },
+          {
+            "startTime": "19:30",
+            "endTime": "19:45"
+          },
+          {
+            "startTime": "19:45",
+            "endTime": "20:00"
+          },
+          {
+            "startTime": "20:45",
+            "endTime": "21:00"
+          },
+          {
+            "startTime": "21:00",
+            "endTime": "21:15"
+          },
+          {
+            "startTime": "21:45",
+            "endTime": "22:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "14315",
+        "doctorName": "ALAA FAREZ MAHMOUD ESMAEIL",
+        "doctorNameN": "علاء فريز محمود اسماعيل",
+        "2026-09-27": [
+          {
+            "startTime": "14:30",
+            "endTime": "14:45"
+          },
+          {
+            "startTime": "14:45",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:15"
+          },
+          {
+            "startTime": "15:15",
+            "endTime": "15:30"
+          },
+          {
+            "startTime": "15:30",
+            "endTime": "15:45"
+          },
+          {
+            "startTime": "15:45",
+            "endTime": "16:00"
+          }
+        ]
+      },
+      {
+        "doctorId": "446847",
+        "doctorName": "MOHAMMED ALI ASSIRI ",
+        "doctorNameN": "محمد العسيري",
+        "2026-09-27": [
+          {
+            "startTime": "14:30",
+            "endTime": "15:00"
+          },
+          {
+            "startTime": "15:00",
+            "endTime": "15:30"
+          }
+        ]
+      }
+    ],
+    "totalCount": 5,
+    "totalPages": 1
+  }
+}

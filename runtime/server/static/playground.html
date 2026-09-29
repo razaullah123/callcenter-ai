@@ -1,0 +1,359 @@
+<title>HMG Voice Agent</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+  :root {
+    --bg1:#eef3f7; --bg2:#dde7ee; --ink:#14202b; --muted:#5d6b78; --panel:#ffffffd9; --line:#d6dee6;
+    --call:#16a34a; --call-d:#15803d; --end:#dc2626; --end-d:#b91c1c; --chip:#ffffffb3;
+    --orb-a:#8fb9cf; --orb-b:#3f7f9f; --glow:#5aa2c4;                 /* idle */
+    --user:#e3efff; --agent:#e6f5ee; color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg1:#0b1520; --bg2:#050a10; --ink:#e6edf3; --muted:#8b9aa8; --panel:#0f1b27e6; --line:#223242;
+      --chip:#15222fb3; --orb-a:#3d6e89; --orb-b:#16384b; --glow:#2f7fa6; --user:#16304d; --agent:#123428;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg1:#0b1520; --bg2:#050a10; --ink:#e6edf3; --muted:#8b9aa8; --panel:#0f1b27e6; --line:#223242;
+    --chip:#15222fb3; --orb-a:#3d6e89; --orb-b:#16384b; --glow:#2f7fa6; --user:#16304d; --agent:#123428;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; min-height: 100dvh; color: var(--ink);
+         background: radial-gradient(120% 90% at 50% 0%, var(--bg1), var(--bg2));
+         font: 15px/1.5 system-ui, "Segoe UI", Tahoma, sans-serif; }
+  .app { min-height: 100dvh; display: grid; grid-template-rows: auto 1fr auto; padding: 16px; gap: 8px; }
+
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 980px;
+           width: 100%; margin: 0 auto; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand svg { width: 28px; height: 28px; color: var(--call); }
+  .brand b { display: block; font-size: 15px; letter-spacing: .2px; }
+  .brand span { display: block; font-size: 12px; color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 999px;
+          background: var(--chip); border: 1px solid var(--line); font-size: 12px; color: var(--muted);
+          backdrop-filter: blur(8px); font-variant-numeric: tabular-nums; }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .chip.on i { background: var(--call); box-shadow: 0 0 0 4px #16a34a2e; }
+
+  /* ---------------- stage + orb ---------------- */
+  .stage { display: grid; place-items: center; align-content: center; gap: 22px; text-align: center; }
+  .orb-wrap { position: relative; width: min(62vw, 280px); aspect-ratio: 1; display: grid; place-items: center;
+              --lvl: 0; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--glow); opacity: 0; }
+  .orb { width: 78%; aspect-ratio: 1; border-radius: 50%; position: relative;
+         background: radial-gradient(circle at 34% 28%, #ffffffcc 0 6%, transparent 22%),
+                     radial-gradient(circle at 50% 60%, var(--orb-a), var(--orb-b) 72%);
+         box-shadow: 0 0 calc(40px + var(--lvl) * 90px) calc(4px + var(--lvl) * 26px) color-mix(in srgb, var(--glow) 55%, transparent),
+                     inset 0 -18px 40px #0000003d, inset 0 10px 30px #ffffff2e;
+         transform: scale(calc(1 + var(--lvl) * .16)); transition: transform .09s linear, box-shadow .09s linear,
+         background .6s ease; }
+  .orb::after { content: ""; position: absolute; inset: 14%; border-radius: 50%;
+                background: conic-gradient(from 0deg, transparent, #ffffff26, transparent 40%, #ffffff1a, transparent);
+                filter: blur(6px); animation: swirl 9s linear infinite; }
+  @keyframes swirl { to { transform: rotate(360deg); } }
+  @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+  @keyframes ripple { from { transform: scale(.78); opacity: .55; } to { transform: scale(1.18); opacity: 0; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .orb-wrap[data-state="idle"] .orb, .orb-wrap[data-state="ended"] .orb { animation: breathe 4.5s ease-in-out infinite; }
+  .orb-wrap[data-state="connecting"] { --orb-a: #f3c969; --orb-b: #b7791f; --glow: #e0a33a; }
+  .orb-wrap[data-state="connecting"] .ring { opacity: 1; border-color: transparent; border-top-color: var(--glow);
+                                              border-width: 3px; animation: spin 1s linear infinite; }
+  .orb-wrap[data-state="listening"] { --orb-a: #5eead4; --orb-b: #0f766e; --glow: #2dd4bf; }
+  .orb-wrap[data-state="speaking"] { --orb-a: #93c5fd; --orb-b: #1d4ed8; --glow: #60a5fa; }
+  .orb-wrap[data-state="listening"] .ring, .orb-wrap[data-state="speaking"] .ring { animation: ripple 2.4s ease-out infinite; }
+  .orb-wrap[data-state="listening"] .ring.r2, .orb-wrap[data-state="speaking"] .ring.r2 { animation-delay: 1.2s; }
+  .orb-wrap[data-state="ended"] { --orb-a: #9aa5b1; --orb-b: #4b5563; --glow: #6b7280; }
+  .orb-wrap[data-state="transferred"] { --orb-a: #c4b5fd; --orb-b: #6d28d9; --glow: #8b5cf6; }
+
+  .status { min-height: 52px; }
+  .status b { display: block; font-size: 20px; font-weight: 650; }
+  .status span { display: block; font-size: 13px; color: var(--muted); }
+
+  /* ---------------- controls ---------------- */
+  .controls { display: flex; align-items: center; justify-content: center; gap: 22px; }
+  .round { width: 64px; height: 64px; border-radius: 50%; border: 0; display: grid; place-items: center;
+           cursor: pointer; color: #fff; transition: transform .12s ease, background .2s ease, box-shadow .2s ease; }
+  .round svg { width: 28px; height: 28px; }
+  .round:hover { transform: translateY(-1px); } .round:active { transform: scale(.95); }
+  .round:focus-visible { outline: 3px solid var(--glow); outline-offset: 3px; }
+  .round:disabled { opacity: .45; cursor: default; transform: none; }
+  .call { background: var(--call); box-shadow: 0 10px 28px #16a34a55; width: 76px; height: 76px; }
+  .call:hover { background: var(--call-d); }
+  .call.end { background: var(--end); box-shadow: 0 10px 28px #dc262655; }
+  .call.end:hover { background: var(--end-d); }
+  .call.end svg { transform: rotate(135deg); }
+  .small { background: var(--chip); color: var(--ink); border: 1px solid var(--line); backdrop-filter: blur(8px); }
+  .small.active { background: var(--ink); color: var(--bg1); }
+  .caption { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .ctl { display: grid; justify-items: center; }
+  .badge { position: absolute; top: -2px; inset-inline-end: -2px; min-width: 20px; height: 20px; padding: 0 6px;
+           border-radius: 999px; background: var(--call); color: #fff; font-size: 11px; font-weight: 700;
+           display: grid; place-items: center; }
+  .rel { position: relative; }
+
+  /* ---------------- conversation panel ---------------- */
+  .panel { position: fixed; inset-inline-end: 16px; bottom: 16px; top: 72px; width: min(420px, calc(100vw - 32px));
+           background: var(--panel); border: 1px solid var(--line); border-radius: 18px; backdrop-filter: blur(14px);
+           box-shadow: 0 20px 60px #0000003a; display: flex; flex-direction: column;
+           transform: translateY(12px); opacity: 0; pointer-events: none; transition: all .22s ease; }
+  .panel.open { transform: none; opacity: 1; pointer-events: auto; }
+  .panel header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .panel header b { font-size: 14px; }
+  .x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; padding: 4px 8px; }
+  #log { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 86%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; font-size: 14px; }
+  .msg small { display: block; font-size: 10.5px; color: var(--muted); margin-bottom: 2px; }
+  .user { align-self: flex-end; background: var(--user); border-end-end-radius: 4px; }
+  .agent { align-self: flex-start; background: var(--agent); border-end-start-radius: 4px; }
+  .sys { align-self: center; font-size: 12px; color: var(--muted); text-align: center; }
+  .empty { margin: auto; color: var(--muted); font-size: 13px; text-align: center; }
+
+  footer { text-align: center; font-size: 12px; color: var(--muted); max-width: 640px; margin: 0 auto; }
+  .err { color: var(--end); }
+  @media (max-width: 560px) { .panel { top: auto; height: 62dvh; } .controls { gap: 16px; } }
+  @media (prefers-reduced-motion: reduce) { .orb, .orb::after, .ring { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="app">
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14v-3a9 9 0 0 1 18 0v3"/><path d="M21 15a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 2zM3 15a2 2 0 0 0 2 2h1v-6H5a2 2 0 0 0-2 2z"/><path d="M18 17v1a3 3 0 0 1-3 3h-3"/></svg>
+      <div><b>HMG Voice Agent</b><span>Customer care · Arabic &amp; English</span></div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end">
+      <span class="chip" id="latChip" hidden title="Stop talking → first audio">⚡ <span id="lat"></span></span>
+      <span class="chip" id="line"><i></i><span id="lineText">Ready</span></span>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="orb-wrap" id="orb" data-state="idle" aria-hidden="true">
+      <div class="ring"></div><div class="ring r2"></div>
+      <div class="orb"></div>
+    </div>
+    <div class="status" aria-live="polite">
+      <b id="stateTitle">Tap to call</b>
+      <span id="stateSub">Talk to the agent through your microphone — headphones work best.</span>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <button class="round small" id="mute" disabled aria-label="Mute microphone" aria-pressed="false">
+          <svg id="micIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/></svg>
+        </button>
+        <div class="caption" id="muteCap">Mute</div>
+      </div>
+      <div class="ctl">
+        <button class="round call" id="callBtn" aria-label="Start call">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.6a1 1 0 0 1-.25 1z"/></svg>
+        </button>
+        <div class="caption" id="callCap">Call</div>
+      </div>
+      <div class="ctl">
+        <button class="round small rel" id="convBtn" aria-label="Show conversation" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z"/></svg>
+          <span class="badge" id="badge" hidden>0</span>
+        </button>
+        <div class="caption" id="convCap">Show conversation</div>
+      </div>
+    </div>
+  </main>
+
+  <footer id="foot">Test mode: mobile 0551234567, code 1234 — unless the server runs with live verification.</footer>
+</div>
+
+<aside class="panel" id="panel" aria-label="Conversation">
+  <header>
+    <b>Conversation</b>
+    <button class="x" id="closeConv" aria-label="Hide conversation">×</button>
+  </header>
+  <div id="log"><div class="empty" id="empty">The conversation appears here during the call.</div></div>
+</aside>
+
+<script>
+const RATE = 16000, FRAME = 320;                  // 20 ms @ 16 kHz — same wire protocol as before
+let ws, ctx, mic, node, outGain, analyser, playTime = 0, sources = [], lats = [];
+let muted = false, inCall = false, micLevel = 0, unseen = 0, timer = null, startedAt = 0, ended = false;
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- UI state
+const STATES = {
+  idle:        ["Tap to call", "Talk to the agent through your microphone — headphones work best."],
+  connecting:  ["Connecting…", "Setting up the call"],
+  listening:   ["Listening", "Go ahead, the agent is listening"],
+  speaking:    ["Agent speaking", "You can interrupt at any time"],
+  ended:       ["Call ended", "Tap the green button to call again"],
+  transferred: ["Transferring", "Connecting you to a colleague"],
+};
+let uiState = "idle";
+function setState(s, sub) {
+  uiState = s;
+  $("orb").dataset.state = s;
+  $("stateTitle").textContent = STATES[s][0];
+  $("stateSub").textContent = sub || STATES[s][1];
+}
+function setLine(text, on) { $("lineText").textContent = text; $("line").classList.toggle("on", !!on); }
+function clock() {
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  setLine(`On call · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, true);
+}
+
+// ---------------------------------------------------------------- conversation (hidden until asked)
+function add(role, text) {
+  $("empty").hidden = true;
+  const d = document.createElement("div");
+  d.className = "msg " + role; d.dir = "auto";
+  if (role !== "sys") { const who = document.createElement("small"); who.textContent = role === "user" ? "You" : "Agent"; d.appendChild(who); }
+  d.appendChild(document.createTextNode(text));
+  $("log").appendChild(d); d.scrollIntoView({ block: "end" });
+  if (!$("panel").classList.contains("open") && role !== "sys") { unseen++; $("badge").textContent = unseen; $("badge").hidden = false; }
+}
+function toggleConv(open) {
+  const p = $("panel"), show = open ?? !p.classList.contains("open");
+  p.classList.toggle("open", show);
+  $("convBtn").classList.toggle("active", show);
+  $("convBtn").setAttribute("aria-expanded", String(show));
+  $("convBtn").setAttribute("aria-label", show ? "Hide conversation" : "Show conversation");
+  $("convCap").textContent = show ? "Hide conversation" : "Show conversation";
+  if (show) { unseen = 0; $("badge").hidden = true; const last = $("log").lastElementChild; last && last.scrollIntoView({ block: "end" }); }
+}
+$("convBtn").onclick = () => toggleConv();
+$("closeConv").onclick = () => toggleConv(false);
+document.addEventListener("keydown", e => { if (e.key === "Escape") toggleConv(false); });
+
+// ---------------------------------------------------------------- audio
+const workletSrc = `
+class Capture extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; }
+  process(inputs) {
+    const ch = inputs[0][0]; if (!ch) return true;
+    for (const s of ch) this.buf.push(s);
+    while (this.buf.length >= ${FRAME}) this.port.postMessage(new Float32Array(this.buf.splice(0, ${FRAME})));
+    return true;
+  }
+}
+registerProcessor("capture", Capture);`;
+
+function b64FromInt16(i16) {
+  let s = ""; const u8 = new Uint8Array(i16.buffer);
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+function playPcm(b64) {
+  const bin = atob(b64), n = bin.length >> 1, f = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2*i) | (bin.charCodeAt(2*i+1) << 8); if (v >= 32768) v -= 65536; f[i] = v / 32768; }
+  const buf = ctx.createBuffer(1, n, RATE); buf.copyToChannel(f, 0);
+  const src = ctx.createBufferSource(); src.buffer = buf; src.connect(outGain);
+  playTime = Math.max(playTime, ctx.currentTime + 0.03);
+  src.start(playTime); playTime += buf.duration;
+  sources.push(src);
+  src.onended = () => { sources = sources.filter(s => s !== src); if (!sources.length && inCall) setState("listening"); };
+  if (inCall && uiState !== "speaking") setState("speaking");
+}
+function clearPlayback() { sources.forEach(s => { try { s.stop(); } catch {} }); sources = []; playTime = 0; }
+
+// the orb follows whoever is talking: the agent's output level, else the caller's mic level
+const outBuf = new Float32Array(512);
+function animate() {
+  let lvl = 0;
+  if (inCall && analyser && uiState === "speaking") {
+    analyser.getFloatTimeDomainData(outBuf);
+    let sum = 0; for (const v of outBuf) sum += v * v;
+    lvl = Math.min(1, Math.sqrt(sum / outBuf.length) * 5);
+  } else if (inCall && uiState === "listening" && !muted) {
+    lvl = Math.min(1, micLevel * 2.2);
+  }
+  const wrap = $("orb"), prev = parseFloat(wrap.style.getPropertyValue("--lvl") || 0);
+  wrap.style.setProperty("--lvl", (prev * 0.65 + lvl * 0.35).toFixed(3));
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// ---------------------------------------------------------------- call
+async function startCall() {
+  ended = false; lats = []; unseen = 0; $("badge").hidden = true; $("latChip").hidden = true;
+  $("log").querySelectorAll(".msg").forEach(m => m.remove()); $("empty").hidden = false;
+  setState("connecting"); setLine("Connecting…");
+  setCallButton(true);
+  try {
+    ctx = new AudioContext({ sampleRate: RATE });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSrc], { type: "application/javascript" })));
+    mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } });
+  } catch (e) {
+    setState("ended", "Microphone not available — allow microphone access and try again.");
+    setLine("Ready"); setCallButton(false); return;
+  }
+  outGain = ctx.createGain(); analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
+  outGain.connect(analyser); analyser.connect(ctx.destination);
+  const srcNode = ctx.createMediaStreamSource(mic);
+  node = new AudioWorkletNode(ctx, "capture"); srcNode.connect(node);
+
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => ws.send(JSON.stringify({ event: "start", audio: { encoding: "pcm16", sample_rate: RATE } }));
+  node.port.onmessage = e => {
+    const f = e.data, i16 = new Int16Array(f.length); let peak = 0;
+    for (let i = 0; i < f.length; i++) { const v = muted ? 0 : Math.max(-1, Math.min(1, f[i])); i16[i] = v * 32767; peak = Math.max(peak, Math.abs(v)); }
+    micLevel = peak;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ event: "media", payload: b64FromInt16(i16) }));
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.event === "media") playPcm(m.payload);
+    else if (m.event === "clear") { clearPlayback(); if (inCall) setState("listening", "Interrupted — go ahead"); }
+    else if (m.event === "ready") {
+      inCall = true; startedAt = Date.now(); clock(); timer = setInterval(clock, 1000);
+      setState("listening"); $("mute").disabled = false; add("sys", "Call " + m.call_id);
+    }
+    else if (m.event === "transcript") add(m.role, m.text);
+    else if (m.event === "metric") {
+      lats.push(m.ms); const avg = lats.reduce((a, b) => a + b, 0) / lats.length;
+      $("lat").textContent = `${Math.round(m.ms)} ms · avg ${Math.round(avg)} ms`; $("latChip").hidden = false;
+    }
+    else if (m.event === "transfer") { add("sys", "↪ Transferred to a colleague" + (m.reason ? ` (${m.reason})` : "")); setState("transferred"); }
+    else if (m.event === "hangup") { add("sys", "☎ The call was ended"); hang("ended"); }
+  };
+  ws.onclose = () => hang(uiState === "transferred" ? "transferred" : "ended");
+}
+
+function hang(finalState = "ended") {
+  if (ended) return;
+  ended = true; inCall = false;
+  try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ event: "stop" })); } catch {}
+  try { ws && ws.close(); } catch {}
+  mic && mic.getTracks().forEach(t => t.stop());
+  clearPlayback();
+  setTimeout(() => { try { ctx && ctx.close(); } catch {} }, 1500);
+  clearInterval(timer);
+  const s = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
+  setLine(startedAt ? `Call ended · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : "Ready");
+  startedAt = 0;
+  setState(finalState === "transferred" ? "transferred" : "ended",
+           finalState === "transferred" ? "The call was handed to a colleague" : undefined);
+  muted = false; syncMute(); $("mute").disabled = true;
+  setCallButton(false);
+}
+
+function setCallButton(active) {
+  const b = $("callBtn");
+  b.classList.toggle("end", active);
+  b.setAttribute("aria-label", active ? "End call" : "Start call");
+  $("callCap").textContent = active ? "End call" : "Call";
+}
+$("callBtn").onclick = () => $("callBtn").classList.contains("end") ? hang("ended") : startCall();
+
+function syncMute() {
+  $("mute").classList.toggle("active", muted);
+  $("mute").setAttribute("aria-pressed", String(muted));
+  $("mute").setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
+  $("muteCap").textContent = muted ? "Unmute" : "Mute";
+  $("micIcon").innerHTML = muted
+    ? '<path d="M2 2l20 20"/><path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.7-1.3"/><path d="M19 10v1a7 7 0 0 1-.9 3.4M5 10v1a7 7 0 0 0 11 5.7M12 18v4"/>'
+    : '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/>';
+}
+$("mute").onclick = () => { muted = !muted; syncMute(); if (inCall && uiState === "listening") setState("listening", muted ? "Microphone muted" : undefined); };
+ended = true;   // no call yet
+</script>

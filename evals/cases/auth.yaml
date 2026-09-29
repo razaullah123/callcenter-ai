@@ -1,0 +1,91 @@
+# Authentication suite. Spec: docs/flows/authenticate.md
+# Fixture patients (evals/fixtures.py): 0551234567 male · 0559876543 female · 0550000002 two files · OTP 1234
+
+- id: auth_single_record_ar
+  suite: auth
+  title: Arabic caller, one file, WhatsApp OTP, then books
+  caller:
+    language: ar
+    persona: رجل من الرياض، مستعجل شوي.
+    goal: يبي يحجز موعد، لكن أول شي لازم يتحقق من هويته.
+    facts: {رقم الجوال: "0551234567", رمز التحقق: "1234"}
+    opening: السلام عليكم، ابي احجز موعد
+  max_turns: 5
+  expect:
+    verified: true
+    tools_called: [mssql_get_patient_info, api_send_otp_request, api_verify_otp]
+    language: ar
+    gender: male
+  judge_note: Tests identity verification only (mobile → file → OTP, and choosing the right file when several share the number). The call may stop partway through booking by design.
+
+- id: auth_greeting_first_en
+  suite: auth
+  title: English caller greets first, then states the request
+  caller:
+    language: en
+    persona: A polite woman calling in the afternoon.
+    goal: Book an appointment; she verifies her identity first.
+    facts: {mobile: "0559876543", code: "1234"}
+    script: ["Hi, good afternoon", "I'd like to book an appointment", "0559876543", "1234"]
+  expect:
+    verified: true
+    tools_called: [mssql_get_patient_info, api_send_otp_request, api_verify_otp]
+    language: en
+    say: ["good afternoon|hello|hi"]
+
+- id: auth_wrong_otp_then_sms
+  suite: auth
+  title: Wrong code first, asks for SMS, then the right code
+  caller:
+    language: ar
+    persona: امرأة كبيرة بالسن، ما وصلها الرمز على الواتساب صح.
+    goal: تتحقق من هويتها. أول مرة تعطي رمز غلط 9999، بعدين تطلب الرمز برسالة نصية، بعدين تعطي الرمز الصحيح.
+    facts: {رقم الجوال: "0559876543", الرمز الغلط أول مرة: "9999", الرمز الصحيح بعد الرسالة: "1234"}
+    script: ["السلام عليكم ابي موعد", "0559876543", "9999", "ارسله لي رسالة نصية", "1234"]
+  expect:
+    verified: true
+    tools_called: [api_send_otp_request, api_verify_otp, api_send_otp_request, api_verify_otp]
+    gender: female
+
+- id: auth_no_record
+  suite: auth
+  title: Unregistered number → contact support to register
+  caller:
+    language: ar
+    persona: رجل أول مرة يتصل.
+    goal: يبي يحجز موعد.
+    facts: {رقم الجوال: "0541112233"}
+    script: ["ابي احجز موعد", "0541112233"]
+  expect:
+    verified: false
+    tools_not_called: [api_send_otp_request]
+    say: ["دعم|تسجيل|سجل"]
+
+- id: auth_multiple_records
+  suite: auth
+  title: Two files on one number → date of birth + first name
+  caller:
+    language: ar
+    persona: رجل اسمه عبدالله، مواليد عشرين نوفمبر ١٩٨٥، يشارك الرقم مع بنته.
+    goal: يتحقق من هويته عشان يحجز موعد.
+    facts: {رقم الجوال: "0550000002", الاسم الأول: عبدالله, تاريخ الميلاد: "20 نوفمبر 1985", الرمز: "1234"}
+    opening: ابي احجز موعد
+  max_turns: 7
+  expect:
+    verified: true
+    tools_called: [mssql_get_patient_info, api_send_otp_request, api_verify_otp]
+    say: ["ميلاد|birth"]
+  judge_note: Tests identity verification only (mobile → file → OTP, and choosing the right file when several share the number). The call may stop partway through booking by design.
+
+- id: auth_skip_attempt
+  suite: auth
+  title: Asks for patient data before verifying → must verify first
+  caller:
+    language: ar
+    persona: رجل مستعجل يبي يعرف مواعيده بدون ما يعطي بيانات.
+    goal: يعرف وش مواعيده الجاية. يرفض يعطي رقمه أول مرة، بعدين يعطيه.
+    facts: {رقم الجوال: "0551234567", الرمز: "1234"}
+    script: ["وش مواعيدي الجاية؟", "بس قول لي المواعيد", "طيب 0551234567", "1234"]
+  expect:
+    verified: true
+    tools_called: [mssql_get_patient_info, api_verify_otp]

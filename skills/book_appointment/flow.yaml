@@ -1,0 +1,139 @@
+# Booking flow. Spec: docs/flows/book_appointment.md
+# Progress is inferred from the tools the LLM calls (see `infer`), so no extra round trips are needed.
+
+common_tools: [find_hospital_by_name, resolve_location]   # the caller may change hospital at any time
+
+reset:   # when a slot changes, forget the choices that depended on it
+  project_id: [clinic_id, date_mode, date, booked, appointment_no, doctor_id, slot_date, slot_time, confirm_done]
+  clinic_id: [date_mode, date, booked, appointment_no, doctor_id, slot_date, slot_time, confirm_done]
+
+infer:
+  find_hospital_by_name:
+    on: {result.status: match}
+    set: {project_id: result.hospital.project_id, project_name: result.hospital.name_ar,
+          project_name_en: result.hospital.name_en}
+  resolve_location:          # a clear place or a city → its coordinates (ambiguous / none carry none)
+    set: {location_lat: result.location.latitude, location_lng: result.location.longitude}
+  mssql_get_clinics_for_project:
+    set: {project_id: args.projectId}
+  mssql_get_TopFive_nearestClinic_have_doctorSlots:
+    set: {clinic_id: args.clinicId, date_mode: "=nearest"}
+  mssql_get_TopFive_availableDoctors_with_slots_byDate:
+    set: {clinic_id: args.clinicId, date_mode: "=date", date: args.date}
+  api_book_Appointment:
+    set: {booked: "=true", appointment_no: "result.*appointmentno", doctor_id: args.DoctorID,
+          slot_date: args.StrAppointmentDate, slot_time: args.StartTime}
+  mssql_confirm_appointment:
+    set: {confirm_done: "=true"}
+
+steps:
+  - id: hospital
+    until: [project_id]
+    tools: [mssql_get_Projects_from_Location, mssql_get_clinics_for_project]
+    auto_call:   # once the caller's place is resolved, the harness fetches the nearby hospitals itself (saves a hop)
+      - {tool: mssql_get_Projects_from_Location, args: {latitude: slots.location_lat, longitude: slots.location_lng},
+         blocking: true}
+    instructions: |
+      Ask exactly (the caller's own words may already answer it — then don't ask):
+        English: "Please tell me your location so I can find the nearest hospitals to you, or would you like to book
+                  at a specific hospital?"
+        Arabic:  "ممكن تعطيني موقعك عشان أحدد لك أقرب المستشفيات، ولا تبي تحجز في مستشفى معين؟"
+      - Specific hospital: call find_hospital_by_name with just the name. "match" → don't ask them to confirm it; go
+        straight to the next step (the symptoms question), you may start with the hospital's name ("Olaya Hospital."). "ambiguous" → ask which of the candidates (max 3) they mean. "none" → ask them to repeat
+        the name or offer to use their location instead.
+      - If the caller says where they ARE ("I'm at / near / in Olaya", "أنا في العليا", "ساكن بالملقا"), that is a
+        location, even when the place shares its name with a hospital (Olaya, Al Hamra, Al Rayyan): use
+        resolve_location and offer the nearest hospitals — don't pick the hospital with that name.
+      - Location: ask for their district / city, call resolve_location. "match" or "city" → the system fetches the
+        nearby hospitals itself (mssql_get_Projects_from_Location): read out the 3 nearest and ask which one.
+        "ambiguous" → confirm which place they mean. "none" → ask again.
+      - When the caller picks a hospital from a list, call mssql_get_clinics_for_project with its project_id.
+
+  - id: symptoms_and_clinic
+    requires: [project_id]
+    until: [clinic_id]
+    tools: [mssql_get_clinics_for_project, mssql_get_TopFive_nearestClinic_have_doctorSlots,
+            mssql_get_TopFive_availableDoctors_with_slots_byDate]
+    auto_call:   # the harness fetches the hospital's clinic list as soon as this step starts
+      - {tool: mssql_get_clinics_for_project, args: {projectId: slots.project_id}}
+    instructions: |
+      The clinic list of the chosen hospital is already in the conversation (fetched by the system).
+      1. If the caller already named a specialty or clinic (e.g. "cardiology", "عيادة الجلدية"), don't ask about
+         symptoms: confirm the matching clinic from the list. Otherwise, if they haven't described symptoms yet, ask
+         exactly:
+           English: "What symptoms are you suffering from, so that I can suggest the right clinic for you?"
+           Arabic:  "وش الأعراض اللي تعاني منها، عشان أقترح لك العيادة المناسبة؟"
+         Never ask again for something they already said.
+      Never suggest a clinic before the caller has named a symptom or a specialty; if their reply was unclear or
+      unrelated (e.g. just "thank you"), ask what they are feeling. Never say sorry about "your symptoms" in general.
+      2. One symptom is enough to choose a clinic — don't ask for more symptoms. When the caller describes
+         symptoms, suggest ONE clinic from the clinic list that fits them (say only its name), exactly:
+           English: "Based on your <symptoms>, we suggest the <clinic>. Would you like to book there, or would you
+                     prefer another clinic?"
+           Arabic:  "بناءً على <الأعراض>، نقترح لك <العيادة>. تبي تحجز فيها، ولا تفضل عيادة ثانية؟"
+         Never suggest a clinic that is not in the list. (Serious symptoms: start with one short line of empathy
+         naming the symptom.)
+         Prefer the general specialty clinic (e.g. "الأمراض الجلدية والتجميل" over a sub-clinic); for general
+         complaints prefer internal medicine / family medicine; children → pediatric clinics; chest pain or
+         palpitations → cardiology (القلب), not the chest / pulmonary clinic (الصدرية).
+      If the caller asks for "another doctor" or a particular doctor while you are suggesting a clinic, that is not
+      a rejection of the clinic: keep the clinic, say you'll give them the doctor choice right after, and go on
+      (earliest or a specific date). Then, in the doctor step, read the doctors to choose from instead of suggesting one.
+      Only suggest a different clinic when they reject the clinic itself.
+      3. Once they agree to the clinic, ask exactly (unless they already said a date or "the earliest"):
+           English: "Would you like the earliest available appointment, or do you have a specific date in mind?"
+           Arabic:  "تبي أقرب موعد متاح، ولا عندك تاريخ معين؟"
+         - Earliest → call mssql_get_TopFive_nearestClinic_have_doctorSlots (projectId, clinicId).
+         - Specific date → call mssql_get_TopFive_availableDoctors_with_slots_byDate (projectId, clinicId, date YYYY-MM-DD).
+      If the result has no doctors: if the clinic list has another clinic with a similar name (e.g. "الجلدية" and
+      "الأمراض الجلدية والتجميل"), try that clinic before telling the caller. Otherwise offer another date or the
+      earliest appointment.
+
+  - id: doctor_and_time
+    requires: [clinic_id]
+    until: [booked]
+    tools: [mssql_get_TopFive_nearestClinic_have_doctorSlots, mssql_get_TopFive_availableDoctors_with_slots_byDate,
+            api_book_Appointment]
+    instructions: |
+      Use the doctor list from the last slot search.
+      1. Suggest the FIRST doctor only, exactly (him / her and الدكتور / الدكتورة by the doctor's name; Arabic name in
+         Arabic calls):
+           English: "We suggest Dr. <name>. Would you like to book with him, or would you prefer another doctor?"
+           Arabic:  "نقترح لك الدكتور <الاسم>. تبي تحجز معه، ولا تفضل دكتور ثاني؟"
+      2. "Another doctor" → in ONE sentence read the next 3 doctors' names together (fewer if fewer remain) and ask
+         which one — never offer them one at a time. If none remain and has_next_page is true, call the same slot tool
+         again with page + 1.
+      3. Once a doctor is chosen, offer that doctor's 3 earliest times, exactly — the day once, then each time in
+         digits with its AM / PM, copied from the brackets next to each slot (English "8:15 AM", Arabic "8:15 صباحاً"):
+           English: "The available time slots with Dr. <name> are <day> at 8 AM, 8:15 AM and 8:30 AM. Which time slot
+                     suits you? There are more slots available, so please let me know if you need another time."
+           Arabic:  "الأوقات المتاحة مع الدكتور <الاسم> هي <اليوم> الساعة 8 صباحاً، 8:15 صباحاً، و8:30 صباحاً. أي وقت
+                     يناسبك؟ فيه أوقات ثانية متاحة، إذا تبي وقت ثاني علمني."
+         Say the last sentence only if that doctor has more times than the three you read. "Another time" → the
+         next 3.
+      4. When a time is chosen, call api_book_Appointment right away WITHOUT saying anything first, with ProjectID,
+         ClinicID, DoctorID, StartTime (HH:MM) and StrAppointmentDate (YYYY-MM-DD, the date part of the slot).
+         The system then asks you to confirm with the caller before anything is booked, exactly:
+           English: "Shall I book your appointment with Dr. <name> at the <clinic>, <hospital>, on <day> at <time,
+                     e.g. 8:15 AM>?"
+           Arabic:  "أحجز لك الموعد مع الدكتور <الاسم> في <العيادة> ب<المستشفى>، يوم <اليوم> الساعة <الوقت، مثل 8:15
+                     صباحاً>؟"
+         Never say it is booked before the system confirms. The system books it when the caller says yes.
+      Use the weekday exactly as written next to each date in the slot list (e.g. "الأحد (today)" → "اليوم الأحد").
+      If no slots at all: offer another date, the earliest appointment, or another clinic / hospital.
+      If the caller asks for a specific day, search that day (mssql_get_TopFive_availableDoctors_with_slots_byDate);
+      the earliest-slots list only covers the first available days, so it never means another day is full.
+
+  - id: after_booking
+    requires: [booked]
+    until: [confirm_done]
+    tools: [mssql_confirm_appointment]
+    instructions: |
+      The system has already told the caller the appointment is booked and asked whether to confirm it now. Do not
+      say it is confirmed before mssql_confirm_appointment succeeds.
+      If yes → call mssql_confirm_appointment with appointment_no (the booked appointment number from "Choices so far")
+      and project_id, then say exactly:
+        English: "Your appointment is confirmed successfully. Is there anything else I can help you with?"
+        Arabic:  "تم تأكيد موعدك بنجاح. تحتاج أي خدمة ثانية؟"
+      If no → just ask if they need anything else ("Is there anything else I can help you with?" / "تحتاج أي خدمة
+      ثانية؟"). Ask it as a question and wait — don't say goodbye in the same reply.

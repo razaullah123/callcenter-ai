@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+**/__pycache__/
+**/*.pyc
+logs/
+evals/reports/
+console/node_modules/
+console/dist/
+models/phrases/
+.git/
+tests/

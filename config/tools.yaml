@@ -1,0 +1,104 @@
+# Tool catalog for the harness (source schemas: mcp_tools.json, server `hmg_tools` / hospital-gateway).
+# The 46 included MCP tools match the production tool set confirmed by the user on 2026-09-24.
+# Tools marked `source: local` are Python tools in this repo (Postgres `projects` / `locations`), not MCP.
+#
+# kind:     read  — safe lookup, no confirmation
+#           write — changes HIS state; the harness requires an explicit verbal "yes" first
+#           send  — sends something to the patient (SMS / WhatsApp / email); requires confirmation
+# confirm:  readback — agent must read the details back and the caller must say yes (harness-enforced)
+#           affirm   — caller's latest reply must be a yes to the agent's question (default for write/send)
+#           none     — no confirmation (default for read)
+# inject:   parameters filled by the harness from session state and HIDDEN from the LLM schema.
+#           This stops the model from guessing patient IDs and forces Arabic responses.
+
+server: hmg_tools
+
+# Parameter-name aliases the server uses inconsistently → one session field.
+inject:
+  patient_id: [PatientID, PatientId, patientId]
+  language_id: [LanguageID, languageId]        # server defaults to 2 (English); we inject 1 (Arabic)
+
+skills:
+  authenticate:
+    mssql_get_patient_info:        { kind: read }   # lookup by caller mobile (ANI) or MRN
+    mssql_get_patient_by_name_dob: { kind: read }   # fallback: name + DOB (YYYY-MM-DD)
+    api_send_otp_request:          { kind: send, confirm: none, timeout_s: 20 }   # verification; WhatsApp send took >10 s live
+    api_verify_otp:                { kind: read }
+    mssql_get_family_members:      { kind: read }   # acting for a family member
+
+  book_appointment:
+    find_hospital_by_name:                                { kind: read, source: local }  # projects.aliases → reference_id, project_name
+    resolve_location:                                     { kind: read, source: local }  # locations: embeddings + aliases → lat, lng
+    mssql_get_Projects_from_Location:                     { kind: read }  # lat/lng → nearby hospitals (top 5, offer 3)
+    mssql_get_clinics_for_project:                        { kind: read, cache_ttl: 3600 }
+    mssql_get_TopFive_nearestClinic_have_doctorSlots:     { kind: read, cache_ttl: 60, timeout_s: 20 }  # earliest, paginated (5/page); live: >16 s under load
+    mssql_get_nearestClinic_have_doctorSlots:             { kind: read, cache_ttl: 60 }  # earliest, full list
+    mssql_get_TopFive_availableDoctors_with_slots_byDate: { kind: read, cache_ttl: 60, timeout_s: 20 }  # specific date, paginated
+    mssql_get_availableDoctors_with_slots_byDate:         { kind: read, cache_ttl: 60 }  # specific date, full list
+    api_book_Appointment:                                 { kind: write, idempotent: true, confirm: readback }
+
+  manage_appointment:
+    mssql_get_upcoming_appointment:        { kind: read }
+    mssql_confirm_appointment:             { kind: write }
+    mssql_cancel_appointment:              { kind: write, confirm: readback }
+    mssql_reschudule_getNearestDoctorSlot: { kind: read }
+    api_Rescheduling_book_appointment:     { kind: write, idempotent: true, confirm: readback }
+
+  send_info:
+    api_send_AppointmentSms:          { kind: send }
+    api_send_AppointmentWhatsapp:     { kind: send }
+    api_send_ProjectLocationSms:      { kind: send }   # NOTE: needs AppointmentNo
+    api_send_ProjectLocationWhatsapp: { kind: send }   # NOTE: needs AppointmentNo
+
+  insurance:
+    api_get_insurance_detail:        { kind: read }
+    api_get_Insurance_UpdateHistory: { kind: read }
+    api_get_insurance_approvals:     { kind: read }
+
+  # Report types map to api_send_medical_report_email.Reporttype:
+  # 1=Lab 2=Radiology 3=Prescriptions 4=Out-Patient 5=In-Patient 6=Discharge 7=Sick Leave 9=Vaccine 10=Dental
+  medical_reports:
+    api_get_patient_lab_reports:            { kind: read }
+    api_get_lab_Result_for_patient:         { kind: read }
+    api_get_radiology_report_for_patient:   { kind: read }
+    api_get_out_patient_medical_report:     { kind: read }
+    api_Get_INPatient_Medical_Report:       { kind: read }
+    api_get_medical_report_for_appointment: { kind: read }
+    api_get_discharge_info:                 { kind: read }
+    api_get_sickleavefor_patient:           { kind: read }
+    api_get_done_vaccines:                  { kind: read }
+    api_Dental_Treatment_Plan:              { kind: read }
+    api_new_medical_report:                 { kind: write, idempotent: true }
+    api_send_medical_report_email:          { kind: send }   # channel_id 1=Email, 2=WhatsApp
+
+  post_visit:
+    mssql_get_appointment_history:       { kind: read }   # which doctor/clinic the patient saw
+    mssql_get_GroupedDoctor_Appoinments: { kind: read }   # past visits grouped by doctor
+    api_get_prescription_appt_list:      { kind: read }
+    api_ask_to_doctor:                   { kind: write }
+    api_get_askingto_returncall:         { kind: write }  # doctor call-back request
+    api_get_askingfor_medicine:          { kind: write }  # question about medication
+    api_get_askingfor_result:            { kind: write }  # question about a result
+    api_get_asking_others:               { kind: write }
+
+  complaints:
+    api_create_complaint:      { kind: write, confirm: readback }
+    api_get_complaint_history: { kind: read }
+
+# Never exposed to the LLM.
+excluded:
+  postgres_ping:            raw DB access / ops tool
+  postgres_list_tables:     raw DB access / ops tool
+  postgres_describe_table:  raw DB access / ops tool
+  postgres_execute_query:   arbitrary SQL — must never reach a voice agent
+  mssql_find_available_slots_help: meta/help tool; routing lives in skills instead
+  mssql_get_SetupId_Projects:      not in production tool set
+  mssql_get_Projects:              not in production tool set
+  mssql_get_Active_Doctors:        not in production tool set
+  mssql_get_doctor_free_slots:     not in production tool set
+  mssql_get_nearest_doctor_have_free_slot: not in production tool set
+  mssql_get_patient_doctor_appointments:   not in production tool set
+  mssql_get_doctor_responses:      not in production tool set
+  api_GetCallRequestType:          not in production tool set
+  api_Outpatient_Appointment_Timeline: not in production tool set
+  api_get_admission_timeline:      not in production tool set

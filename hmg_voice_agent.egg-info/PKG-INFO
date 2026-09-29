@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: hmg-voice-agent
+Version: 0.1.0
+Summary: Voice-to-voice customer care agent for Dr. Sulaiman Al Habib Group (Najdi Arabic)
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.8
+Requires-Dist: pydantic-settings>=2.4
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: mcp>=2.2
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24; extra == "dev"

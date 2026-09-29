@@ -1,0 +1,133 @@
+# Booking suite. Spec: docs/flows/book_appointment.md (fixture HIS: evals/fixtures.py)
+
+- id: book_by_name_nearest_ar
+  suite: booking
+  title: Hospital by name, symptoms → clinic, earliest, first doctor, first time
+  caller:
+    language: ar
+    persona: رجل من الرياض عنده حبوب في وجهه من أسبوعين.
+    goal: يحجز موعد في مستشفى العليا بأقرب موعد، يقبل أول دكتور يقترحونه وأول وقت، ويوافق على تأكيد الموعد.
+    facts: {رقم الجوال: "0551234567", الرمز: "1234", المستشفى: مستشفى العليا, الأعراض: حبوب في الوجه, التاريخ: أقرب موعد}
+    opening: ابي احجز موعد
+  max_turns: 16
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    tools_called: [find_hospital_by_name, mssql_get_clinics_for_project, mssql_get_TopFive_nearestClinic_have_doctorSlots, api_book_Appointment]
+    tools_not_called: [mssql_cancel_appointment]
+    booked: true
+    booked_first_doctor: true
+    slots: {project_id: 12, booked: true}
+    language: ar
+    gender: male
+    max_questions_per_reply: 1
+
+- id: book_by_location_en
+  suite: booking
+  title: English, nearby hospitals from location, specific date
+  caller:
+    language: en
+    persona: A woman living in Al Olaya, Riyadh. She has had a skin rash for a few days.
+    goal: Book at the nearest hospital to her, at a dermatology clinic, on next Tuesday. Accept the first doctor and the first time. When the agent reads back the booking and asks whether to go ahead, say yes. Only after it is booked, if asked whether to confirm the appointment now, say no, you will confirm later.
+    facts: {mobile: "0559876543", code: "1234", location: "Al Olaya, Riyadh", symptoms: skin rash, date: next Tuesday}
+    opening: Hello, I'd like to book an appointment
+  max_turns: 16
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    tools_called: [resolve_location, mssql_get_Projects_from_Location, mssql_get_clinics_for_project, api_book_Appointment]
+    booked: true
+    language: en
+
+- id: book_specific_date_female_ar
+  suite: booking
+  title: Female caller (self-reference), specific date, gender agreement
+  caller:
+    language: ar
+    persona: امرأة تعبانة من صداع قوي يجيها كل يوم من شهر. تتكلم عن نفسها بصيغة المؤنث (أنا تعبانة).
+    goal: تحجز في مستشفى العليا يوم الأحد الجاي، أول دكتور وأول وقت.
+    facts: {رقم الجوال: "0559876543", الرمز: "1234", المستشفى: العليا, الأعراض: صداع يومي من شهر, التاريخ: الأحد الجاي}
+    opening: السلام عليكم، أنا تعبانة وابي احجز موعد
+  max_turns: 16
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    tools_called: [mssql_get_TopFive_availableDoctors_with_slots_byDate, api_book_Appointment]   # hospital by name or by location
+    booked: true
+    gender: female
+
+- id: book_named_specialty_en
+  suite: booking
+  title: Caller names the specialty up front → no symptoms question
+  caller:
+    language: en
+    persona: A man who already knows he needs cardiology.
+    goal: Book a cardiology appointment at Olaya Hospital, the earliest one, first doctor, first time.
+    facts: {mobile: "0551234567", code: "1234", hospital: Olaya Hospital, clinic: cardiology, date: earliest}
+    opening: I want to book an appointment at the cardiology clinic
+  max_turns: 14
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    tools_called: [find_hospital_by_name, mssql_get_TopFive_nearestClinic_have_doctorSlots, api_book_Appointment]
+    booked: true
+    language: en
+
+- id: book_another_doctor_ar
+  suite: booking
+  title: Declines the first doctor → offered more doctors
+  caller:
+    language: ar
+    persona: رجل عنده ألم في الركبة.
+    goal: يحجز في مستشفى العليا بأقرب موعد. يوافق على العيادة اللي يقترحها الموظف. لما الموظف يقترح عليه دكتور، يقول لا أبي دكتور ثاني، وبعدين يختار أول دكتور من الأطباء الثانيين اللي يذكرهم، وياخذ أول وقت، ويوافق على الحجز.
+    facts: {رقم الجوال: "0551234567", الرمز: "1234", المستشفى: العليا, الأعراض: ألم في الركبة}
+    opening: ابي موعد
+  max_turns: 18
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    tools_called: [mssql_get_TopFive_nearestClinic_have_doctorSlots, api_book_Appointment]
+    booked: true
+    booked_first_doctor: false
+    booked_offered_doctor: true
+    say: ["دكتور|دكتورة"]
+  judge_note: When the caller declines the first doctor, the agent reads the next doctors (max 3), keeps the same clinic, then books the chosen doctor after a read-back.
+
+- id: book_decline_readback
+  suite: booking
+  title: Says no at the read-back → nothing is booked
+  caller:
+    language: ar
+    persona: رجل من الرياض عنده حبوب في وجهه.
+    goal: يوافق على كل شي يقترحه الموظف (العيادة، أول دكتور، أول وقت، أقرب موعد) في مستشفى العليا. بس لما الموظف يقرأ عليه تفاصيل الحجز كاملة ويسأله إذا يحجز، يغير رأيه ويقول لا ما ابي أحجز الحين، وبعدين يقول ما يبي شي ثاني.
+    facts: {رقم الجوال: "0551234567", الرمز: "1234", المستشفى: العليا, الأعراض: حبوب في الوجه}
+    opening: ابي احجز موعد
+  max_turns: 16
+  expect:
+    verified: true
+    max_words_per_reply: 50
+    booked: false
+
+- id: book_misheard_answers_ar
+  suite: booking
+  title: Replays a live call's misheard answers — loose identity yes, loose clinic yes, garbled "earliest" — no loops
+  caller:
+    language: ar
+    script: ["ابي احجز موعد", "0551234567", "1234", "حسنا، أنا هنا", "مستشفى العليا", "أعاني من ألم في البطن", "ومناسبة", "أبي أغري في موعد مطاح"]
+  expect:
+    verified: true
+    tools_called: [find_hospital_by_name, mssql_get_TopFive_nearestClinic_have_doctorSlots]
+  judge_note: Speech recognition garbled the caller's answers. The agent should understand them (identity yes, the clinic is fine, the earliest appointment) and move on to suggesting a doctor, without asking the same question repeatedly.
+
+- id: book_near_olaya_en
+  suite: booking
+  title: Replays a live call — "I'm near Olaya" is a location (nearby hospitals), and the read-back names the hospital in English
+  caller:
+    language: en
+    script: ["Hello, I'd like to book an appointment", "0559876543", "1234", "Yes, it's me", "Currently I am located nearby Olaya.", "Olaya Hospital", "I am suffering from knee pain.", "Yes, please.", "The earliest available please", "Yes, please book with her.", "The first time please"]
+  expect:
+    verified: true
+    tools_called: [resolve_location, mssql_get_Projects_from_Location, mssql_get_clinics_for_project]
+    say: ["Olaya Hospital"]
+    never_say: ["Al.?Ula|Ula Hospital"]
+  judge_note: The caller described where they are ("near Olaya") — the agent must search nearby hospitals from that location and let them choose, then use the hospital's English name ("Olaya Hospital") in the English read-back.

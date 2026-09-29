@@ -1,0 +1,15 @@
+# English booking via current location (test mobile 0500000001, OTP 1234)
+Hi, I'd like to book an appointment
+0500000001
+1234
+please suggest the nearest hospital
+I'm in Al Olaya, Riyadh
+the first one
+I have a skin rash
+yes
+next Tuesday
+yes that doctor
+the first time
+yes
+no thanks
+no, that's all

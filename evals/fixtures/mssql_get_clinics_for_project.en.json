@@ -1,0 +1,625 @@
+{
+  "args": {
+    "projectId": 12,
+    "LanguageID": 2
+  },
+  "ok": true,
+  "data": [
+    {
+      "ClinicID": 1,
+      "ClinicDescription": "INTERNAL MEDICINE CLINIC"
+    },
+    {
+      "ClinicID": 2,
+      "ClinicDescription": "PEDIATRIC"
+    },
+    {
+      "ClinicID": 3,
+      "ClinicDescription": "OB-GYNE"
+    },
+    {
+      "ClinicID": 4,
+      "ClinicDescription": "GENERAL SURGERY CLINIC"
+    },
+    {
+      "ClinicID": 5,
+      "ClinicDescription": "DERMATOLOGY AND COSMETOLOGY"
+    },
+    {
+      "ClinicID": 6,
+      "ClinicDescription": "OPHTHALMOLOGY"
+    },
+    {
+      "ClinicID": 7,
+      "ClinicDescription": "ENT CLINIC"
+    },
+    {
+      "ClinicID": 8,
+      "ClinicDescription": "UROLOGY CLINIC"
+    },
+    {
+      "ClinicID": 9,
+      "ClinicDescription": "GASTROENTEROLOGY"
+    },
+    {
+      "ClinicID": 11,
+      "ClinicDescription": "NEUROLOGY CLINIC"
+    },
+    {
+      "ClinicID": 12,
+      "ClinicDescription": "ORTHOPEDICS"
+    },
+    {
+      "ClinicID": 14,
+      "ClinicDescription": "ENDOCRINE CLINIC"
+    },
+    {
+      "ClinicID": 16,
+      "ClinicDescription": "PLASTIC SURGERY CLINIC"
+    },
+    {
+      "ClinicID": 17,
+      "ClinicDescription": "DENTAL CLINIC"
+    },
+    {
+      "ClinicID": 18,
+      "ClinicDescription": "NEURO SURGERY"
+    },
+    {
+      "ClinicID": 19,
+      "ClinicDescription": "RADIOLOGY"
+    },
+    {
+      "ClinicID": 20,
+      "ClinicDescription": "FITNESS & NUTRITION"
+    },
+    {
+      "ClinicID": 21,
+      "ClinicDescription": "CARDIOLOGY"
+    },
+    {
+      "ClinicID": 23,
+      "ClinicDescription": "PHYSIOTHERAPY"
+    },
+    {
+      "ClinicID": 25,
+      "ClinicDescription": "GP"
+    },
+    {
+      "ClinicID": 26,
+      "ClinicDescription": "FAMILY MEDICINE"
+    },
+    {
+      "ClinicID": 27,
+      "ClinicDescription": "SPINAL SURGERY "
+    },
+    {
+      "ClinicID": 28,
+      "ClinicDescription": "SPEECH &REHABILITATION CLINIC"
+    },
+    {
+      "ClinicID": 29,
+      "ClinicDescription": "Health Education"
+    },
+    {
+      "ClinicID": 30,
+      "ClinicDescription": "NEPHROLOGY"
+    },
+    {
+      "ClinicID": 31,
+      "ClinicDescription": "PSYCHIATRY"
+    },
+    {
+      "ClinicID": 32,
+      "ClinicDescription": "PSYCHOLOGY"
+    },
+    {
+      "ClinicID": 35,
+      "ClinicDescription": "VASCULAR"
+    },
+    {
+      "ClinicID": 36,
+      "ClinicDescription": "HAEMATOLOGY"
+    },
+    {
+      "ClinicID": 37,
+      "ClinicDescription": "SKIN AND HAIR CARE"
+    },
+    {
+      "ClinicID": 38,
+      "ClinicDescription": "Allergy, Asthma and Immunology"
+    },
+    {
+      "ClinicID": 39,
+      "ClinicDescription": "Smell Clinic"
+    },
+    {
+      "ClinicID": 40,
+      "ClinicDescription": "IVF CLINIC"
+    },
+    {
+      "ClinicID": 41,
+      "ClinicDescription": "HEADACHE"
+    },
+    {
+      "ClinicID": 42,
+      "ClinicDescription": "Interventional / Therapeutic Radiology Clinic"
+    },
+    {
+      "ClinicID": 43,
+      "ClinicDescription": "PULMONARY - 2"
+    },
+    {
+      "ClinicID": 44,
+      "ClinicDescription": "Podiatry clinic"
+    },
+    {
+      "ClinicID": 50,
+      "ClinicDescription": "RENAL DIALYSIS"
+    },
+    {
+      "ClinicID": 51,
+      "ClinicDescription": "Sports Medicine"
+    },
+    {
+      "ClinicID": 52,
+      "ClinicDescription": "Otology"
+    },
+    {
+      "ClinicID": 55,
+      "ClinicDescription": "PAIN CLINIC"
+    },
+    {
+      "ClinicID": 56,
+      "ClinicDescription": "FNA Clinic (Non-U/S guided)"
+    },
+    {
+      "ClinicID": 57,
+      "ClinicDescription": "EXCELLENCE CLINIC"
+    },
+    {
+      "ClinicID": 59,
+      "ClinicDescription": "Infectious Diseases clinic"
+    },
+    {
+      "ClinicID": 60,
+      "ClinicDescription": "SPA SKIN CARE"
+    },
+    {
+      "ClinicID": 67,
+      "ClinicDescription": "Rehabilitation Clinic"
+    },
+    {
+      "ClinicID": 72,
+      "ClinicDescription": "Dental Employee Clinic"
+    },
+    {
+      "ClinicID": 74,
+      "ClinicDescription": "PEDIATRIC GASTROENTEROLOGIST"
+    },
+    {
+      "ClinicID": 84,
+      "ClinicDescription": "Breast Feeding Clinic"
+    },
+    {
+      "ClinicID": 87,
+      "ClinicDescription": "Hepatology Clinic"
+    },
+    {
+      "ClinicID": 88,
+      "ClinicDescription": "Aesthetic Gynecology"
+    },
+    {
+      "ClinicID": 90,
+      "ClinicDescription": "Hand Surgery Clinic"
+    },
+    {
+      "ClinicID": 93,
+      "ClinicDescription": "IV therapy unit and multivitamins drip"
+    },
+    {
+      "ClinicID": 95,
+      "ClinicDescription": "Maxilliofacial Surgery"
+    },
+    {
+      "ClinicID": 98,
+      "ClinicDescription": "Women Healthcare Clinic"
+    },
+    {
+      "ClinicID": 101,
+      "ClinicDescription": "Wound Care Clinic"
+    },
+    {
+      "ClinicID": 106,
+      "ClinicDescription": "PULMONARY"
+    },
+    {
+      "ClinicID": 107,
+      "ClinicDescription": "RHEUMATOLOGY"
+    },
+    {
+      "ClinicID": 108,
+      "ClinicDescription": "BARIATRICS"
+    },
+    {
+      "ClinicID": 109,
+      "ClinicDescription": "TRAINING CENTER"
+    },
+    {
+      "ClinicID": 110,
+      "ClinicDescription": "SLEEP DISORDER UNIT"
+    },
+    {
+      "ClinicID": 112,
+      "ClinicDescription": "Surgical Oncology Clinic"
+    },
+    {
+      "ClinicID": 113,
+      "ClinicDescription": "Colorectal Oncology Clinic"
+    },
+    {
+      "ClinicID": 114,
+      "ClinicDescription": "LIVER , GALLBLADDER, PANCREATIC CLINIC"
+    },
+    {
+      "ClinicID": 117,
+      "ClinicDescription": "Interventional Radiology Clinic"
+    },
+    {
+      "ClinicID": 118,
+      "ClinicDescription": "Palliative Care Clinic "
+    },
+    {
+      "ClinicID": 119,
+      "ClinicDescription": "Radiation Oncology Clinic"
+    },
+    {
+      "ClinicID": 120,
+      "ClinicDescription": "Pediatric Surgical Oncology Clinic"
+    },
+    {
+      "ClinicID": 121,
+      "ClinicDescription": "Orthopedic Oncology Surgery Clinic"
+    },
+    {
+      "ClinicID": 122,
+      "ClinicDescription": "ENT Oncology Clinic"
+    },
+    {
+      "ClinicID": 123,
+      "ClinicDescription": "Neurosurgery Oncology Clinic"
+    },
+    {
+      "ClinicID": 124,
+      "ClinicDescription": "Urology Oncology Clinic"
+    },
+    {
+      "ClinicID": 125,
+      "ClinicDescription": "Gynecology oncology Clinic"
+    },
+    {
+      "ClinicID": 126,
+      "ClinicDescription": "Thoracic and Foregut Surgery"
+    },
+    {
+      "ClinicID": 127,
+      "ClinicDescription": "Adrenal Surgery Clinic"
+    },
+    {
+      "ClinicID": 128,
+      "ClinicDescription": "Thyroid and Parathyroid Center"
+    },
+    {
+      "ClinicID": 129,
+      "ClinicDescription": "Breast Screening and management"
+    },
+    {
+      "ClinicID": 130,
+      "ClinicDescription": "Pediatric Endocrinology"
+    },
+    {
+      "ClinicID": 131,
+      "ClinicDescription": "Dental Cosmetic clinic"
+    },
+    {
+      "ClinicID": 132,
+      "ClinicDescription": "GERIATRICS CLINIC"
+    },
+    {
+      "ClinicID": 134,
+      "ClinicDescription": "Blood Bank"
+    },
+    {
+      "ClinicID": 147,
+      "ClinicDescription": "Neuro Intervention"
+    },
+    {
+      "ClinicID": 158,
+      "ClinicDescription": "Pediatric Surgery"
+    },
+    {
+      "ClinicID": 180,
+      "ClinicDescription": "Doctor Self Requested"
+    },
+    {
+      "ClinicID": 250,
+      "ClinicDescription": "NEONATAL INTENSIVE CARE UNIT"
+    },
+    {
+      "ClinicID": 252,
+      "ClinicDescription": "Clinical Nutrition"
+    },
+    {
+      "ClinicID": 253,
+      "ClinicDescription": "Laser and Hair Clinic"
+    },
+    {
+      "ClinicID": 254,
+      "ClinicDescription": "Maternal-Fetal Medicine Clinic"
+    },
+    {
+      "ClinicID": 255,
+      "ClinicDescription": "Oncology"
+    },
+    {
+      "ClinicID": 259,
+      "ClinicDescription": "Medical Checkup Clinic"
+    },
+    {
+      "ClinicID": 260,
+      "ClinicDescription": "Pediatric Neurology"
+    },
+    {
+      "ClinicID": 261,
+      "ClinicDescription": "OB-GYNE physiotherapy clinic"
+    },
+    {
+      "ClinicID": 262,
+      "ClinicDescription": "Optometry Clinic"
+    },
+    {
+      "ClinicID": 263,
+      "ClinicDescription": "Occupational Therapy Clinic"
+    },
+    {
+      "ClinicID": 264,
+      "ClinicDescription": "Prosthesis and Orthotic"
+    },
+    {
+      "ClinicID": 501,
+      "ClinicDescription": "LIVECARE Family Medicine - GP"
+    },
+    {
+      "ClinicID": 502,
+      "ClinicDescription": "LIVECARE Infectious Diseases"
+    },
+    {
+      "ClinicID": 503,
+      "ClinicDescription": "LIVECARE GP"
+    },
+    {
+      "ClinicID": 504,
+      "ClinicDescription": "LIVECARE HAJ-GP"
+    },
+    {
+      "ClinicID": 601,
+      "ClinicDescription": "LIVECARE Dermatology"
+    },
+    {
+      "ClinicID": 602,
+      "ClinicDescription": "LIVECARE OB-GYNE"
+    },
+    {
+      "ClinicID": 603,
+      "ClinicDescription": "LIVECARE Pediatric"
+    },
+    {
+      "ClinicID": 604,
+      "ClinicDescription": "LIVECARE Endocrinology"
+    },
+    {
+      "ClinicID": 605,
+      "ClinicDescription": "LIVECARE Cardiology"
+    },
+    {
+      "ClinicID": 606,
+      "ClinicDescription": "LIVECARE ENT"
+    },
+    {
+      "ClinicID": 607,
+      "ClinicDescription": "LIVECARE VASCULAR SURGERY AND DIABETIC FOOT"
+    },
+    {
+      "ClinicID": 608,
+      "ClinicDescription": "LIVECARE OPHTHALMOLOGY"
+    },
+    {
+      "ClinicID": 609,
+      "ClinicDescription": "LIVECARE Pedia Endocrine"
+    },
+    {
+      "ClinicID": 610,
+      "ClinicDescription": "LIVECARE NEUROLOGY"
+    },
+    {
+      "ClinicID": 611,
+      "ClinicDescription": "LIVECARE GASTROENTEROLOGY"
+    },
+    {
+      "ClinicID": 612,
+      "ClinicDescription": "LIVECARE GENERAL SURGERY"
+    },
+    {
+      "ClinicID": 613,
+      "ClinicDescription": "LIVECARE ORTHOPEDICS"
+    },
+    {
+      "ClinicID": 614,
+      "ClinicDescription": "LIVECARE EPILEPSY,NEURO SURGERY AND SPINE"
+    },
+    {
+      "ClinicID": 615,
+      "ClinicDescription": "LIVECARE PSYCHIATRY"
+    },
+    {
+      "ClinicID": 616,
+      "ClinicDescription": "LIVECARE NUTRITION"
+    },
+    {
+      "ClinicID": 617,
+      "ClinicDescription": "LIVECARE BARIATRICS"
+    },
+    {
+      "ClinicID": 618,
+      "ClinicDescription": "LIVECARE PHYSIOTHERAPY"
+    },
+    {
+      "ClinicID": 619,
+      "ClinicDescription": "LIVECARE PLASTIC SURGERY CLINIC"
+    },
+    {
+      "ClinicID": 621,
+      "ClinicDescription": "LIVECARE INTERNAL MEDICINE"
+    },
+    {
+      "ClinicID": 622,
+      "ClinicDescription": "LIVECARE NEPHROLOGIST"
+    },
+    {
+      "ClinicID": 623,
+      "ClinicDescription": "LIVECARE INSULIN PUMP"
+    },
+    {
+      "ClinicID": 624,
+      "ClinicDescription": "LIVECARE UROLOGY"
+    },
+    {
+      "ClinicID": 625,
+      "ClinicDescription": "LIVECARE SPINAL SURGERY"
+    },
+    {
+      "ClinicID": 626,
+      "ClinicDescription": "LIVECARE NEUROLOGY CLINIC"
+    },
+    {
+      "ClinicID": 627,
+      "ClinicDescription": "LIVECARE NEPHROLOGY"
+    },
+    {
+      "ClinicID": 628,
+      "ClinicDescription": "LIVECARE VASCULAR"
+    },
+    {
+      "ClinicID": 629,
+      "ClinicDescription": "LIVECARE HAEMATOLOGY"
+    },
+    {
+      "ClinicID": 630,
+      "ClinicDescription": "LIVECARE RHEUMATOLOGY"
+    },
+    {
+      "ClinicID": 631,
+      "ClinicDescription": "LIVECARE Oncology"
+    },
+    {
+      "ClinicID": 632,
+      "ClinicDescription": "LIVECARE PULMONARY"
+    },
+    {
+      "ClinicID": 633,
+      "ClinicDescription": "LIVECARE NEURO SURGERY"
+    },
+    {
+      "ClinicID": 634,
+      "ClinicDescription": "LIVECARE PAIN CLINIC"
+    },
+    {
+      "ClinicID": 635,
+      "ClinicDescription": "LIVECARE IVF CLINIC"
+    },
+    {
+      "ClinicID": 636,
+      "ClinicDescription": "LIVECARE PLASTIC SURGERY CLINIC"
+    },
+    {
+      "ClinicID": 637,
+      "ClinicDescription": "LIVECARE Andrology Clinic"
+    },
+    {
+      "ClinicID": 638,
+      "ClinicDescription": "LIVECARE SPEECH AND REHABILITATION CLINIC"
+    },
+    {
+      "ClinicID": 639,
+      "ClinicDescription": "Women Healthcare Clinic"
+    },
+    {
+      "ClinicID": 640,
+      "ClinicDescription": "Livecare PEDIATRIC NEUROLOGY"
+    },
+    {
+      "ClinicID": 641,
+      "ClinicDescription": "Livecare PEDIATRIC Cardiology"
+    },
+    {
+      "ClinicID": 642,
+      "ClinicDescription": "Livecare Allergy, Asthma and Immunology"
+    },
+    {
+      "ClinicID": 643,
+      "ClinicDescription": "Livecare SLEEP DISORDER UNIT"
+    },
+    {
+      "ClinicID": 644,
+      "ClinicDescription": "LIVECARE HEADACHE CLINIC"
+    },
+    {
+      "ClinicID": 645,
+      "ClinicDescription": "LIVECARE Pediatric PULMO"
+    },
+    {
+      "ClinicID": 646,
+      "ClinicDescription": "LIVECARE PSYCHOLOGY"
+    },
+    {
+      "ClinicID": 647,
+      "ClinicDescription": "Livecare ER"
+    },
+    {
+      "ClinicID": 648,
+      "ClinicDescription": "LIVECARE Genetics"
+    },
+    {
+      "ClinicID": 649,
+      "ClinicDescription": "Infectious Diseases LIVECARE"
+    },
+    {
+      "ClinicID": 650,
+      "ClinicDescription": "LIVECARE ER Pediatric"
+    },
+    {
+      "ClinicID": 651,
+      "ClinicDescription": "LIVECARE Diabetes clinic"
+    },
+    {
+      "ClinicID": 652,
+      "ClinicDescription": "LIVECARE PEDIATRIC ENT"
+    },
+    {
+      "ClinicID": 653,
+      "ClinicDescription": "LIVECARE ANESTHESIA"
+    },
+    {
+      "ClinicID": 654,
+      "ClinicDescription": "LIVECARE Maternal Fetal - Medicine"
+    },
+    {
+      "ClinicID": 655,
+      "ClinicDescription": "LIVECARE PEDIATRIC GASTROENTEROLOGY"
+    },
+    {
+      "ClinicID": 701,
+      "ClinicDescription": "RRT Clinic"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/schemaform.tsx","./src/api.ts","./src/live.ts","./src/main.tsx","./src/monaco.ts","./src/ui.tsx","./src/pages/calldetail.tsx","./src/pages/calls.tsx","./src/pages/dashboard.tsx","./src/pages/evals.tsx","./src/pages/live.tsx","./src/pages/logs.tsx","./src/pages/playground.tsx","./src/pages/providers.tsx","./src/pages/skills.tsx"],"version":"5.9.3"}
