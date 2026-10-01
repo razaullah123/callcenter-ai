@@ -123,3 +123,27 @@ async def test_a_graph_agent_without_caller_verification():
     await agent.handle("Great, that's all, bye", "en")
     assert out.said[-1] == "Thanks for calling, goodbye." and out.hung_up and s.ended
     assert len(llm.requests) == 3                                                     # no model reply after the end
+
+
+def test_one_flow_lets_its_steps_decide_when_to_verify():
+    """With main_flow, the prompt must not tell the model to verify before the greeting step found the request."""
+    from runtime.harness.context import system_prompt
+    from runtime.harness.session import Session
+    from runtime.skills import SkillSet
+    from runtime.tools import MockMCP
+
+    async def build():
+        mcp = MockMCP()
+        await mcp.start()
+        return executor_for(mcp)
+    import asyncio
+    ex = asyncio.new_event_loop().run_until_complete(build())
+    skills = SkillSet(ex.catalog, {"info": {"SKILL.md": "---\ndescription: x\n---\nHelp.", "flow.yaml": GRAPH}})
+    s = Session(call_id="c")
+    s.flow_skill = s.active_skill = "info"
+    s.pending_intent = "something"
+    prompt = system_prompt(s, skills)
+    assert "Verify before helping" not in prompt and "only when it is time" in prompt
+    assert "handle it after verification" not in prompt and "Current step: ask" in prompt
+    s.flow_skill, s.active_skill = None, "authenticate"
+    assert "Verify before helping" in system_prompt(s, skills)          # step-based agents: unchanged

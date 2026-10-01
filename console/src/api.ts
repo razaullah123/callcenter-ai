@@ -229,6 +229,7 @@ export const api = {
     req<{ id: number; version: number }>(`/api/agents/${encodeURIComponent(id)}/publish`, { method: "POST", body: JSON.stringify({ note }) }),
   activateRelease: (id: string, release: number) =>
     req<{ version: number }>(`/api/agents/${encodeURIComponent(id)}/activate/${release}`, { method: "POST" }),
+  exportAgent: (id: string) => req<Record<string, unknown>>(`/api/agents/${encodeURIComponent(id)}/export`),
   release: (id: string, release: number) =>
     req<{ bundle: Bundle; version: number }>(`/api/agents/${encodeURIComponent(id)}/releases/${release}`),
   routes: () => req<{ pattern: string; agent_id: string; priority: number }[]>("/api/routes"),

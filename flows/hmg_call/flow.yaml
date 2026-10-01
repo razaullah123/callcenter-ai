@@ -9,6 +9,13 @@ variables:
     - other
     description: book = a new appointment; other = any other request they made (cancel, reschedule, results, reports,
       insurance, a complaint …); null if they haven't said what they need
+  confirm_now:
+    type: string
+    enum:
+    - 'yes'
+    - 'no'
+    description: 'the caller''s answer to ''Would you like me to confirm it now?'': yes or no; null if they didn''t
+      answer that question'
   next_step:
     type: string
     enum:
@@ -316,7 +323,7 @@ nodes:
     x: 3600
     y: 200
   extract:
-  - next_step
+  - confirm_now
   tools:
   - find_hospital_by_name
   - resolve_location
@@ -362,6 +369,7 @@ nodes:
     confirm_done: null
     location_lat: null
     location_lng: null
+    confirm_now: null
 - id: goodbye
   type: end
   position:
@@ -524,20 +532,10 @@ edges:
     filled:
     - confirm_done
 - from: booked
-  to: goodbye
+  to: anything_else
   when:
     equals:
-      next_step: done
-- from: booked
-  to: new_booking
-  when:
-    equals:
-      next_step: new_booking
-- from: booked
-  to: other_service
-  when:
-    equals:
-      next_step: other_request
+      confirm_now: 'no'
 - from: anything_else
   to: goodbye
   when:

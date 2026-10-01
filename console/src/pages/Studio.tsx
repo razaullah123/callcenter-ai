@@ -1,17 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type AgentDetail, type Bundle, type FlowGraph } from "../api";
 import SchemaForm from "../SchemaForm";
 import FlowCanvas from "../studio/FlowCanvas";
+import TestPanel, { type LiveEvent } from "../studio/TestPanel";
+import { useTestCall, type TestMode } from "../studio/useTestCall";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
-import Playground from "./Playground";
 
 const JsonDiff = lazy(() => import("../studio/JsonDiff"));      // Monaco only loads when a diff is opened
 
 const KINDS: [string, string][] = [["llm", "Language model"], ["stt", "Speech-to-text"], ["tts", "Voice (text-to-speech)"], ["embedding", "Embeddings"]];
 const CONNECTION_FIELDS = new Set(["api_key", "base_url", "url", "headers", "timeout_s", "token", "secret", "password"]);
-type Tab = "flow" | "settings" | "versions" | "test";
+type Tab = "flow" | "settings" | "versions";
 
 export default function Studio() {
   const { id = "" } = useParams();
@@ -19,66 +20,193 @@ export default function Studio() {
   const q = useQuery({ queryKey: ["agent", id], queryFn: () => api.agent(id) });
   const [tab, setTab] = useState<Tab>("flow");
   const [note, setNote] = useState("");
+  const [menu, setMenu] = useState(false);
+  const [useDraft, setUseDraft] = useState(true);
+  const [panel, setPanel] = useState<"chat" | "logs" | null>(null);
+  const [follow, setFollow] = useState(true);
+  const [active, setActive] = useState<string | null>(null);        // "skill/node" the test call is in
+  const [locate, setLocate] = useState<{ step: string; n: number } | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [logSearch, setLogSearch] = useState<{ text: string; n: number } | null>(null);
+  const call = useTestCall();
+  const menuRef = useRef<HTMLDivElement>(null);
   const refresh = () => { qc.invalidateQueries({ queryKey: ["agent", id] }); qc.invalidateQueries({ queryKey: ["agents"] }); };
   const publish = useMutation({ mutationFn: () => api.publishAgent(id, note), onSuccess: () => { setNote(""); refresh(); } });
   const discard = useMutation({ mutationFn: () => api.discardDraft(id), onSuccess: refresh });
+  const exportAgent = useMutation({
+    mutationFn: () => api.exportAgent(id),
+    onSuccess: data => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      a.download = `${id}.agent.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    },
+  });
+  useEffect(() => {
+    const close = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as globalThis.Node)) setMenu(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+  const onEvent = useCallback((e: LiveEvent) => {
+    if (e.type === "step.transition" && typeof e.data.step === "string") setActive(e.data.step);
+  }, []);
   if (!q.data) return <ErrorBox error={q.error} />;
   const d = q.data;
   const live = d.releases.find(r => r.id === d.agent.published_release_id);
+  const testWithDraft = useDraft && d.has_draft;
+  const startTest = (mode: TestMode) => {
+    setMenu(false); setActive(null); setTab("flow"); setPanel("chat");
+    call.start(mode, { agent: d.agent.id, draft: testWithDraft, language: d.bundle.agent?.default_language });
+  };
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+    <div className="mx-auto max-w-[1500px] space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
           <Link to="/agents" className="text-xs text-muted hover:underline">← Agents</Link>
           <h1 className="text-xl font-semibold">{d.agent.name}</h1>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="font-mono">{d.agent.id}</span>
+            <span className="font-mono">Agent ID: {d.agent.id}</span>
             {live && <Badge tone="good">live: v{live.version}</Badge>}
-            {d.has_draft ? <Badge tone="warn">draft — not live yet{d.agent.draft_updated_at ? ` · ${fmtTime(d.agent.draft_updated_at)}` : ""}</Badge>
-              : <Badge>no unpublished changes</Badge>}
+            {d.has_draft && <Badge tone="warn">draft — not live yet</Badge>}
             {d.routes.map(r => <Badge key={r.pattern} tone="info">route {r.pattern}</Badge>)}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <input id="publish-note" className="w-56" placeholder="What changed?" value={note} onChange={e => setNote(e.target.value)} />
-          <Button onClick={() => discard.mutate()} disabled={!d.has_draft || discard.isPending}>Discard draft</Button>
+          {call.running ? (
+            <div className="flex items-center gap-1">
+              <span className="flex items-center gap-1.5 rounded-lg border border-line bg-panel px-3 py-1.5 text-sm font-medium">
+                {call.mode === "voice" ? "🎙 Browser call" : "💬 Chat"}{testWithDraft ? " · draft" : " · live"}</span>
+              <button title="End the test" onClick={call.stop}
+                className="flex h-8 w-8 items-center justify-center rounded-lg bg-bad text-white hover:opacity-90">◉</button>
+            </div>
+          ) : (
+            <div ref={menuRef} className="relative">
+              <div className="flex overflow-hidden rounded-lg border border-line bg-panel">
+                <button className="px-3 py-1.5 text-sm font-medium hover:bg-soft" onClick={() => startTest("voice")}>▷ Test</button>
+                <button className="border-l border-line px-2 hover:bg-soft" onClick={() => setMenu(m => !m)} aria-label="Test options">▾</button>
+              </div>
+              {menu && (
+                <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-line bg-panel p-1 shadow-lg">
+                  <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-soft" onClick={() => startTest("voice")}>🎙 Browser call</button>
+                  <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-soft" onClick={() => startTest("chat")}>💬 Chat</button>
+                  <div className="my-1 border-t border-line" />
+                  <label className="flex items-center gap-2 px-2 py-1 text-xs">
+                    <input type="checkbox" checked={testWithDraft} disabled={!d.has_draft} onChange={e => setUseDraft(e.target.checked)} />
+                    Test the draft {d.has_draft ? "" : "(no draft)"}</label>
+                </div>
+              )}
+            </div>
+          )}
+          <Button onClick={() => { setTab("flow"); setPanel(p => (p === "logs" ? null : "logs")); }}>〰 Live call logs</Button>
+          <input id="publish-note" className="w-44" placeholder="What changed?" value={note} onChange={e => setNote(e.target.value)} />
           <Button kind="primary" onClick={() => publish.mutate()} disabled={!d.has_draft || publish.isPending}>
-            {publish.isPending ? "Publishing…" : "Publish"}</Button>
+            {publish.isPending ? "Publishing…" : "⇪ Publish"}</Button>
+          <span className={`rounded-lg border px-3 py-1.5 text-sm ${dirty ? "border-warn/50 text-warn" : "border-good/40 text-good"}`}>
+            {dirty ? "● Unsaved changes" : "✓ Saved"}</span>
+          <Button onClick={() => exportAgent.mutate()} disabled={exportAgent.isPending}>⤓ Export</Button>
+          {d.has_draft && <Button kind="ghost" onClick={() => discard.mutate()} disabled={discard.isPending}>Discard draft</Button>}
         </div>
       </div>
-      <ErrorBox error={publish.error ?? discard.error} />
+      <ErrorBox error={publish.error ?? discard.error ?? exportAgent.error} />
 
       <div className="flex gap-1 border-b border-line">
-        {([["flow", "Flow"], ["settings", "Settings"], ["versions", "Versions"], ["test", "Test call"]] as [Tab, string][]).map(([t, l]) => (
+        {([["flow", "Flow"], ["settings", "Settings"], ["versions", "Versions"]] as [Tab, string][]).map(([t, l]) => (
           <button key={t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === t ? "border-accent font-medium" : "border-transparent text-muted hover:text-ink"}`}>{l}</button>
         ))}
       </div>
 
-      {tab === "flow" && <FlowTab d={d} onSaved={refresh} />}
+      {tab === "flow" && <FlowTab d={d} onSaved={refresh} onDirty={setDirty} active={active} follow={follow}
+        locate={locate} onViewLogs={node => { setLogSearch({ text: node, n: Date.now() }); setPanel("logs"); }}
+        onOpenSettings={() => setTab("settings")} onInspect={() => setPanel(null)}
+        aside={panel && <TestPanel call={call} tab={panel} onTab={setPanel} follow={follow} onFollow={setFollow} presetSearch={logSearch}
+          onEvent={onEvent} onLocate={step => setLocate({ step, n: Date.now() })} onClose={() => setPanel(null)} />} />}
       {tab === "settings" && <SettingsTab key={JSON.stringify(d.bundle).length} d={d} onSaved={refresh} />}
       {tab === "versions" && <VersionsTab d={d} onChanged={refresh} />}
-      {tab === "test" && <TestTab d={d} />}
     </div>
   );
 }
 
-function FlowTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
+function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLogs, onOpenSettings, onInspect }: {
+  d: AgentDetail; onSaved: () => void; onDirty: (dirty: boolean) => void; active: string | null; follow: boolean;
+  locate: { step: string; n: number } | null; aside: React.ReactNode; onViewLogs: (node: string) => void;
+  onOpenSettings: () => void; onInspect: () => void;
+}) {
+  const lib = useQuery({ queryKey: ["tool-library"], queryFn: api.toolLibrary });
+  const toolInfo = Object.fromEntries((lib.data?.tools ?? []).map(t => [t.name, {
+    description: t.description, kind: t.policy.kind, source: t.source === "mcp" && t.server ? `mcp · ${t.server}` : t.source }]));
   const withFlow = Object.entries(d.skills).filter(([, s]) => s.flow?.graph);
   const [skill, setSkill] = useState(withFlow[0]?.[0] ?? "");
   const save = useMutation({ mutationFn: (g: FlowGraph) => api.putDraftSkill(d.agent.id, skill, { graph: g }), onSuccess: onSaved });
+  // follow the call into whichever skill it is in
+  const [activeSkill, activeNode] = active ? [active.split("/")[0], active.split("/").slice(1).join("/")] : [null, null];
+  useEffect(() => { if (follow && activeSkill && activeSkill !== skill && d.skills[activeSkill]?.flow?.graph) setSkill(activeSkill); },
+    [activeSkill, follow]);  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const target = locate?.step.split("/")[0];
+    if (target && target !== skill && d.skills[target]?.flow?.graph) setSkill(target);
+  }, [locate]);  // eslint-disable-line react-hooks/exhaustive-deps
   const s = d.skills[skill];
   if (!withFlow.length) return <Card><div className="text-sm text-muted">No skill of this agent has a flow yet.</div></Card>;
+  const locateHere = locate && locate.step.split("/")[0] === skill ? { id: locate.step.split("/").slice(1).join("/"), n: locate.n } : null;
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted">Skill</span>
-        {withFlow.map(([k]) => <Button key={k} kind={k === skill ? "default" : "ghost"} onClick={() => setSkill(k)}>{k}</Button>)}
+        {withFlow.map(([k]) => <Button key={k} kind={k === skill ? "default" : "ghost"} onClick={() => setSkill(k)}>
+          {k}{activeSkill === k ? " ●" : ""}</Button>)}
         {s && <span className="text-xs text-muted">· {s.library} v{s.version}</span>}
       </div>
       <ErrorBox error={save.error} />
       {s?.flow?.graph && <FlowCanvas key={`${skill}:${s.version}`} graph={s.flow.graph} converted={!!s.flow.converted} tools={d.tools}
-        skills={Object.keys(d.skills).filter(k => k !== "_persona")} saving={save.isPending} onSave={g => save.mutate(g)} />}
+        skills={Object.keys(d.skills).filter(k => k !== "_persona")} saving={save.isPending} onSave={g => save.mutate(g)}
+        onDirty={onDirty} aside={aside} activeNode={activeSkill === skill ? activeNode : null} follow={follow} locate={locateHere}
+        toolInfo={toolInfo} onViewLogs={onViewLogs} onInspect={onInspect}
+        globalPanel={<GlobalPanel d={d} skill={skill} onSaved={onSaved} onOpenSettings={onOpenSettings} />} />}
+    </div>
+  );
+}
+
+function GlobalPanel({ d, skill, onSaved, onOpenSettings }: {
+  d: AgentDetail; skill: string; onSaved: () => void; onOpenSettings: () => void;
+}) {
+  // Rules for the whole call: the agent's persona (every skill) and this skill's own text (every step of its flow)
+  const persona = d.skills._persona?.files["SKILL.md"] ?? "";
+  const flowText = d.skills[skill]?.files["SKILL.md"] ?? "";
+  const [p, setP] = useState(persona);
+  const [f, setF] = useState(flowText);
+  const save = useMutation({
+    mutationFn: async () => {
+      if (p !== persona) await api.putDraftSkill(d.agent.id, "_persona", { files: { "SKILL.md": p }, note: "persona (global settings)" });
+      if (f !== flowText) await api.putDraftSkill(d.agent.id, skill, { files: { ...d.skills[skill].files, "SKILL.md": f }, note: "skill prompt (global settings)" });
+    },
+    onSuccess: onSaved,
+  });
+  const llm = d.bundle.models.llm?.settings ?? {}, tts = d.bundle.models.tts?.settings ?? {}, stt = d.bundle.models.stt?.settings ?? {};
+  const k = d.bundle.knobs;
+  return (
+    <div className="h-full space-y-4 overflow-y-auto p-3">
+      <div className="text-sm font-semibold">Global settings</div>
+      <label className="block"><div className="mb-1 text-xs font-medium">System prompt · persona <span className="font-normal text-muted">(the whole agent)</span></div>
+        <textarea id="global-persona" rows={9} dir="auto" className="w-full font-mono text-[11px]" value={p} onChange={e => setP(e.target.value)} />
+        <div className="text-[11px] text-muted">How the agent speaks: tone, language rules, what it never does. Sections ## ar / ## en per language.</div></label>
+      <label className="block"><div className="mb-1 text-xs font-medium">Flow prompt · {skill} <span className="font-normal text-muted">(every step of this flow)</span></div>
+        <textarea id="global-flow" rows={7} dir="auto" className="w-full font-mono text-[11px]" value={f} onChange={e => setF(e.target.value)} />
+        <div className="text-[11px] text-muted">Shared rules for every node, so they aren't repeated in each node's prompt.</div></label>
+      <ErrorBox error={save.error} />
+      <Button kind="primary" onClick={() => save.mutate()} disabled={(p === persona && f === flowText) || save.isPending}>
+        {save.isPending ? "Saving…" : "Save to draft"}</Button>
+      <div className="space-y-1 rounded-lg border border-line p-2 text-[11px]">
+        {[["Language model", String(llm.model ?? d.bundle.models.llm?.provider ?? "—")],
+          ["Speech-to-text", String(stt.model ?? "—")],
+          ["Voice", `${tts.voice_ar ?? "—"} (ar) · ${tts.voice_en ?? "—"} (en)`],
+          ["Languages", (d.bundle.agent?.languages ?? []).join(", ")],
+          ["Caller verification", k.require_verification === false ? "off" : "on"],
+          ["Interruptions (barge-in)", k.voice_barge_in_confirm === false ? "immediate" : "confirmed by words"],
+          ["Red-flag symptoms", String(k.red_flag_mode ?? "—")]].map(([a, b]) => (
+          <div key={a} className="flex justify-between gap-2"><span className="text-muted">{a}</span><span className="text-right">{b}</span></div>))}
+        <Button kind="ghost" onClick={onOpenSettings}>Models, voice and behaviour →</Button>
+      </div>
     </div>
   );
 }
@@ -257,20 +385,6 @@ function VersionsTab({ d, onChanged }: { d: AgentDetail; onChanged: () => void }
             : <ErrorBox error={diff.error} />}
         </Card>
       )}
-    </div>
-  );
-}
-
-function TestTab({ d }: { d: AgentDetail }) {
-  const [draft, setDraft] = useState(d.has_draft);
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3 text-sm">
-        <label className="flex items-center gap-2"><input type="radio" checked={draft} onChange={() => setDraft(true)} disabled={!d.has_draft} /> the draft</label>
-        <label className="flex items-center gap-2"><input type="radio" checked={!draft} onChange={() => setDraft(false)} /> the live version</label>
-        <span className="text-xs text-muted">Test calls are logged in Call history like any other call.</span>
-      </div>
-      <Playground key={String(draft)} agent={d.agent.id} draft={draft} embedded />
     </div>
   );
 }
