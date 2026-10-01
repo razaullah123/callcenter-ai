@@ -8,7 +8,7 @@ Pre-hooks (before a tool runs):
                         caller says yes after the agent read the details back
 Post-hooks (after a tool runs):
   • auth bookkeeping — patient lookup → candidates (PHI hidden from the LLM), OTP sent / verified
-  • booking bookkeeping — remember chosen hospital / clinic lists for prefetch
+  • tool-specific bookkeeping / grounding — named hooks from the tool policy (packs)
 Output filter: strips formatting the TTS would read aloud.
 """
 
@@ -23,7 +23,9 @@ from runtime.tools import ToolContext, ToolDef, ToolError, ToolResult
 from .nlu.dates import resolve_date, resolve_dob
 from .nlu.gender import gender_from_name
 from .nlu.numbers import extract_code, normalize_mobile
-from .session import PendingAction, Session
+from runtime.tools.hooks import run_tool_hooks
+
+from .session import VERIFY_SKILL, PendingAction, Session
 
 MAX_OTP_ATTEMPTS = 3
 MAX_MATCH_ATTEMPTS = 2
@@ -37,44 +39,59 @@ class NeedsConfirmation(ToolError):
 
 
 class Policy:
-    def __init__(self, session: Session) -> None:
+    """Harness rules around every tool call. Tools are known only by their policy: a role the harness drives
+    (identity.lookup / identity.send_code / identity.verify_code), confirmation mode, the claim they back, and
+    named hooks (runtime.tools.hooks, defined in packs) for anything tool-specific."""
+
+    def __init__(self, session: Session, catalog=None) -> None:
         self.s = session
+        self.catalog = catalog
+
+    def _role_tool(self, role: str) -> str:
+        t = self.catalog.by_role(role) if self.catalog is not None else None
+        return t.name if t else role
 
     # ---------------- pre-hooks ----------------
 
     async def pre(self, tool: ToolDef, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         s = self.s
-        if not s.auth.verified and tool.skill != "authenticate":
+        if not s.auth.verified and tool.skill != VERIFY_SKILL:
             raise ToolError("the caller must be verified (mobile number + OTP) before anything else")
 
-        if tool.name == "mssql_get_patient_info":
+        if tool.role == "identity.lookup":
+            arg = tool.role_args.get("mobile", "mobileNo")
             # The caller's own words first; the model's value only when the number was spread over turns.
-            mobile = normalize_mobile(s.last_user_text) or normalize_mobile(str(args.get("mobileNo", "")))
+            mobile = normalize_mobile(s.last_user_text) or normalize_mobile(str(args.get(arg, "")))
             if not mobile:
                 raise ToolError("the mobile number is incomplete; ask the caller to repeat it (10 digits starting 05)")
             args = {k: v for k, v in args.items() if k not in ("patientId",)}
-            args["mobileNo"] = mobile
-        elif tool.name == "api_verify_otp":
-            code = extract_code(str(args.get("Otp", ""))) or extract_code(s.last_user_text)
+            args[arg] = mobile
+        elif tool.role == "identity.verify_code":
+            arg = tool.role_args.get("code", "Otp")
+            code = extract_code(str(args.get(arg, ""))) or extract_code(s.last_user_text)
             if not code:
                 raise ToolError("the code is incomplete; ask the caller to repeat the code digit by digit")
-            args["Otp"] = code
-        elif tool.name == "api_send_otp_request":
-            args.setdefault("Channel", "WhatsApp")
-            if s.memory.get("otp_sent") == (s.turn_id, args["Channel"]):
+            args[arg] = code
+        elif tool.role == "identity.send_code":
+            arg = tool.role_args.get("channel", "Channel")
+            args.setdefault(arg, tool.role_args.get("default_channel", "WhatsApp"))
+            if s.memory.get("otp_sent") == (s.turn_id, args[arg]):
                 raise ToolError("the code was already sent this turn — just ask the caller for it")
-            sent_at = s.memory.get("otp_sent_at", {}).get(args["Channel"])
+            sent_at = s.memory.get("otp_sent_at", {}).get(args[arg])
             if sent_at and time.monotonic() - sent_at < OTP_RESEND_AFTER_S:
-                raise ToolError(f"a code was sent by {args['Channel']} {int(time.monotonic() - sent_at)} s ago — ask "
+                raise ToolError(f"a code was sent by {args[arg]} {int(time.monotonic() - sent_at)} s ago — ask "
                                 "the caller for it; resend only by SMS if they say it didn't arrive")
 
         args = normalize_datetime_args(args)
-        self._check_grounded(tool.name, args)
+        # grounding and other tool-specific checks (named hooks, e.g. only offered hospitals / slots)
+        args = run_tool_hooks("pre", tool, args, s, ctx=ctx)
         if ctx.extra.get("confirmed_action") == tool.name:
             return args
         if tool.confirm == "readback":
             pending = s.pending_action
-            if pending and pending.tool == tool.name and pending.args == _llm_view(args) and s.last_reply == "yes":
+            # the yes must answer the read-back: a later turn than the one that parked it (a "yes, 8:30" that
+            # chose the time is not a confirmation — live call 2026-09-29 booked without any read-back)
+            if pending and pending.tool == tool.name and pending.args == _llm_view(args) and s.last_reply == "yes"                     and s.turn_id > pending.turn_id:
                 return args
             s.pending_action = PendingAction(tool.name, _llm_view(args), s.turn_id)
             raise NeedsConfirmation(
@@ -88,42 +105,6 @@ class Policy:
             s.last_reply = "consumed"   # one "yes" authorizes one action
         return args
 
-    def _check_grounded(self, name: str, args: dict[str, Any]) -> None:
-        """Booking IDs must come from tool results in this call — the model may not pick a hospital, clinic,
-        doctor or time on the caller's behalf."""
-        m = self.s.memory
-        if name == "mssql_get_clinics_for_project":
-            if int(args.get("projectId", -1)) not in m.get("offered_projects", set()):
-                raise ToolError("ask the caller which hospital they want first (by name with find_hospital_by_name, "
-                                "or by location with resolve_location); never choose a hospital for them")
-        elif name in ("mssql_get_TopFive_nearestClinic_have_doctorSlots",
-                      "mssql_get_TopFive_availableDoctors_with_slots_byDate"):
-            # The date question must have been asked and answered — but the *model* reads the answer. (A regex on
-            # the transcript blocked a correct "earliest" call when STT misheard "أقرب موعد متاح" as "موعد مطاح" and
-            # the agent looped on the question.)
-            asked_at = m.get("date_question_turn")
-            answered = asked_at is not None and self.s.turn_id > asked_at
-            if name.startswith("mssql_get_TopFive_nearest") and not m.get("requested_date") \
-                    and not m.get("wants_earliest") and not answered:
-                raise ToolError("first ask the caller exactly: \"Would you like the earliest available appointment, or "
-                                "do you have a specific date in mind?\" (Arabic: \"تبي أقرب موعد متاح، ولا عندك تاريخ "
-                                "معين؟\") and wait for the answer")
-            if name.startswith("mssql_get_TopFive_nearest") and (day := m.get("requested_date")):
-                # The earliest-slots list only covers the first days with slots: it can't say a requested day is full.
-                raise ToolError(f"the caller asked for {day}: call mssql_get_TopFive_availableDoctors_with_slots_byDate "
-                                f"with date {day} instead. Never say a day has no appointments without searching "
-                                "that day.")
-            clinics = m.get("clinics") or {}
-            if int(args.get("clinicId", -1)) not in clinics:
-                raise ToolError("use a clinicId from the clinic list of the chosen hospital "
-                                "(call mssql_get_clinics_for_project first)")
-        elif name == "api_book_Appointment":
-            offered = m.get("offered_slots") or {}
-            times = offered.get(int(args.get("DoctorID", -1)), {}).get(str(args.get("StrAppointmentDate", ""))[:10])
-            if not times or str(args.get("StartTime", "")) not in times:
-                raise ToolError("that doctor / day / time was not offered; offer times from the latest slot search "
-                                "and book only what the caller chose")
-
     # ---------------- post-hooks ----------------
 
     async def post(self, tool: ToolDef, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> None:
@@ -132,22 +113,25 @@ class Policy:
             # e.g. "you have another appointment in the same time": nothing was done — never count it as done
             result.ok = False
             result.error = str(result.data.get("message") or "the hospital system refused the request")[:300]
-        handler = getattr(self, f"_after_{tool.name}", None)
-        if handler:
-            handler(args, result, ctx)
+        role = {"identity.lookup": self._after_identity_lookup, "identity.send_code": self._after_identity_send_code,
+                "identity.verify_code": self._after_identity_verify_code}.get(tool.role or "")
+        if role:
+            role(args, result, ctx, tool)
+        run_tool_hooks("post", tool, args, self.s, result=result, ctx=ctx)
         self._audit(tool, args, result, ctx)
         if tool.kind in ("write", "send") or not result.ok:
             self.s.tool_failures = 0 if result.ok else self.s.tool_failures + 1
 
-    def _after_mssql_get_patient_info(self, args, result: ToolResult, ctx: ToolContext) -> None:
+    def _after_identity_lookup(self, args, result: ToolResult, ctx: ToolContext, tool: ToolDef) -> None:
         a = self.s.auth
-        a.mobile_no = args.get("mobileNo")
+        a.mobile_no = args.get(tool.role_args.get("mobile", "mobileNo"))
         a.lookup_attempts += 1
         records = patient_records(result.data) if result.ok else []
         a.candidates = records
+        send = self._role_tool("identity.send_code")
         if len(records) == 1:
             self._select(records[0], ctx)
-            result.content = _j({"records_found": 1, "next": "send the OTP with api_send_otp_request (WhatsApp)"})
+            result.content = _j({"records_found": 1, "next": f"send the OTP with {send} (WhatsApp)"})
         elif len(records) > 1:
             result.content = _j({"records_found": len(records), "next": "ask the caller for their date of birth "
                                  "and first name, then call select_patient. Never read out any record details."})
@@ -156,9 +140,9 @@ class Policy:
                                  "number and ask them to contact the support team to register first"})
         result.data = {"records_found": len(records)}   # keep PHI out of logs / history
 
-    def _after_api_send_otp_request(self, args, result: ToolResult, ctx: ToolContext) -> None:
+    def _after_identity_send_code(self, args, result: ToolResult, ctx: ToolContext, tool: ToolDef) -> None:
         if result.ok:
-            channel = args.get("Channel", "WhatsApp")
+            channel = args.get(tool.role_args.get("channel", "Channel"), "WhatsApp")
             self.s.auth.otp_sent = True
             self.s.auth.otp_channel = channel
             self.s.memory["otp_sent"] = (self.s.turn_id, channel)
@@ -166,7 +150,7 @@ class Policy:
             result.content = _j({"sent": True, "channel": channel,
                                  "next": f"tell the caller a verification code was sent by {channel} and ask for it"})
 
-    def _after_api_verify_otp(self, args, result: ToolResult, ctx: ToolContext) -> None:
+    def _after_identity_verify_code(self, args, result: ToolResult, ctx: ToolContext, tool: ToolDef) -> None:
         a = self.s.auth
         if result.ok and otp_success(result.data):
             a.verified = True
@@ -178,55 +162,18 @@ class Policy:
             left = MAX_OTP_ATTEMPTS - a.otp_attempts
             result.ok = False
             result.error = "otp_invalid"
+            send = self._role_tool("identity.send_code")
             result.content = _j({"verified": False, "attempts_left": max(left, 0),
                                  "next": "tell the caller the code is incorrect and ask them to repeat it, or offer "
-                                         "to resend it by SMS (api_send_otp_request with Channel SMS)"
+                                         f"to resend it by SMS ({send} with Channel SMS)"
                                  if left > 0 else "attempts exhausted: transfer to a human agent"})
         result.data = {"verified": a.verified}
-
-    def _after_find_hospital_by_name(self, args, result: ToolResult, ctx: ToolContext) -> None:
-        d = result.data if isinstance(result.data, dict) else {}
-        found = [d["hospital"]] if d.get("status") == "match" else d.get("candidates", [])
-        self.s.memory.setdefault("offered_projects", set()).update(int(h["project_id"]) for h in found)
-
-    def _after_mssql_get_Projects_from_Location(self, args, result: ToolResult, ctx: ToolContext) -> None:
-        d = result.data if isinstance(result.data, dict) else {}
-        self.s.memory.setdefault("offered_projects", set()).update(
-            int(p["ProjectID"]) for p in d.get("projects", []) if p.get("ProjectID") is not None)
-
-    def _after_slots(self, args, result: ToolResult, ctx: ToolContext) -> None:
-        from runtime.tools.summarizers import doctor_rows
-        if not (result.ok and isinstance(result.data, dict)):
-            return
-        offered = self.s.memory.setdefault("offered_slots", {})
-        for doc in doctor_rows(result.data):
-            days = offered.setdefault(doc["doctor_id"], {})
-            for day, times in doc["slots"].items():
-                days.setdefault(day[:10], set()).update(times)
-
-    _after_mssql_get_TopFive_nearestClinic_have_doctorSlots = _after_slots
-    _after_mssql_get_TopFive_availableDoctors_with_slots_byDate = _after_slots
-
-    def _after_mssql_get_clinics_for_project(self, args, result: ToolResult, ctx: ToolContext) -> None:
-        if result.ok and isinstance(result.data, list):
-            self.s.slots["project_id"] = args.get("projectId")
-            # the hospital's names from the reference table — also when it was picked from the nearby list
-            from runtime.tools.summarizers import _reference_names
-            names = _reference_names().get(int(args.get("projectId") or -1))
-            if names:
-                self.s.slots["project_name"], self.s.slots["project_name_en"] = names.get("ar"), names.get("en")
-            self.s.memory["clinics"] = {int(c["ClinicID"]): str(c.get("ClinicDescriptionN", "")).strip()
-                                        for c in result.data if isinstance(c, dict) and "ClinicID" in c}
-
-    def _after_api_book_Appointment(self, args, result: ToolResult, ctx: ToolContext) -> None:
-        if result.ok:
-            self.s.slots.update({"booked": True, "appointment": result.data, "project_id": args.get("ProjectID")})
 
     def _audit(self, tool: ToolDef, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> None:
         """PDPL audit: record every call that touches a patient's data (patient id injected) or changes / sends
         something. Kept in its own table, not in the general logs."""
         patient_id = next((args[k] for k in ("PatientID", "PatientId", "patientId") if k in args), None)
-        if patient_id is None and tool.kind == "read" and tool.name != "mssql_get_patient_info":
+        if patient_id is None and tool.kind == "read" and tool.role != "identity.lookup":
             return
         from runtime.control.audit import AUDIT
         AUDIT.record(call_id=self.s.call_id, tool=tool.name, kind=tool.kind,
@@ -246,7 +193,7 @@ class Policy:
         matches = [r for r in by_dob if name and any(n.split() and _first_token_match(name, n) for n in r["names"])]
         if len(matches) == 1:
             self._select(matches[0], ctx)
-            return {"matched": True, "next": "send the OTP with api_send_otp_request (WhatsApp)"}
+            return {"matched": True, "next": f"send the OTP with {self._role_tool('identity.send_code')} (WhatsApp)"}
         left = MAX_MATCH_ATTEMPTS - a.match_attempts
         return {"matched": False, "attempts_left": max(left, 0),
                 "next": "ask the caller to repeat their date of birth (day, month, year) and first name"
@@ -260,7 +207,7 @@ class Policy:
             or record.get("first_name")
         a.full_name = (record.get("full_name_en") if english else record.get("full_name_ar")) \
             or record.get("full_name_en") or record.get("full_name_ar") or a.first_name
-        ctx.patient_id = a.patient_id   # lets api_send_otp_request inject PatientId
+        ctx.patient_id = a.patient_id   # lets the send-code tool inject the patient id
         if record.get("gender"):
             # The file's gender (0.8): above the neutral threshold; the caller's own words (0.9) still win.
             self.s.gender.observe((record["gender"], 0.8), "patient_record")
@@ -303,29 +250,27 @@ _MD = re.compile(r"[*_#`>|~]+|^\s*[-•]\s+|\[(.*?)\]\((.*?)\)", re.MULTILINE)
 _EMOJI = re.compile("[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F000-\U0001F2FF\uFE00-\uFE0F\u20E3]")
 
 
-# "It's done" claims, and which successful tool call backs each one.
+# "It's done" claims. A tool's policy says which claim a success makes true (`backs`).
 _CLAIMS = [
-    ("book_Appointment", re.compile(r"تم (ال)?حجز|حجزت لك|\b(is|has been|have been|was) booked\b|\bI('ve| have) booked\b",
-                                    re.IGNORECASE)),
-    ("confirm_appointment", re.compile(r"تم (ال)?تأكيد|تم (ال)?تاكيد|أكدت لك|\b(is|has been|was) confirmed\b|"
-                                       r"\bI('ve| have) confirmed\b", re.IGNORECASE)),
-    ("cancel", re.compile(r"تم (ال)?إلغاء|تم (ال)?الغاء|ألغيت|\b(is|has been|was) cancell?ed\b|\bI('ve| have) cancell?ed\b",
+    ("booked", re.compile(r"تم (ال)?حجز|حجزت لك|\b(is|has been|have been|was) booked\b|\bI('ve| have) booked\b",
                           re.IGNORECASE)),
-    ("api_send_", re.compile(r"تم (ال)?إرسال (تفاصيل|الموقع|الموعد|التقرير)|أرسلت لك (تفاصيل|الموقع|الموعد|التقرير)|"
-                             r"\bI('ve| have) sent you the (details|location|report)|\b(has been|was) sent to you\b",
-                             re.IGNORECASE)),
+    ("confirmed", re.compile(r"تم (ال)?تأكيد|تم (ال)?تاكيد|أكدت لك|\b(is|has been|was) confirmed\b|"
+                             r"\bI('ve| have) confirmed\b", re.IGNORECASE)),
+    ("cancelled", re.compile(r"تم (ال)?إلغاء|تم (ال)?الغاء|ألغيت|\b(is|has been|was) cancell?ed\b|"
+                             r"\bI('ve| have) cancell?ed\b", re.IGNORECASE)),
+    ("sent", re.compile(r"تم (ال)?إرسال (تفاصيل|الموقع|الموعد|التقرير)|أرسلت لك (تفاصيل|الموقع|الموعد|التقرير)|"
+                        r"\bI('ve| have) sent you the (details|location|report)|\b(has been|was) sent to you\b",
+                        re.IGNORECASE)),
 ]
 
 
-def unbacked_claim(sentence: str, done_tools: set[str], pending_tool: str | None) -> str | None:
-    """The claim a sentence makes that no successful tool call backs (or whose action is still awaiting the
-    caller's yes). The agent must never say it booked / confirmed / cancelled / sent something it didn't."""
-    for marker, pattern in _CLAIMS:
-        if pattern.search(sentence):
-            pending = pending_tool is not None and marker in pending_tool
-            done = any(marker in t and "otp" not in t for t in done_tools)
-            if pending or not done:
-                return marker
+def unbacked_claim(sentence: str, done: set[str], pending: str | None) -> str | None:
+    """The claim a sentence makes ("booked", "sent" …) that no successful tool call backs (or whose action still
+    awaits the caller's yes). The agent must never say it booked / confirmed / cancelled / sent something it didn't.
+    `done`: claims backed by successful calls this call; `pending`: the claim of the parked action."""
+    for claim, pattern in _CLAIMS:
+        if pattern.search(sentence) and (claim == pending or claim not in done):
+            return claim
     return None
 
 
@@ -358,14 +303,21 @@ def is_reasoning_leak(sentence: str) -> bool:
     return bool(_REASONING.search(sentence)) or is_garbled(sentence)
 
 
+# Real two-letter Arabic words — "وش حي أو مدينة تقيمين فيها؟" is a normal question, not a fragment soup.
+_AR_SHORT_WORDS = set("وش في من لا أو او يا هل ما لك له لي هو هي إن ان أن عن مع حي ذا بس إذ اذ قد لم لن كم إي اي ثم".split())
+
+
 def is_garbled(sentence: str) -> bool:
     """gpt-oss sometimes degenerates ("أقرب تو تو ت ت لل الت الت ك ك… حا"): mostly 1–2 letter fragments."""
     words = re.findall(r"[^\W\d_]+", sentence)
     if len(words) < 6:
         return False
-    # English is full of real 2-letter words ("is it ok by me"): only 1-letter Latin fragments count
-    short = sum(len(w) <= (2 if "؀" <= w[0] <= "ۿ" else 1) for w in words)
-    return short / len(words) >= 0.4
+
+    def fragment(w: str) -> bool:
+        if "؀" <= w[0] <= "ۿ":
+            return len(w) == 1 or (len(w) == 2 and w not in _AR_SHORT_WORDS)
+        return len(w) == 1          # English is full of real 2-letter words ("is it ok by me")
+    return sum(map(fragment, words)) / len(words) >= 0.4
 
 
 _BRACKETED = re.compile(r"\[[^\]\n]{0,40}\]")

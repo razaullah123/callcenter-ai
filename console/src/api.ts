@@ -48,6 +48,7 @@ export type JsonSchema = {
 };
 export type ProvidersResponse = {
   available: Record<string, string[]>; schemas: Record<string, Record<string, JsonSchema>>; active_version: number;
+  agent?: { id: string; name: string; release_id: number | null; version: number | null };
   config: AgentConfig; runtime_knobs: Record<string, string>;
   /** What each running provider actually uses (stored overrides + .env defaults); secrets only as "set". */
   effective?: Record<string, Record<string, unknown>>;
@@ -64,6 +65,81 @@ export type SkillDetail = {
 };
 export type ToolRow = {
   name: string; skill: string; kind: string; source: string; confirm: string; cache_ttl: number; description: string;
+};
+
+export type SecretRef = { secret: string };
+export const isSecretRef = (v: unknown): v is SecretRef =>
+  !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 1 &&
+  typeof (v as SecretRef).secret === "string";
+export type Connection = {
+  id: string; kind: string; type: string; name: string; settings: Record<string, unknown>;
+  updated_at: string | null; updated_by: string | null; used_by: string[];
+};
+export type ConnectionsResponse = {
+  connections: Connection[]; available: Record<string, string[]>;
+  schemas: Record<string, Record<string, JsonSchema>>; connection_fields: string[];
+};
+export type SecretRow = { name: string; hint: string; updated_by: string | null; updated_at: string; used_by: string[] };
+export type SecretsResponse = {
+  encryption: boolean; secrets: SecretRow[]; missing: { name: string; used_by: string[] }[];
+};
+
+export type ToolPolicy = {
+  kind: "read" | "write" | "send"; confirm?: string; timeout_s?: number; cache_ttl?: number; idempotent?: boolean;
+  role?: string; args?: Record<string, string>; hooks?: string[]; backs?: string; success_line?: string;
+  source?: "mcp" | "local" | "http"; description?: string; input_schema?: Record<string, unknown>;
+  http?: { method?: string; url?: string; headers?: Record<string, unknown> };
+};
+export type LibraryTool = {
+  name: string; group: string; source: string; policy: ToolPolicy; description: string;
+  input_schema: Record<string, unknown> | null; server: string | null; available: boolean; used_by: string[];
+};
+export type McpServer = {
+  id: string; name: string; url: string; transport: string; auth: Record<string, string>; enabled: boolean;
+  status: { connected: boolean; tools: string[]; error: string | null };
+};
+export type ToolLibrary = {
+  servers: McpServer[]; tools: LibraryTool[];
+  discovered: { name: string; server: string | null; description: string; input_schema: Record<string, unknown> | null }[];
+  choices: { kinds: string[]; confirm: string[]; roles: string[]; claims: string[]; sources: string[]; methods: string[];
+             phrases: string[]; hooks: Record<string, string[]>; groups: string[] };
+  agents: { id: string; name: string }[];
+};
+
+export type AgentSummary = {
+  id: string; name: string; description: string; version: number | null; published_at: string | null;
+  has_draft: boolean; draft_updated_at: string | null; routes: string[]; default: boolean; skills: string[];
+};
+export type FlowNode = {
+  id: string; type: string; instructions?: string; tools?: string[]; auto_call?: Record<string, unknown>[];
+  extract?: string[]; set?: Record<string, unknown>; tool?: string; args?: Record<string, unknown>; reason?: string;
+  say?: Record<string, string>; skill?: string; position?: { x: number; y: number };
+};
+export type FlowEdge = { from: string; to: string; when?: Record<string, unknown>; on?: string };
+export type FlowGraph = {
+  start: string; nodes: FlowNode[]; edges: FlowEdge[]; common_tools?: string[];
+  infer?: Record<string, unknown>; reset?: Record<string, unknown>;
+  variables?: Record<string, { type?: string; enum?: string[]; description?: string }>;
+};
+export type Bundle = {
+  schema: number; agent: { name: string; languages: string[]; default_language: string };
+  models: Record<string, { provider?: string; type?: string; settings?: Record<string, unknown> }>;
+  knobs: Record<string, unknown>; voice: { stt_hint?: Record<string, string> };
+  phrases: Record<string, unknown>; skills: Record<string, number | { skill: string; version: number }>;
+  tools: Record<string, unknown>;
+};
+export type AgentDetail = {
+  agent: { id: string; name: string; description: string; published_release_id: number | null;
+           draft_updated_at: string | null; draft_updated_by: string | null };
+  has_draft: boolean; bundle: Bundle; tools: string[];
+  skills: Record<string, { library: string; version: number; files: Record<string, string>;
+                           flow: { converted?: boolean; graph?: FlowGraph; errors?: string[]; error?: string } | null;
+                           versions: { version: number; created_at: string; author: string; note: string }[] }>;
+  releases: { id: number; version: number; author: string; note: string; created_at: string }[];
+  routes: { pattern: string; agent_id: string; priority: number }[];
+  connections: { id: string; kind: string; type: string; name: string }[];
+  schemas: Record<string, Record<string, JsonSchema>>;
+  choices: { knobs: Record<string, string>; phrases: string[]; library_skills: string[] };
 };
 
 const TOKEN_KEY = "hmg-console-token";
@@ -126,6 +202,64 @@ export const api = {
   skillVersion: (name: string, v: number) =>
     req<{ files: Record<string, string> }>(`/api/skills/${name}/versions/${v}`),
   tools: () => req<ToolRow[]>("/api/tools"),
+  connections: () => req<ConnectionsResponse>("/api/connections"),
+  createConnection: (body: { kind: string; type: string; name: string; settings: Record<string, unknown> }) =>
+    req<{ id: string }>("/api/connections", { method: "POST", body: JSON.stringify(body) }),
+  updateConnection: (id: string, body: { name?: string; settings: Record<string, unknown> }) =>
+    req<{ id: string; used_by: string[] }>(`/api/connections/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(body) }),
+  deleteConnection: (id: string) =>
+    req<{ deleted: string }>(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  testConnection: (id: string) =>
+    req<Record<string, unknown>>(`/api/connections/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  agents: () => req<AgentSummary[]>("/api/agents"),
+  agent: (id: string) => req<AgentDetail>(`/api/agents/${encodeURIComponent(id)}`),
+  createAgent: (body: { name: string; description?: string; copy_from?: string }) =>
+    req<{ id: string }>("/api/agents", { method: "POST", body: JSON.stringify(body) }),
+  renameAgent: (id: string, body: { name: string; description: string }) =>
+    req<{ id: string }>(`/api/agents/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteAgent: (id: string) => req<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  putDraft: (id: string, bundle: Bundle) =>
+    req<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/draft`, { method: "PUT", body: JSON.stringify({ bundle }) }),
+  putDraftSkill: (id: string, key: string, body: { graph?: FlowGraph; files?: Record<string, string>; note?: string }) =>
+    req<{ skill: string; version: number }>(`/api/agents/${encodeURIComponent(id)}/draft/skills/${encodeURIComponent(key)}`,
+      { method: "PUT", body: JSON.stringify(body) }),
+  discardDraft: (id: string) => req<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/draft/discard`, { method: "POST" }),
+  publishAgent: (id: string, note: string) =>
+    req<{ id: number; version: number }>(`/api/agents/${encodeURIComponent(id)}/publish`, { method: "POST", body: JSON.stringify({ note }) }),
+  activateRelease: (id: string, release: number) =>
+    req<{ version: number }>(`/api/agents/${encodeURIComponent(id)}/activate/${release}`, { method: "POST" }),
+  release: (id: string, release: number) =>
+    req<{ bundle: Bundle; version: number }>(`/api/agents/${encodeURIComponent(id)}/releases/${release}`),
+  routes: () => req<{ pattern: string; agent_id: string; priority: number }[]>("/api/routes"),
+  putRoute: (body: { pattern: string; agent_id: string; priority?: number }) =>
+    req<{ ok: boolean }>("/api/routes", { method: "PUT", body: JSON.stringify(body) }),
+  deleteRoute: (pattern: string) => req<{ ok: boolean }>(`/api/routes?pattern=${encodeURIComponent(pattern)}`, { method: "DELETE" }),
+  toolLibrary: () => req<ToolLibrary>("/api/tool-library"),
+  putTool: (name: string, body: { group: string; policy: ToolPolicy; agents?: string[]; note?: string }) =>
+    req<{ name: string; releases: unknown[] }>(`/api/tool-library/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify(body) }),
+  deleteTool: (name: string, agent?: string) =>
+    req<Record<string, unknown>>(`/api/tool-library/${encodeURIComponent(name)}${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`,
+      { method: "DELETE" }),
+  testTool: (name: string, args: Record<string, unknown>) =>
+    req<{ ok: boolean; ms: number; data?: unknown; error?: string }>(`/api/tool-library/${encodeURIComponent(name)}/test`,
+      { method: "POST", body: JSON.stringify({ args }) }),
+  discoverServer: (body: Record<string, unknown>) =>
+    req<{ ok: boolean; tools?: { name: string; description: string }[]; error?: string }>("/api/mcp-servers/discover",
+      { method: "POST", body: JSON.stringify(body) }),
+  addServer: (body: Record<string, unknown>) =>
+    req<{ id: string }>("/api/mcp-servers", { method: "POST", body: JSON.stringify(body) }),
+  updateServer: (id: string, body: Record<string, unknown>) =>
+    req<{ id: string }>(`/api/mcp-servers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteServer: (id: string) =>
+    req<{ deleted: string }>(`/api/mcp-servers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  secrets: () => req<SecretsResponse>("/api/secrets"),
+  putSecret: (name: string, value: string) =>
+    req<{ name: string; used_by: string[]; note: string | null }>(`/api/secrets/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify({ value }) }),
+  deleteSecret: (name: string) =>
+    req<{ deleted: string }>(`/api/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string, params: Record<string, string | undefined> = {}) {

@@ -80,7 +80,8 @@ async def rig():
     executor = await build_tooling(mock)
     llm, out = ScriptedLLM(), Output()
     session = Session(call_id="call-1")
-    agent = Agent(session, executor, llm, SimpleSkillSet(executor.catalog), out, bus.bind(), filler_after_s=0.05)
+    agent = Agent(session, executor, llm, SimpleSkillSet(executor.catalog, hooks={"book_appointment": ["hmg.booking"]}), out, bus.bind(),
+                  filler_after_s=0.05)
     yield agent, llm, mock, out, events
     await bus.stop()
 
@@ -621,6 +622,7 @@ def test_gibberish_and_loose_date_answers():
     assert is_garbled("تبي أقرب تاريخ تاريخ … أقرب تو تو ت ت لل الت الت ك ك… حا")
     assert not is_garbled("I am on it, is it ok by me to go to it?")
     assert not is_garbled("بناءً على ألم الركبة، نقترح لك عيادة العظام. تبي تحجز فيها، ولا تفضل عيادة ثانية؟")
+    assert not is_garbled("وش حي أو مدينة تقيمين فيها؟")          # real 2-letter words (eval 2026-09-29: dead air)
     assert loose_earliest("أول دكتور") and loose_earliest("ما يفرق") and loose_earliest("any is fine")
     assert not loose_earliest("الأحد الجاي") and not loose_earliest("لا")
 
@@ -804,3 +806,22 @@ async def test_extraction_not_called_when_the_pattern_already_matched(rig):
     await agent.handle("0551234567")
     assert not any("mobile" in (r["messages"][0].get("content") or "")[:60] and "Saudi mobile" in r["messages"][0]["content"]
                    for r in llm.requests)                                    # no extraction round trip
+
+
+async def test_a_yes_before_the_read_back_does_not_book():
+    """The caller's "yes, 8:30" that chose the time must not confirm the booking the model then parks."""
+    from runtime.harness.policy import NeedsConfirmation, Policy
+    from runtime.harness.session import Session
+    from runtime.tools import ToolContext, ToolDef
+    s = Session(call_id="c")
+    s.auth.verified = True
+    book = ToolDef(name="book", skill="x", kind="write", source="mcp", description="", input_schema={},
+                   confirm="readback")
+    p, ctx, args = Policy(s), ToolContext(call_id="c"), {"DoctorID": 1, "StartTime": "08:30"}
+    s.turn_id, s.last_reply = 5, "yes"
+    with pytest.raises(NeedsConfirmation):
+        await p.pre(book, dict(args), ctx)            # parks it
+    with pytest.raises(NeedsConfirmation):
+        await p.pre(book, dict(args), ctx)            # same turn, same "yes": still not confirmed
+    s.turn_id, s.last_reply = 6, "yes"                # the answer to the read-back
+    assert (await p.pre(book, dict(args), ctx))["StartTime"] == "08:30"

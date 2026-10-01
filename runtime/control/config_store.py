@@ -1,6 +1,6 @@
-"""Versioned agent configuration: which STT / LLM / TTS / embedding provider (and settings) new calls use,
-plus runtime knobs. Each save creates a new version; calls snapshot the active version when they start,
-so a change never affects a call in progress. Secrets are never returned to the console.
+"""Provider-config helpers for the console: build providers from a config, mask / merge secrets, validate, and
+report what each running provider actually uses. (Where the config lives — agents, releases, provider records —
+is runtime.platform; each call runs on the release its agent had when the call started.)
 
     {"stt": {"provider": "groq", "settings": {"model": "whisper-large-v3"}},
      "llm": {"provider": "groq", "settings": {...}}, "tts": {...}, "embedding": {...},
@@ -14,24 +14,14 @@ from typing import Any
 
 from pydantic import SecretStr
 
-from runtime.data.db import get_pool
+from runtime.platform.bundle import KNOBS, knob_errors
 from runtime.providers import LLMProvider, STTProvider, TTSProvider, create, schemas
 
 log = logging.getLogger(__name__)
 
 KINDS = ("stt", "llm", "tts", "embedding")
-RUNTIME_KNOBS = {  # name → (type, default taken from Settings at load)
-    "red_flag_mode": str, "voice_end_silence_ms": int, "voice_barge_in_ms": int, "voice_filler_after_s": float,
-    "llm_hedge_after_s": float,
-    "ivr_barge_in_grace_ms": int, "ivr_chunk_ms": int, "ivr_transfer_destination": str,
-}
+RUNTIME_KNOBS = KNOBS      # per-agent knobs: name → type
 MASK = "••••••"
-
-
-def default_config(settings) -> dict[str, Any]:
-    cfg = {k: {"provider": "groq" if k != "embedding" else "custom_http", "settings": {}} for k in KINDS}
-    cfg["runtime"] = {k: getattr(settings, k) for k in RUNTIME_KNOBS}
-    return cfg
 
 
 @dataclass
@@ -112,14 +102,7 @@ def validate(config: dict[str, Any]) -> list[str]:
             create(kind, spec.get("provider", ""), _drop_empty(spec.get("settings") or {}))
         except Exception as e:
             errors.append(f"{kind}: {e}")
-    for k, v in (config.get("runtime") or {}).items():
-        if k not in RUNTIME_KNOBS:
-            errors.append(f"runtime: unknown setting {k}")
-        else:
-            try:
-                RUNTIME_KNOBS[k](v)
-            except (TypeError, ValueError):
-                errors.append(f"runtime: {k} must be {RUNTIME_KNOBS[k].__name__}")
+    errors += [e.replace("knobs:", "runtime:") for e in knob_errors(config.get("runtime") or {})]
     return errors
 
 
@@ -137,50 +120,3 @@ def merge_secrets(new: dict[str, Any], old: dict[str, Any]) -> dict[str, Any]:
                 else:
                     n.pop(k)
     return out
-
-
-async def load_active(settings) -> tuple[int, dict[str, Any]]:
-    pool = await get_pool()
-    async with pool.acquire() as c:
-        row = await c.fetchrow("SELECT version, config FROM agent_config WHERE active ORDER BY version DESC LIMIT 1")
-        if row is None:
-            cfg = default_config(settings)
-            version = await c.fetchval("INSERT INTO agent_config (author, note, config, active) "
-                                       "VALUES ('system', 'initial (from .env)', $1::jsonb, true) RETURNING version",
-                                       json.dumps(cfg))
-            return version, cfg
-    cfg = row["config"] if isinstance(row["config"], dict) else json.loads(row["config"])
-    return row["version"], cfg
-
-
-async def save(config: dict[str, Any], author: str, note: str) -> int:
-    pool = await get_pool()
-    async with pool.acquire() as c, c.transaction():
-        await c.execute("UPDATE agent_config SET active = false WHERE active")
-        return await c.fetchval("INSERT INTO agent_config (author, note, config, active) "
-                                "VALUES ($1, $2, $3::jsonb, true) RETURNING version",
-                                author, note, json.dumps(config, default=_json_default))
-
-
-async def history(limit: int = 30) -> list[dict[str, Any]]:
-    pool = await get_pool()
-    async with pool.acquire() as c:
-        rows = await c.fetch("SELECT version, created_at, author, note, active FROM agent_config "
-                             "ORDER BY version DESC LIMIT $1", limit)
-    return [dict(r) for r in rows]
-
-
-async def activate(version: int) -> dict[str, Any] | None:
-    pool = await get_pool()
-    async with pool.acquire() as c, c.transaction():
-        row = await c.fetchrow("SELECT config FROM agent_config WHERE version = $1", version)
-        if row is None:
-            return None
-        await c.execute("UPDATE agent_config SET active = (version = $1)", version)
-    return row["config"] if isinstance(row["config"], dict) else json.loads(row["config"])
-
-
-def _json_default(o):
-    if isinstance(o, SecretStr):
-        return o.get_secret_value()
-    return str(o)

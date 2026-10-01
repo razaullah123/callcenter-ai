@@ -128,3 +128,31 @@ NOT_REGISTERED = {
     "ar": "ما لقيت ملف مسجل بهالرقم. يرجى التواصل مع فريق الدعم لتسجيل بياناتك أولاً.",
     "en": "I couldn't find a registered file with this number. Please contact the support team to register first.",
 }
+
+
+# ---------------------------------------------------------------- per-agent phrases
+# Everything above is the default set. An agent release may override any of these names (same shape: {"ar", "en"}
+# dicts, lists or strings); the harness reads phrases through the agent's `Phrases`, never the constants directly.
+PHRASE_NAMES = ("GREETING", "PERSONA", "READBACK_REASK", "READBACK_UNCLEAR_NOTE", "REPLY_IN_ENGLISH", "AUTH_STEPS",
+                "GREETING_NOTE", "RED_FLAG_NOTE", "SLOW_TOOL_FILLER", "STILL_WORKING", "FILLER", "FALLBACK",
+                "OTP_CODE_QUESTION", "BOOKED_LINE", "IDENTITY_CONFIRMED_NOTE", "IDENTITY_QUESTION", "IDENTITY_STEP",
+                "TRANSLITERATE", "NOT_THE_PATIENT", "HANDOFF_SHORT", "HANDOFF", "NOT_REGISTERED")
+
+
+class Phrases:
+    """An agent's fixed lines and notes: release overrides on top of the defaults in this module."""
+
+    def __init__(self, overrides: dict | None = None) -> None:
+        self._overrides = {k: v for k, v in (overrides or {}).items() if k in PHRASE_NAMES}
+
+    def __getattr__(self, name: str):
+        if name.startswith("_") or name not in PHRASE_NAMES:
+            raise AttributeError(name)
+        return self._overrides.get(name, globals()[name])
+
+    def export(self) -> dict:
+        return {n: getattr(self, n) for n in PHRASE_NAMES}
+
+    @staticmethod
+    def defaults() -> dict:
+        return {n: globals()[n] for n in PHRASE_NAMES}

@@ -40,7 +40,9 @@ def _env(attr: str):
 _default_api_key = _env("groq_api_key")
 
 
-def _client(api_key: SecretStr, timeout: float) -> AsyncGroq:
+def _client(api_key: SecretStr | None, timeout: float) -> AsyncGroq:
+    if api_key is None:
+        raise RuntimeError("no Groq API key: set the provider's api_key (Console → Secrets / Connections)")
     key = api_key.get_secret_value()
     if key not in _clients:
         _clients[key] = AsyncGroq(api_key=key, timeout=timeout, max_retries=1)
@@ -48,7 +50,7 @@ def _client(api_key: SecretStr, timeout: float) -> AsyncGroq:
 
 
 class _GroqBase(BaseModel):
-    api_key: SecretStr = Field(default_factory=_default_api_key, description="Groq API key")
+    api_key: SecretStr | None = Field(default_factory=_default_api_key, description="Groq API key")
     timeout_s: float = Field(10.0, description="Request timeout (seconds)")
 
 

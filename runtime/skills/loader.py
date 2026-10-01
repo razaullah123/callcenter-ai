@@ -29,7 +29,7 @@ from runtime.config import ROOT_DIR
 from runtime.text.arabic import normalize
 from runtime.tools import Catalog
 
-from .flow import Flow
+from .graph import DONE, Graph, Node
 
 SKILLS_DIR = ROOT_DIR / "skills"
 NON_ROUTABLE = {"_persona", "home", "authenticate"}
@@ -47,8 +47,9 @@ class Skill:
     status: str = "ready"
     hidden_tools: list[str] = field(default_factory=list)
     extra_tools: list[str] = field(default_factory=list)   # tools from other catalog groups
+    turn_hooks: list[str] = field(default_factory=list)    # named turn hooks (runtime.tools.hooks, from packs)
     body: dict[str, str] = field(default_factory=dict)   # "ar" / "en" / "*"
-    flow: Flow | None = None
+    flow: Graph | None = None
     path: Path | None = None
 
     def text(self, lang: str) -> str:
@@ -69,35 +70,69 @@ def parse_skill_md(text: str, name: str) -> Skill:
                  keywords=list(meta.get("keywords", [])),
                  routable=meta.get("routable", name not in NON_ROUTABLE), status=meta.get("status", "ready"),
                  hidden_tools=list(meta.get("hidden_tools", [])), extra_tools=list(meta.get("extra_tools", [])),
+                 turn_hooks=list(meta.get("turn_hooks", [])),
                  body=sections)
 
 
-class FileSkillSet:
-    def __init__(self, catalog: Catalog, directory: Path = SKILLS_DIR) -> None:
-        self.catalog = catalog
-        self.directory = directory
-        self.skills: dict[str, Skill] = {}
-        self.reload()
+SKILL_FILES = ("SKILL.md", "flow.yaml")
 
-    def reload(self) -> None:
+
+def read_skill_dir(directory: Path = SKILLS_DIR) -> dict[str, dict[str, str]]:
+    """skills/<name>/{SKILL.md, flow.yaml} → {name: {file: text}} (the repo copy: seed / export)."""
+    out = {}
+    for md in sorted(directory.glob("*/SKILL.md")):
+        out[md.parent.name] = {f: (md.parent / f).read_text(encoding="utf-8")
+                               for f in SKILL_FILES if (md.parent / f).exists()}
+    return out
+
+
+def call_facts(session: Any) -> dict[str, Any]:
+    """What edges can test besides the collected values: the harness's view of the call right now."""
+    a = session.auth
+    parsed = session.memory.get("parsed") or {}
+    return {"verified": a.verified, "identity_confirmed": a.identity_confirmed,
+            "mobile_heard": bool(parsed.get("mobile")), "code_heard": bool(parsed.get("code")),
+            "files_found": len(a.candidates) if a.lookup_attempts else None,
+            "otp_exhausted": a.otp_attempts >= 3, "awaiting_confirmation": session.pending_action is not None,
+            "_turn": session.turn_id}
+
+
+class SkillSet:
+    """An agent's skills, built from their files (a release's frozen skill versions, or the repo folder)."""
+
+    def __init__(self, catalog: Catalog, files: dict[str, dict[str, str]], phrases: Any = None) -> None:
+        self.catalog = catalog
+        self.phrases = phrases          # the agent's fixed lines (harness.prompts.Phrases); None → defaults
+        self.skills: dict[str, Skill] = {}
+        self._load(files)
+
+    def _load(self, files: dict[str, dict[str, str]]) -> None:
         skills = {}
-        for md in sorted(self.directory.glob("*/SKILL.md")):
-            skill = parse_skill_md(md.read_text(encoding="utf-8"), md.parent.name)
-            skill.path = md.parent
-            if (flow_file := md.parent / "flow.yaml").exists():
-                skill.flow = Flow.load(flow_file)
+        for folder, texts in sorted(files.items()):
+            skill = parse_skill_md(texts["SKILL.md"], folder)
+            if (flow := texts.get("flow.yaml", "")).strip():
+                skill.flow = Graph.parse(flow)          # step flows are converted to graphs
+                if errors := skill.flow.errors():
+                    raise ValueError(f"skill {skill.name}: flow: {'; '.join(errors)}")
             skills[skill.name] = skill
         self.skills = skills
         self._validate()
 
     def _validate(self) -> None:
+        from runtime.tools.hooks import unknown_hooks
         known = set(self.catalog.tools)
         for s in self.skills.values():
             referenced = (s.flow.all_tools() if s.flow else set()) | set(s.extra_tools) | set(s.hidden_tools)
             if unknown := referenced - known:
                 raise ValueError(f"skill {s.name}: references unknown tools {sorted(unknown)}")
+            if missing := unknown_hooks(turn=set(s.turn_hooks)):
+                raise ValueError(f"skill {s.name}: unknown turn hooks {missing}")
 
     # ---------------- SkillSet protocol ----------------
+
+    def turn_hook_names(self, skill: str) -> list[str]:
+        s = self.skills.get(skill)
+        return list(s.turn_hooks) if s else []
 
     def persona(self, lang: str) -> str | None:
         p = self.skills.get("_persona")
@@ -106,14 +141,32 @@ class FileSkillSet:
     def routable(self) -> dict[str, str]:
         return {s.name: s.description for s in self.skills.values() if s.routable}
 
+    # ---- flow graph (the skill's conversation state lives in session.memory["graph"][skill])
+
+    def graph_state(self, skill: str, session: Any) -> dict[str, Any]:
+        return session.memory.setdefault("graph", {}).setdefault(skill, {})
+
+    def node(self, skill: str, session: Any) -> Node | None:
+        """The skill's current node, after following every edge whose condition now holds."""
+        s = self.skills.get(skill)
+        if s is None or s.flow is None:
+            return None
+        return s.flow.current(self.graph_state(skill, session), session.slots, session.auth.stage,
+                              call_facts(session))
+
+    def graph(self, skill: str) -> Graph | None:
+        s = self.skills.get(skill)
+        return s.flow if s else None
+
     def instructions(self, skill: str, session: Any) -> str:
         s = self.skills.get(skill)
         if s is None:
             return ""
         lang = session.language.language
         text = s.text(lang)
-        if s.flow and (step := s.flow.current(session.slots, session.auth.stage)):
-            text += f"\n\n### Current step: {step.id}\n{step.instructions}"
+        node = self.node(skill, session)
+        if node is not None and node.id != DONE and node.type == "conversation":
+            text += f"\n\n### Current step: {node.id}\n{node.instructions}"
         return text
 
     def tools(self, skill: str, session: Any) -> set[str]:
@@ -121,20 +174,18 @@ class FileSkillSet:
         if s is None:
             return set()
         if s.flow:
-            step = s.flow.current(session.slots, session.auth.stage)
-            return set(s.flow.common_tools) | set(step.tools if step else [])
+            node = self.node(skill, session)
+            return set(s.flow.common_tools) | set(node.tools if node else []) | ({node.tool} if node and node.tool else set())
         return ({t.name for t in self.catalog.for_skill(skill)} | set(s.extra_tools)) - set(s.hidden_tools)
 
     def current_step(self, skill: str, session: Any) -> str | None:
-        s = self.skills.get(skill)
-        if s and s.flow and (step := s.flow.current(session.slots, session.auth.stage)):
-            return step.id
-        return None
+        node = self.node(skill, session)
+        return node.id if node is not None and node.id != DONE else None
 
     def auto_calls(self, skill: str, session: Any) -> list[tuple[str, dict[str, Any], bool]]:
         s = self.skills.get(skill)
-        return s.flow.auto_calls(session.slots, session.auth.stage, session.memory.get("parsed")) \
-            if s and s.flow else []
+        node = self.node(skill, session)
+        return s.flow.auto_calls(node, session.slots, session.memory.get("parsed")) if node is not None else []
 
     def on_tool(self, skill: str, tool: str, args: dict[str, Any], result: Any, ok: bool, session: Any) -> dict:
         s = self.skills.get(skill)
@@ -156,3 +207,14 @@ class FileSkillSet:
             return None
         best = sorted(scores.items(), key=lambda kv: -kv[1])
         return best[0][0] if len(best) == 1 or best[0][1] > best[1][1] else None
+
+
+class FileSkillSet(SkillSet):
+    """Skills straight from a folder (tests, offline tools, evals on the repo copy)."""
+
+    def __init__(self, catalog: Catalog, directory: Path = SKILLS_DIR, phrases: Any = None) -> None:
+        self.directory = directory
+        super().__init__(catalog, read_skill_dir(directory), phrases)
+
+    def reload(self) -> None:
+        self._load(read_skill_dir(self.directory))

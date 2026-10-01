@@ -7,7 +7,7 @@ from typing import Protocol
 
 from runtime.tools import Catalog
 
-from .session import Session
+from .session import VERIFY_SKILL, Session
 
 
 class SkillSet(Protocol):
@@ -29,9 +29,10 @@ class SimpleSkillSet:
     catalog: Catalog
     descriptions: dict[str, str] = field(default_factory=dict)
     texts: dict[str, str] = field(default_factory=dict)
+    hooks: dict[str, list[str]] = field(default_factory=dict)      # skill → turn hook names
 
     def routable(self) -> dict[str, str]:
-        skills = {t.skill for t in self.catalog.tools.values()} - {"authenticate"}
+        skills = {t.skill for t in self.catalog.tools.values()} - {VERIFY_SKILL}
         return {s: self.descriptions.get(s, s.replace("_", " ")) for s in sorted(skills)}
 
     def instructions(self, skill: str, session: Session) -> str:
@@ -39,3 +40,6 @@ class SimpleSkillSet:
 
     def tools(self, skill: str, session: Session) -> set[str]:
         return {t.name for t in self.catalog.for_skill(skill)}
+
+    def turn_hook_names(self, skill: str) -> list[str]:
+        return self.hooks.get(skill, [])

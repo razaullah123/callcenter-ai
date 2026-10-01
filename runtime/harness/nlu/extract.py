@@ -151,3 +151,81 @@ async def extract(llm: LLMProvider, field: str, text: str, *, today: date, offer
     obj = _json(out)
     return Extraction(field, validate(field, obj, today=today, offered=offered), obj,
                       round((time.perf_counter() - t0) * 1000, 1))
+
+
+# ---------------------------------------------------------------- flow graphs: edge questions + node variables
+
+GRAPH_PROMPT = _STT + """
+You read ONE caller reply in a phone call and fill in a small JSON form. Do not reply to the caller.
+1. "answers": for each question below, true only if the caller's latest words clearly mean it, else false.
+2. "values": for each variable below, the value the caller gave in these words, or null if they didn't give it.
+   Use exactly one of the allowed values when a variable lists them; dates as YYYY-MM-DD (today is {today}).
+Questions:
+{questions}
+Variables:
+{variables}
+Reply with JSON only: {"answers": {"<question>": true|false, ...}, "values": {"<name>": value|null, ...}}"""
+
+
+def _variable_line(name: str, spec: dict[str, Any]) -> str:
+    parts = [f"- {name} ({spec.get('type', 'string')})"]
+    if spec.get("enum"):
+        parts.append("allowed: " + ", ".join(map(str, spec["enum"])))
+    if spec.get("description"):
+        parts.append(str(spec["description"]))
+    return " — ".join(parts)
+
+
+def check_value(spec: dict[str, Any], value: Any) -> Any:
+    """A value the model returned for a declared variable, or None if it doesn't fit the declaration."""
+    if value is None or value == "":
+        return None
+    kind = spec.get("type", "string")
+    try:
+        if kind == "integer":
+            value = int(value)
+        elif kind == "number":
+            value = float(value)
+        elif kind == "boolean":
+            value = value if isinstance(value, bool) else str(value).strip().lower() in ("true", "yes", "1")
+        elif kind == "date":
+            value = date.fromisoformat(str(value)[:10]).isoformat()
+        else:
+            value = str(value).strip()
+    except (TypeError, ValueError):
+        return None
+    if spec.get("enum") and value not in spec["enum"]:
+        return None
+    return value
+
+
+async def classify_and_extract(llm: LLMProvider, text: str, *, questions: list[str],
+                               variables: dict[str, dict[str, Any]], today: date, context: str = ""
+                               ) -> tuple[dict[str, bool], dict[str, Any], float]:
+    """One tight call for a graph node: yes / no for its edges' questions, values for its variables.
+    Failures mean "nothing understood" (every question false, no values) — never an exception."""
+    t0 = time.perf_counter()
+    prompt = (GRAPH_PROMPT.replace("{today}", today.isoformat())
+              .replace("{questions}", "\n".join(f"- {q}" for q in questions) or "(none)")
+              .replace("{variables}", "\n".join(_variable_line(n, s) for n, s in variables.items()) or "(none)"))
+    user = f"{context}\nCaller said: {text}" if context else f"Caller said: {text}"
+    out = ""
+    try:
+        async for ev in llm.stream([{"role": "system", "content": prompt}, {"role": "user", "content": user}],
+                                   temperature=0, max_tokens=700):
+            if isinstance(ev, TextDelta):
+                out += ev.text
+    except Exception:
+        return {q: False for q in questions}, {}, round((time.perf_counter() - t0) * 1000, 1)
+    obj = {}
+    m = re.search(r"\{.*\}", out, re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            obj = {}
+    answers = obj.get("answers") if isinstance(obj.get("answers"), dict) else {}
+    values = obj.get("values") if isinstance(obj.get("values"), dict) else {}
+    return ({q: answers.get(q) is True for q in questions},
+            {n: v for n in variables if (v := check_value(variables[n], values.get(n))) is not None},
+            round((time.perf_counter() - t0) * 1000, 1))

@@ -123,6 +123,19 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     results      jsonb
 );
 
+-- Eval runs started from the console, in progress (any worker can report them; Phase 12.3).
+CREATE TABLE IF NOT EXISTS eval_jobs (
+    id          text PRIMARY KEY,
+    status      text NOT NULL,                -- running | done | error
+    total       integer NOT NULL,
+    done        jsonb NOT NULL DEFAULT '[]',
+    run_id      text,
+    error       text,
+    worker      text,
+    started_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- Patient-data access audit (PDPL): who / which call touched which patient's data, with which tool.
 CREATE TABLE IF NOT EXISTS patient_access_audit (
     id          bigserial PRIMARY KEY,
@@ -139,3 +152,113 @@ CREATE TABLE IF NOT EXISTS patient_access_audit (
 );
 CREATE INDEX IF NOT EXISTS patient_access_audit_patient_idx ON patient_access_audit (patient_id, ts DESC);
 CREATE INDEX IF NOT EXISTS patient_access_audit_ts_idx ON patient_access_audit (ts DESC);
+
+-- ---------------------------------------------------------------- platform (Phase 12.1): many agents, all in the DB
+-- An agent release is an immutable snapshot of everything a call needs (flow / skills, prompts, tools, model choice,
+-- voice, knobs); a call loads its agent's published release once and keeps it to the end.
+CREATE TABLE IF NOT EXISTS workspaces (
+    id          text PRIMARY KEY,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Secrets (API keys, tokens): Fernet ciphertext under MASTER_KEY (.env); referenced by name as {"secret": NAME}.
+CREATE TABLE IF NOT EXISTS secrets (
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,
+    ciphertext    text NOT NULL,
+    hint          text NOT NULL DEFAULT '',     -- "••••2f9a": enough to recognise a key, never the key
+    updated_by    text,
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, name)
+);
+
+-- Named provider connections (STT / LLM / TTS / embeddings). Shared by agents; edits apply to new calls.
+CREATE TABLE IF NOT EXISTS providers (
+    id            text PRIMARY KEY,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    kind          text NOT NULL CHECK (kind IN ('stt', 'llm', 'tts', 'embedding')),
+    name          text NOT NULL,
+    type          text NOT NULL,                -- registry name: groq | openai_compat | custom_http | fake
+    settings      jsonb NOT NULL DEFAULT '{}',  -- connection settings; keys as {"secret": NAME}
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    updated_by    text,
+    UNIQUE (workspace_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id            text PRIMARY KEY,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,                -- tools are namespaced by this name
+    transport     text NOT NULL DEFAULT 'streamable_http',
+    url           text NOT NULL,
+    auth          jsonb NOT NULL DEFAULT '{}',  -- {"header", "scheme", "secret": NAME}
+    enabled       boolean NOT NULL DEFAULT true,
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workspace_id, name)
+);
+
+-- Tool library with each tool's policy (kind, confirmation, timeout, cache …). Releases freeze the policies they use.
+CREATE TABLE IF NOT EXISTS tools (
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,
+    grp           text NOT NULL,                -- group (today: the skill it belongs to)
+    source        text NOT NULL DEFAULT 'mcp',  -- mcp | local
+    policy        jsonb NOT NULL DEFAULT '{}',
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, name)
+);
+
+-- Skill library (reusable instructions + flows); versions live in skill_versions.
+CREATE TABLE IF NOT EXISTS skills (
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,
+    repo_hash     text,                         -- hash of the repo files last imported (repo sync)
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, name)
+);
+ALTER TABLE skill_versions ADD COLUMN IF NOT EXISTS workspace_id text NOT NULL DEFAULT 'hmg';
+
+CREATE TABLE IF NOT EXISTS agents (
+    id                    text PRIMARY KEY,
+    workspace_id          text NOT NULL REFERENCES workspaces (id),
+    name                  text NOT NULL,
+    description           text NOT NULL DEFAULT '',
+    published_release_id  bigint,
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    updated_at            timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS agent_releases (
+    id          bigserial PRIMARY KEY,
+    agent_id    text NOT NULL REFERENCES agents (id),
+    version     integer NOT NULL,
+    bundle      jsonb NOT NULL,
+    author      text,
+    note        text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (agent_id, version)
+);
+
+-- Which agent answers: an IVR number / extension prefix, or '*' (default).
+CREATE TABLE IF NOT EXISTS phone_routes (
+    id            bigserial PRIMARY KEY,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    pattern       text NOT NULL,                -- '*' | exact number | extension prefix
+    agent_id      text NOT NULL REFERENCES agents (id),
+    priority      integer NOT NULL DEFAULT 0,
+    UNIQUE (workspace_id, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS platform_meta (
+    key    text PRIMARY KEY,
+    value  jsonb NOT NULL
+);
+
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_id text;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS release_id bigint;
+
+-- Agent Studio (Phase 12.6): the working copy an agent is edited in; published as a new release.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS draft jsonb;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS draft_updated_at timestamptz;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS draft_updated_by text;

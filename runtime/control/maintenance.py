@@ -21,6 +21,7 @@ async def purge_once(s: Settings) -> dict[str, int]:
         out["calls.mobile"] = int(r.split()[-1])
         for table, column, days in (("call_events", "ts", s.event_retention_days),
                                     ("eval_runs", "started_at", s.event_retention_days),
+                                    ("eval_jobs", "started_at", s.event_retention_days),
                                     ("patient_access_audit", "ts", s.audit_retention_days)):
             r = await c.execute(f"DELETE FROM {table} WHERE {column} < now() - make_interval(days => $1)", days)
             out[table] = int(r.split()[-1])

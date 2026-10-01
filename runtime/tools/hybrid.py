@@ -60,9 +60,16 @@ class HybridMCP:
             await self.live.close()
 
     def schemas(self) -> dict[str, dict[str, Any]]:
-        return self.fake.schemas()
+        # the HIS tools come from the fake (same schemas); tools of other servers added from the console are live
+        live = self.live.schemas() if self.live else {}
+        return {**live, **self.fake.schemas()}
+
+    def status(self) -> dict[str, dict[str, Any]]:
+        return self.live.status() if self.live and hasattr(self.live, "status") else {}
 
     async def call(self, name: str, args: dict[str, Any], timeout_s: float) -> tuple[bool, Any]:
+        if self.live and name not in self.fake.schemas():
+            return await self.live.call(name, args, timeout_s)
         if self.live and name in self.live_tools:
             ok, data = await self.live.call(name, args, timeout_s)
             if name in AUTH_TOOLS and self.echo:

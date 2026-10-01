@@ -108,7 +108,13 @@ class MCPPool:
         self._route: dict[str, _ServerConnection] = {}
 
     async def start(self) -> None:
-        await asyncio.gather(*(s.start() for s in self._servers.values()))
+        results = await asyncio.gather(*(s.start() for s in self._servers.values()), return_exceptions=True)
+        for server, r in zip(self._servers.values(), results):
+            if isinstance(r, BaseException):      # keeps retrying in the background; its tools appear when it's up
+                log.warning("MCP %s not connected at start: %r", server.name, r)
+        self._build_routes()
+
+    def _build_routes(self) -> None:
         for server in self._servers.values():
             for tool in server.tools:
                 self._route.setdefault(tool.name, server)
@@ -120,12 +126,31 @@ class MCPPool:
         return {t.name: {"description": t.description or "", "input_schema": t.input_schema}
                 for s in self._servers.values() for t in s.tools}
 
+    def status(self) -> dict[str, dict[str, Any]]:
+        """Per server: connected?, its tools, the last connection error."""
+        return {name: {"connected": s.session is not None, "tools": [t.name for t in s.tools],
+                       "error": repr(s._error)[:200] if s._error else None} for name, s in self._servers.items()}
+
     async def call(self, name: str, arguments: dict[str, Any], timeout_s: float) -> tuple[bool, Any]:
         server = self._route.get(name)
+        if server is None:
+            self._build_routes()                   # a server that was down at start may be connected now
+            server = self._route.get(name)
         if server is None:
             raise KeyError(f"no MCP server provides tool {name!r}")
         result = await server.call(name, arguments, timeout_s)
         return (not result.is_error), parse_result(result)
+
+
+async def discover(name: str, cfg: dict[str, Any], timeout: float = 15) -> list[dict[str, Any]]:
+    """Connect to a server once (without touching the running pool) and list its tools."""
+    conn = _ServerConnection(name, cfg)
+    try:
+        await conn.start(timeout)
+        return [{"name": t.name, "description": t.description or "", "input_schema": t.input_schema}
+                for t in conn.tools]
+    finally:
+        await conn.close()
 
 
 def parse_result(result: types.CallToolResult) -> Any:

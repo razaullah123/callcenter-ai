@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 
 from runtime.config import ROOT_DIR
-from runtime.harness.prompts import FALLBACK, FILLER, GREETING, HANDOFF, HANDOFF_SHORT, SLOW_TOOL_FILLER, STILL_WORKING
+from runtime.harness.prompts import Phrases
 from runtime.providers import TTSProvider
 from runtime.providers.audio import pcm16_to_wav, wav_to_pcm16
 
@@ -19,18 +19,22 @@ log = logging.getLogger(__name__)
 CACHE_DIR = ROOT_DIR / "models" / "phrases"
 
 
-def fixed_phrases() -> list[tuple[str, str]]:
+def fixed_phrases(ph: Phrases | None = None, languages: tuple[str, ...] = ("ar", "en")) -> list[tuple[str, str]]:
+    """The agent's fixed lines, per language — synthesized once in the agent's own voice."""
+    ph = ph or Phrases()
     out = []
-    for lang in ("ar", "en"):
-        out += [(lang, GREETING[lang]), (lang, HANDOFF[lang]), (lang, HANDOFF_SHORT[lang]), (lang, FALLBACK[lang])]
-        out += [(lang, f) for f in FILLER[lang]]
-        out += [(lang, STILL_WORKING[lang])] + [(lang, f[lang]) for f in SLOW_TOOL_FILLER.values()]
+    for lang in languages:
+        out += [(lang, ph.GREETING[lang]), (lang, ph.HANDOFF[lang]), (lang, ph.HANDOFF_SHORT[lang]),
+                (lang, ph.FALLBACK[lang])]
+        out += [(lang, f) for f in ph.FILLER[lang]]
+        out += [(lang, ph.STILL_WORKING[lang])] + [(lang, f[lang]) for f in ph.SLOW_TOOL_FILLER.values()]
     return out
 
 
 class PhraseCache:
-    def __init__(self, tts: TTSProvider, directory: Path = CACHE_DIR) -> None:
+    def __init__(self, tts: TTSProvider, directory: Path = CACHE_DIR, phrases: Phrases | None = None) -> None:
         self.tts = tts
+        self.phrases = phrases
         self.dir = directory
         self._mem: dict[tuple[str, str], tuple[bytes, int]] = {}
 
@@ -64,5 +68,5 @@ class PhraseCache:
                 except Exception as e:
                     log.warning("phrase pre-synthesis failed (%s): %r", text[:30], e)
 
-        await asyncio.gather(*(one(lang, text) for lang, text in (phrases or fixed_phrases())))
+        await asyncio.gather(*(one(lang, text) for lang, text in (phrases or fixed_phrases(self.phrases))))
         log.info("phrase cache: %d phrases ready", len(self._mem))

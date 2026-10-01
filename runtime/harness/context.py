@@ -10,8 +10,8 @@ from typing import Any
 from runtime.providers.base import Message
 
 from .nlu.dates import describe, today_riyadh
-from .prompts import AUTH_STEPS, GENDER_DIRECTIVE, IDENTITY_QUESTION, IDENTITY_STEP, PERSONA
-from .session import Session
+from .prompts import GENDER_DIRECTIVE, Phrases
+from .session import VERIFY_SKILL, Session
 from .skills import SkillSet
 
 MAX_HISTORY = 24   # messages
@@ -19,6 +19,7 @@ MAX_HISTORY = 24   # messages
 
 def system_prompt(session: Session, skills: SkillSet) -> str:
     lang = session.language.language
+    ph: Phrases = getattr(skills, "phrases", None) or Phrases()
     facts: list[str] = [
         f"Today is {describe(today_riyadh(), lang)} (Asia/Riyadh).",
         f"Call language: {'Arabic (Najdi dialect)' if lang == 'ar' else 'English'} — reply only in this language.",
@@ -26,7 +27,9 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
     if directive := GENDER_DIRECTIVE.get((lang, session.gender.known)):
         facts.append(directive)
     a = session.auth
-    if a.verified:
+    if not a.required:
+        pass                                   # an agent that doesn't verify callers: nothing to say about it
+    elif a.verified:
         facts.append(f"Caller is VERIFIED. Name: {a.full_name or a.first_name or 'unknown'}"
                      + ("" if a.identity_confirmed else " (not yet confirmed they are the patient)") + ".")
     else:
@@ -46,18 +49,18 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
     if session.pending_action:
         facts.append(f"Waiting for the caller to confirm: {session.pending_action.tool} "
                      f"{json.dumps(session.pending_action.args, ensure_ascii=False)}")
-    if a.verified:
+    if a.verified and not session.flow_skill:          # one flow runs the call: no switching between services
         routable = skills.routable()
         facts.append("Available services (use switch_skill to change): " +
                      "; ".join(f"{k}: {v}" for k, v in routable.items()) + f". Current: {session.active_skill}.")
-    persona = getattr(skills, "persona", lambda _l: None)(lang) or PERSONA[lang]
+    persona = getattr(skills, "persona", lambda _l: None)(lang) or ph.PERSONA[lang]
     parts = [persona, "\n## Call facts\n" + "\n".join(f"- {f}" for f in facts)]
-    skill = "authenticate" if not a.verified else session.active_skill
-    instr = skills.instructions(skill, session) or (AUTH_STEPS.get(a.stage, "") if not a.verified else "")
-    if a.verified and not a.identity_confirmed:
+    skill = session.flow_skill or (VERIFY_SKILL if not a.verified else session.active_skill)
+    instr = skills.instructions(skill, session) or (ph.AUTH_STEPS.get(a.stage, "") if not a.verified else "")
+    if a.required and a.verified and not a.identity_confirmed:
         name = session.memory.get("name_ar") if lang == "ar" else None
-        question = IDENTITY_QUESTION[lang].format(name=name or a.full_name or a.first_name or "")
-        skill, instr = "confirm_identity", IDENTITY_STEP.format(question=question)
+        question = ph.IDENTITY_QUESTION[lang].format(name=name or a.full_name or a.first_name or "")
+        skill, instr = "confirm_identity", ph.IDENTITY_STEP.format(question=question)
     if instr:
         parts.append(f"\n## Current task: {skill}\n{instr}")
     return "\n".join(parts)

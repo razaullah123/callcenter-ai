@@ -17,7 +17,9 @@ from runtime.events import Event, EventBus, EventType
 from runtime.harness.engine import Agent
 from runtime.harness.session import Session
 from runtime.providers import LLMProvider, TextDelta, create
-from runtime.skills import FileSkillSet
+from runtime.config import get_settings
+from runtime.platform.bundle import agent_settings, phrases_of
+from runtime.skills import FileSkillSet, SkillSet
 from runtime.tools.factory import build_tooling
 from runtime.tools.summarizers import doctor_rows
 
@@ -73,11 +75,12 @@ class _Collect:
 
 
 async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvider | None, mode: str = "auto",
-                   judge_llm: LLMProvider | None = None) -> dict[str, Any]:
+                   judge_llm: LLMProvider | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`bundle`: an agent release with inline skill files (LoadedAgent.inline_bundle()); None → the repo copy."""
     t0 = time.perf_counter()
     calls: list[tuple[str, dict]] = []
     offered_doctors: list[list[int]] = []          # doctor ids per successful slot search, in the order returned
-    executor = await build_tooling(fixture_backend())
+    executor = await build_tooling(fixture_backend(), tools_config=(bundle or {}).get("tools"))
     original_execute = executor.execute
 
     async def recording_execute(call, ctx, emitter):
@@ -99,7 +102,12 @@ async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvide
     await bus.start()
     session = Session(call_id=f"eval-{case.id}-{uuid.uuid4().hex[:6]}")
     out = _Collect()
-    agent = Agent(session, executor, agent_llm, FileSkillSet(executor.catalog), out, bus.bind(), filler_after_s=30)
+    if bundle:
+        skills = SkillSet(executor.catalog, bundle["skill_files"], phrases_of(bundle))
+        settings = agent_settings(get_settings(), bundle.get("knobs") or {})
+    else:
+        skills, settings = FileSkillSet(executor.catalog), None
+    agent = Agent(session, executor, agent_llm, skills, out, bus.bind(), filler_after_s=30, settings=settings)
     c = case.caller
     facts = dict(c.get("facts", {}))
     for mobile in map(str, list(facts.values())):
@@ -203,7 +211,7 @@ async def judge(llm: LLMProvider, case: Case, transcript: list[dict[str, str]]) 
 
 async def run_suite(cases: list[Case], *, mode: str = "auto", concurrency: int = 3, use_judge: bool = False,
                     agent_llm: LLMProvider | None = None, caller_model: str | None = None,
-                    progress=None) -> dict[str, Any]:
+                    progress=None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     agent_llm = agent_llm or create("llm", "groq")
     # gpt-oss spends part of max_tokens on hidden reasoning: give the caller / judge room for it
     caller_cfg = {"temperature": 0.7, "max_tokens": 1500, **({"model": caller_model} if caller_model else {})}
@@ -214,7 +222,8 @@ async def run_suite(cases: list[Case], *, mode: str = "auto", concurrency: int =
 
     async def one(case: Case) -> dict[str, Any]:
         async with sem:
-            r = await run_case(case, agent_llm=agent_llm, caller_llm=caller_llm, mode=mode, judge_llm=judge_llm)
+            r = await run_case(case, agent_llm=agent_llm, caller_llm=caller_llm, mode=mode, judge_llm=judge_llm,
+                               bundle=bundle)
             if progress:
                 progress(r)
             return r

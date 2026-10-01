@@ -24,6 +24,7 @@ dependencies = [
     "livekit>=1.0",        # WebRTC AEC3 echo cancellation for telephony
     "pyjwt>=2.8",
     "websockets>=12",
+    "cryptography>=42",   # secret store (Fernet)
 ]
 
 [project.optional-dependencies]

@@ -3,6 +3,7 @@
     python -m evals                          # all cases (LLM caller unless a case has a script)
     python -m evals --suite booking --judge  # one suite + LLM judge (naturalness / politeness / brevity / task)
     python -m evals --case book_by_name_ar --mode script
+    python -m evals --agent hmg-care          # an agent's published release from the database (default: repo copy)
 """
 
 import argparse
@@ -21,6 +22,8 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--judge", action="store_true")
     ap.add_argument("--caller-model")
+    ap.add_argument("--agent", help="run on this agent's published release (database) instead of the repo copy")
+    ap.add_argument("--draft", action="store_true", help="with --agent: run on the agent's draft")
     a = ap.parse_args()
     cases = load_cases(a.suite, a.case)
     if not cases:
@@ -33,9 +36,25 @@ def main() -> None:
         print(f"{mark} {r['case']:<34} {r['turns']:>2} turns {r['duration_s']:>5}s  {r['mode']:<6} "
               f"{'; '.join(failed)[:150]}")
 
+    async def release_bundle():
+        from runtime.config import get_settings
+        from runtime.platform import AgentLoader, PgStore
+        from runtime.platform.secrets import Cipher, Secrets
+        from runtime.tools import MockMCP
+        s = get_settings()
+        store = PgStore()
+        secrets = Secrets(store, Cipher(s.master_key.get_secret_value() if s.master_key else None), s)
+        mcp = MockMCP()
+        await mcp.start()
+        loader = AgentLoader(store, mcp, s, warm_phrases=False, secrets=secrets)
+        agent = await (loader.load_draft(a.agent) if a.draft else loader.for_call(agent_id=a.agent))
+        print(f"agent {agent.agent_id} · {'draft' if a.draft else f'release v{agent.version}'}\n")
+        return agent.inline_bundle()
+
     async def run_and_store():
+        bundle = await release_bundle() if a.agent else None
         run = await run_suite(cases, mode=a.mode, concurrency=a.concurrency, use_judge=a.judge,
-                              caller_model=a.caller_model, progress=progress)
+                              caller_model=a.caller_model, progress=progress, bundle=bundle)
         try:
             await store_run(run)
         except Exception as e:

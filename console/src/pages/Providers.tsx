@@ -50,7 +50,7 @@ export default function Providers() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Providers</h1>
-          <p className="text-sm text-muted">Active config <b>v{q.data.active_version}</b>. Saving creates a new version; calls already in progress keep the version they started with.</p>
+          <p className="text-sm text-muted">{q.data.agent?.name ?? "Agent"} · release <b>v{q.data.active_version}</b>. Saving publishes a new release; calls already in progress keep the one they started with. Keys and URLs live on the shared <a className="underline" href="/console/connections">connections</a>.</p>
         </div>
         <div className="flex items-center gap-2">
           <input placeholder="What changed?" value={note} onChange={e => setNote(e.target.value)} className="w-56" />
@@ -99,6 +99,10 @@ export default function Providers() {
                   <option value="advise_and_continue">advise_and_continue — empathy + ER/997 line, then continue</option>
                   <option value="empathy_only">empathy_only — empathy, then continue</option>
                   <option value="stop">stop — safety message only</option>
+                </select>
+              ) : type === "bool" ? (
+                <select className="w-full" value={String(runtime[k] ?? "")} onChange={e => setDraft({ ...draft, runtime: { ...runtime, [k]: e.target.value === "true" } })}>
+                  <option value="true">true</option><option value="false">false</option>
                 </select>
               ) : (
                 <input className="w-full" type={type === "str" ? "text" : "number"} value={String(runtime[k] ?? "")}

@@ -1,19 +1,22 @@
-"""Process-wide runtime: everything shared by all calls (connection pools, providers, skills, logs).
+"""Process-wide runtime: what all calls share (event bus, MCP backend, agent loader, logs).
 
-Per-call objects (Session, Agent, VoiceCall) are cheap and created on each call.
+Each call is routed to an agent and gets that agent's LoadedAgent (providers, skills, tools, phrases, knobs),
+loaded from its published release and frozen for the call. Per-call objects (Session, Agent, VoiceCall) are cheap.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from runtime.config import Settings, get_settings
 from runtime.data.reference import get_reference
 from runtime.events import ConsoleSink, EventBus, EventType, JsonlSink, Level
 from runtime.harness.redact import redact_event
+from runtime.platform import WORKSPACE, AgentLoader, LoadedAgent, PgStore, mcp_config
 from runtime.providers import LLMProvider, STTProvider, TTSProvider
-from runtime.skills import FileSkillSet
+from runtime.skills import SkillSet
 from runtime.tools import MCPPool, MockMCP, ToolExecutor
-from runtime.tools.factory import build_tooling
 from runtime.tools.hybrid import HybridMCP
 
 log = logging.getLogger(__name__)
@@ -23,39 +26,115 @@ log = logging.getLogger(__name__)
 class Runtime:
     settings: Settings
     bus: EventBus
-    executor: ToolExecutor
-    skills: FileSkillSet
-    providers: "ProviderSet"
+    backend: Any                                  # started MCP backend, shared by every agent
+    loader: AgentLoader
+    agent: LoadedAgent                            # the default agent (route '*')
     store: "EventStore | None" = None
     live: "LiveHub | None" = None
+    platform: Any = None                          # PgStore (None without a database: the repo copy only)
+    secrets: Any = None                           # encrypted secret store (runtime.platform.secrets.Secrets)
+    sync: Any = None                              # ClusterSync: keeps worker processes in step (None: no database)
     calls: dict = field(default_factory=dict)   # call_id → VoiceCall running in this process (console "End call")
 
-    # Current providers (a call snapshots `providers` once at its start).
+    # The default agent's parts (console, health, evals). A call uses the agent it was routed to.
+    @property
+    def providers(self):
+        return self.agent.providers
+
+    @property
+    def skills(self) -> SkillSet:
+        return self.agent.skills
+
+    @property
+    def executor(self) -> ToolExecutor:
+        return self.agent.executor
+
     @property
     def llm(self) -> LLMProvider:
-        return self.providers.llm
+        return self.agent.llm
 
     @property
     def stt(self) -> STTProvider:
-        return self.providers.stt
+        return self.agent.stt
 
     @property
     def tts(self) -> TTSProvider:
-        return self.providers.tts
+        return self.agent.tts
 
-    async def apply_config(self, version: int, config: dict) -> None:
-        """Activate a config version: new providers for new calls, runtime knobs applied immediately."""
-        from runtime.control.config_store import build
-        from runtime.voice.phrases import PhraseCache
-        ps = build(version, config)
-        ps.phrases = PhraseCache(ps.tts)
-        await ps.phrases.warm()
-        for k, v in (config.get("runtime") or {}).items():
-            if hasattr(self.settings, k) and v not in (None, ""):
-                setattr(self.settings, k, type(getattr(self.settings, k))(v)
-                        if getattr(self.settings, k) is not None else v)
-        self.providers = ps
-        self.bus.bind().emit(EventType.SLOT_SET, field="config_version", value=version)
+    async def agent_for_call(self, *, agent_id: str | None = None, number: str | None = None,
+                             draft: bool = False) -> LoadedAgent:
+        """The agent that answers this call — loaded complete (cached per release) and frozen for the call.
+        `draft`: the agent's working copy (studio test calls)."""
+        if draft and agent_id:
+            return await self.loader.load_draft(agent_id)
+        try:
+            return await self.loader.for_call(agent_id=agent_id, number=number)
+        except Exception as e:
+            if agent_id:                        # an explicitly requested agent that can't load is an error …
+                raise
+            log.warning("agent routing failed (%r) — the default agent answers", e)
+            return self.agent                   # … a routing problem never drops a call
+
+    async def reload(self) -> None:
+        """After a publish or a provider / tool / skill change: new calls load the new version."""
+        self.loader.invalidate()
+        self.agent = await self.loader.for_call()
+        self.bus.bind().emit(EventType.SLOT_SET, field="agent_release", agent=self.agent.agent_id,
+                             value=self.agent.version)
+
+    async def reload_mcp(self) -> None:
+        """MCP servers changed: connect the new set, then new calls use it. Calls in progress keep the old
+        connections, which are closed a while later."""
+        cfg = await mcp_config(await self.platform.mcp_servers(WORKSPACE), self.settings, self.secrets)
+        backend = _make_backend(self.settings, cfg)
+        await backend.start()
+        old, self.backend = self.backend, backend
+        self.loader.backend = backend
+        await self.reload()
+
+        async def close_later() -> None:
+            await asyncio.sleep(15 * 60)
+            if hasattr(old, "close"):
+                await old.close()
+        self._closing = asyncio.create_task(close_later())
+
+    def mcp_status(self) -> dict:
+        return self.backend.status() if hasattr(self.backend, "status") else {}
+
+    async def config_changed(self, kind: str, **detail: Any) -> None:
+        """A change made here (console): reload, and tell the other worker processes to reload too."""
+        await (self.reload_mcp() if kind == "mcp" else self.reload())
+        if self.sync is not None:
+            try:
+                await self.sync.config_changed(kind, **detail)
+            except Exception as e:
+                log.warning("other workers not told about the %s change: %r", kind, e)
+
+    async def end_call(self, call_id: str) -> bool:
+        """End a call wherever it runs: here, or ask the worker that has it. False if no worker has it."""
+        if (call := self.calls.get(call_id)) is not None:
+            await call.end_from_console()
+            return True
+        if self.sync is not None and self.live is not None and call_id in self.live.active:
+            await self.sync.end_call(call_id)
+            return True
+        return False
+
+    # ---- messages from the other workers
+
+    async def _on_config(self, msg: dict) -> None:
+        log.info("reloading agents: %s changed on another worker", msg.get("kind"))
+        await (self.reload_mcp() if msg.get("kind") == "mcp" else self.reload())
+
+    async def _on_control(self, msg: dict) -> None:
+        if msg.get("action") == "end" and (call := self.calls.get(msg.get("call_id"))) is not None:
+            await call.end_from_console()
+
+    async def _on_live(self, msg: dict) -> None:
+        if self.live is not None:
+            from runtime.events import Event
+            msg.pop("origin", None)
+            await self.live(Event.model_validate(msg))
 
     @classmethod
     async def create(cls, settings: Settings | None = None, *, console_log: bool = False,
@@ -66,7 +145,7 @@ class Runtime:
         bus.subscribe(JsonlSink(s.log_dir))
         if console_log:
             bus.subscribe(ConsoleSink(min_level=Level(s.log_level)))
-        store = live = None
+        store = live = platform = secrets = None
         if control_plane:
             from runtime.control.live import LiveHub
             from runtime.control.store import EventStore
@@ -74,35 +153,53 @@ class Runtime:
             store, live = EventStore(), LiveHub()
             bus.subscribe(store)
             bus.subscribe(live)
+            platform, secrets = await _platform_store(s)
         await bus.start()
 
-        if s.tools_mode == "mock":
-            backend = HybridMCP(None, echo=log.info)
-        elif s.tools_mode == "hybrid":
-            backend = HybridMCP(MCPPool(s.mcp_server_config()), live_auth=s.hybrid_live_auth,
-                                live_booking=s.hybrid_live_booking, echo=log.info)
-        else:
-            backend = MCPPool(s.mcp_server_config())
-        executor = await build_tooling(backend)
+        mcp_cfg = s.mcp_server_config()
+        if platform is not None:
+            try:
+                mcp_cfg = await mcp_config(await platform.mcp_servers(WORKSPACE), s, secrets) or mcp_cfg
+            except Exception as e:
+                log.warning("MCP servers not read from the database (%r) — using .env", e)
+        backend = _make_backend(s, mcp_cfg)
+        await backend.start()
         try:
             await get_reference()           # hospitals / locations into memory
         except Exception as e:              # the agent still works (hospital search fails gracefully)
             log.warning("reference data not loaded: %r", e)
 
-        from runtime.control import config_store
+        loader = AgentLoader(platform, backend, s, secrets=secrets)
         try:
-            version, config = await config_store.load_active(s)
-        except Exception as e:                  # no DB: run on .env defaults
-            log.warning("agent config not loaded (%r) — using .env defaults", e)
-            version, config = 0, config_store.default_config(s)
-        if s.provider_override:                 # e.g. load tests: every kind uses the override provider
-            config = {**config, **{k: {"provider": s.provider_override, "settings": {}}
-                                   for k in ("stt", "llm", "tts")}}
-            log.warning("PROVIDER_OVERRIDE=%s — not using the saved provider config", s.provider_override)
-        runtime = cls(settings=s, bus=bus, executor=executor, skills=FileSkillSet(executor.catalog),
-                      providers=config_store.build(version, config), store=store, live=live)
+            agent = await loader.for_call()
+        except Exception as e:
+            log.error("default agent not loaded from the database (%r) — running the repo copy", e)
+            loader.store = None
+            agent = await loader.for_call()
+        if s.provider_override:
+            log.warning("PROVIDER_OVERRIDE=%s — every agent uses it instead of its providers", s.provider_override)
+        log.info("default agent: %s (%s)", agent.name,
+                 f"release v{agent.version}" if agent.version else "repo copy")
+        runtime = cls(settings=s, bus=bus, backend=backend, loader=loader, agent=agent, store=store, live=live,
+                      platform=platform, secrets=secrets)
+        if platform is not None:
+            await runtime._start_sync()
         await runtime.warm()
         return runtime
+
+    async def _start_sync(self) -> None:
+        from runtime.platform.sync import ClusterSync
+        s = self.settings
+        try:
+            self.sync = ClusterSync(s.database_url.get_secret_value(), ssl=s.database_ssl,
+                                    on_config=self._on_config, on_control=self._on_control, on_live=self._on_live,
+                                    share_live=s.workers > 1)
+            if self.sync.share_live:
+                self.bus.subscribe(self.sync)          # this worker's (redacted) events → the other live hubs
+            await self.sync.start()
+        except Exception as e:
+            log.warning("cluster sync not started (%r) — changes reach other workers only after a restart", e)
+            self.sync = None
 
     async def warm(self) -> None:
         """Open provider connections before the first call (cold requests measured at 1–10 s)."""
@@ -115,12 +212,39 @@ class Runtime:
             log.warning("Groq warm-up failed: %r", e)
 
     async def close(self) -> None:
-        mcp = self.executor.mcp
-        if hasattr(mcp, "close"):
-            await mcp.close()
+        if self.sync is not None:
+            await self.sync.stop()
+        if hasattr(self.backend, "close"):
+            await self.backend.close()
         await self.bus.stop()
         if self.store:
             await self.store.close()
+
+
+def _make_backend(s: Settings, mcp_cfg: dict):
+    if s.tools_mode == "mock":
+        return HybridMCP(None, echo=log.info)
+    if s.tools_mode == "hybrid":
+        return HybridMCP(MCPPool(mcp_cfg), live_auth=s.hybrid_live_auth, live_booking=s.hybrid_live_booking,
+                         echo=log.info)
+    return MCPPool(mcp_cfg)
+
+
+async def _platform_store(s: Settings):
+    """The platform tables + secret store, seeded on first start (and synced with the repo in development)."""
+    from runtime.platform.secrets import Cipher, Secrets
+    from runtime.platform.seed import seed
+    try:
+        platform = PgStore()
+        secrets = Secrets(platform, Cipher(s.master_key.get_secret_value() if s.master_key else None), s)
+        async with platform.advisory_lock("platform-seed"):    # N workers start together: one seeds at a time
+            report = await seed(platform, s, repo_sync=s.platform_repo_sync, secrets=secrets)
+        if any(report.get(k) for k in ("agent_created", "releases", "materialized")) or                 (report.get("secrets") or {}).get("imported"):
+            log.info("platform: %s", {k: v for k, v in report.items() if v})
+        return platform, secrets
+    except Exception as e:
+        log.warning("platform tables unavailable (%r) — running the repo copy of the agent", e)
+        return None, None
 
 
 async def ensure_schema() -> None:

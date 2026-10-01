@@ -21,6 +21,7 @@ class AuthState:
     first_name: str | None = None
     full_name: str | None = None       # for "Am I speaking to …?" after verification
     verified: bool = False
+    required: bool = True              # False: this agent doesn't verify callers (verified from the start)
     identity_confirmed: bool = False   # the caller said yes to "Am I speaking to <name>?"
     otp_sent: bool = False
     otp_channel: str | None = None
@@ -49,6 +50,10 @@ class PendingAction:
     turn_id: int
 
 
+# The skill that verifies the caller (the harness drives it by tool roles: identity.lookup / send_code / verify_code).
+VERIFY_SKILL = "authenticate"
+
+
 @dataclass
 class Session:
     call_id: str
@@ -57,7 +62,8 @@ class Session:
     language: LanguageTracker = field(default_factory=LanguageTracker)
     gender: GenderResolver = field(default_factory=GenderResolver)
     auth: AuthState = field(default_factory=AuthState)
-    active_skill: str = "authenticate"
+    active_skill: str = VERIFY_SKILL
+    flow_skill: str | None = None        # set when one skill's flow runs the whole call (knob main_flow)
     pending_intent: str | None = None
     slots: dict[str, Any] = field(default_factory=dict)          # booking choices (project_id, clinic_id, ...)
     memory: dict[str, Any] = field(default_factory=dict)         # skill scratch space (e.g. last clinic list)
