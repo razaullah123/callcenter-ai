@@ -3,6 +3,7 @@ name: book_appointment
 description: Book a new appointment (choose hospital, clinic by symptoms, doctor and time)
 keywords: [احجز, حجز, موعد جديد, ابي موعد, ابغى موعد, ابي احجز, ابغى احجز, book, booking, new appointment, make an appointment, schedule]
 hidden_tools: [mssql_get_nearestClinic_have_doctorSlots, mssql_get_availableDoctors_with_slots_byDate]
+turn_hooks: [hmg.booking]     # dates / earliest / chosen time / "I'm at ..." hints, the date question, slot prefetch
 status: ready
 ---
 Book a new appointment following the steps in order. Only one question per reply.

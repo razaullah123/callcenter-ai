@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from pydantic import BaseModel
 
 from runtime.control import config_store, skills_store, store
+from runtime.platform import WORKSPACE
 from runtime.providers import AudioInput, TextDelta, available, create, schemas
 
 router = APIRouter(prefix="/api")
@@ -23,6 +24,12 @@ def _rt():
     if rt is None:
         raise HTTPException(503, "runtime not ready")
     return rt
+
+
+async def changed(rt, kind: str, **detail) -> None:
+    """Reload here and tell the other worker processes (new calls everywhere use the change)."""
+    notify = getattr(rt, "config_changed", None)
+    await (notify(kind, **detail) if notify else rt.reload())
 
 
 def require_console(request: Request) -> None:
@@ -54,11 +61,18 @@ async def get_calls(limit: int = 50, offset: int = 0, q: str | None = None, outc
 
 @router.post("/calls/{call_id}/end", dependencies=auth)
 async def end_call(call_id: str) -> dict:
-    """End a live call (browser playground or IVR) from the console."""
-    call = _rt().calls.get(call_id)
-    if call is None:
-        raise HTTPException(404, "this call is not running on this server (already ended, or on another worker)")
-    await call.end_from_console()
+    """End a live call (browser playground or IVR) from the console — on whichever worker runs it."""
+    rt = _rt()
+    ender = getattr(rt, "end_call", None)
+    if ender is not None:
+        ok = await ender(call_id)
+    elif (call := rt.calls.get(call_id)) is not None:
+        await call.end_from_console()
+        ok = True
+    else:
+        ok = False
+    if not ok:
+        raise HTTPException(404, "this call is not running (it may have just ended)")
     return {"call_id": call_id, "ended": True}
 
 
@@ -117,9 +131,15 @@ async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None =
 
 @router.get("/providers", dependencies=auth)
 async def get_providers() -> dict:
+    """The default agent's providers + knobs (its published release), and its release history."""
     rt = _rt()
-    return {"available": available(), "schemas": schemas(), "active_version": rt.providers.version,
-            "config": config_store.masked(rt.providers.config), "history": await config_store.history(),
+    ag = rt.agent
+    history = []
+    if rt.platform is not None and ag.release_id:
+        history = [{**r, "active": r["id"] == ag.release_id} for r in await rt.platform.releases(ag.agent_id)]
+    return {"available": available(), "schemas": schemas(), "active_version": ag.version,
+            "agent": {"id": ag.agent_id, "name": ag.name, "release_id": ag.release_id, "version": ag.version},
+            "config": config_store.masked(rt.providers.config), "history": history,
             "effective": config_store.effective(rt.providers),
             "runtime_knobs": {k: t.__name__ for k, t in config_store.RUNTIME_KNOBS.items()}}
 
@@ -130,23 +150,59 @@ class ConfigBody(BaseModel):
     author: str = "console"
 
 
+def _platform(rt):
+    if rt.platform is None or not rt.agent.release_id:
+        raise HTTPException(503, "the platform database is not available — changes can't be saved")
+    return rt.platform
+
+
 @router.put("/providers", dependencies=auth)
 async def save_providers(body: ConfigBody) -> dict:
+    """Connection settings (keys, URLs) update the shared provider record; the agent's choices (model, voice …) and
+    knobs go into a new published release of the agent."""
+    from runtime.platform.bundle import KINDS, split_settings
+    from runtime.platform.seed import KIND_NAMES, PROVIDER_NAMES, provider_id
     rt = _rt()
+    store = _platform(rt)
     config = config_store.merge_secrets(body.config, rt.providers.config)
     if errors := config_store.validate(config):
         raise HTTPException(422, {"errors": errors})
-    version = await config_store.save(config, body.author, body.note)
-    await rt.apply_config(version, config)
-    return {"version": version}
+    ag = rt.agent
+    bundle = (await store.release(ag.release_id))["bundle"]
+    for kind in KINDS:
+        spec = config.get(kind)
+        if not spec:
+            continue
+        type_ = spec.get("provider") or "groq"
+        conn, choice = split_settings(spec.get("settings") or {})
+        pid = ((bundle.get("models") or {}).get(kind) or {}).get("provider")
+        row = await store.provider(pid) if pid else None
+        if row is None or row["type"] != type_:
+            pid = provider_id(kind, type_)
+            row = await store.provider(pid) or {"id": pid, "workspace_id": WORKSPACE, "kind": kind, "type": type_,
+                                                "name": f"{PROVIDER_NAMES.get(type_, type_)} {KIND_NAMES[kind]}",
+                                                "settings": {}}
+        if rt.secrets is not None and rt.secrets.cipher.available:     # keys → encrypted secrets, references here
+            conn = await rt.secrets.externalize(pid, conn, body.author, row.get("settings") or {})
+        if row.get("settings") != conn or row.get("updated_by") is None:
+            await store.put_provider({**row, "settings": conn, "updated_by": body.author})
+        bundle.setdefault("models", {})[kind] = {"provider": pid, "settings": choice}
+    bundle["knobs"] = {**(bundle.get("knobs") or {}), **(config.get("runtime") or {})}
+    rel = await store.add_release(ag.agent_id, bundle, body.author, body.note or "providers / knobs")
+    await changed(rt, "release", agent=ag.agent_id)
+    return {"version": rel["version"], "release_id": rel["id"]}
 
 
 @router.post("/providers/activate/{version}", dependencies=auth)
 async def activate_version(version: int) -> dict:
-    config = await config_store.activate(version)
-    if config is None:
+    """Roll the default agent back / forward to one of its releases."""
+    rt = _rt()
+    store = _platform(rt)
+    match = [r for r in await store.releases(rt.agent.agent_id, limit=1000) if r["version"] == version]
+    if not match:
         raise HTTPException(404, "version not found")
-    await _rt().apply_config(version, config)
+    await store.publish(rt.agent.agent_id, match[0]["id"])
+    await changed(rt, "release", agent=rt.agent.agent_id)
     return {"version": version}
 
 
@@ -166,30 +222,35 @@ async def test_provider(body: TestBody) -> dict:
         p = create(body.kind, body.provider, config_store._drop_empty(settings))
     except Exception as e:
         return {"ok": False, "error": f"invalid settings: {e}"}
+    return await probe(body.kind, p, rt)
+
+
+async def probe(kind: str, p, rt) -> dict:
+    """A short live request through provider `p` (latency + a sample)."""
     t0 = time.perf_counter()
     try:
-        if body.kind == "llm":
+        if kind == "llm":
             text, first = "", None
             async for ev in p.stream([{"role": "user", "content": "Reply with one short Najdi greeting."}]):
                 if isinstance(ev, TextDelta):
                     first = first or (time.perf_counter() - t0) * 1000
                     text += ev.text
             return {"ok": True, "first_token_ms": round(first or 0), "total_ms": _ms(t0), "sample": text[:200]}
-        if body.kind == "tts":
+        if kind == "tts":
             audio, first, rate = b"", None, 24000
             async for c in p.synthesize("هلا والله، كيف أقدر أخدمك؟", language="ar"):
                 first = first or (time.perf_counter() - t0) * 1000
                 audio, rate = audio + c.data, c.sample_rate
             return {"ok": True, "first_audio_ms": round(first or 0), "total_ms": _ms(t0),
                     "audio_s": round(len(audio) / 2 / rate, 2)}
-        if body.kind == "stt":
+        if kind == "stt":
             tts_audio, rate = b"", 24000
             async for c in rt.tts.synthesize("أبي أحجز موعد", language="ar"):
                 tts_audio, rate = tts_audio + c.data, c.sample_rate
             t0 = time.perf_counter()
             tr = await p.transcribe(AudioInput(tts_audio, rate))
             return {"ok": True, "total_ms": _ms(t0), "sample": tr.text, "language": tr.language}
-        if body.kind == "embedding":
+        if kind == "embedding":
             [vec] = await p.embed(["حي النرجس"])
             return {"ok": True, "total_ms": _ms(t0), "dimension": len(vec)}
     except Exception as e:
@@ -208,17 +269,18 @@ def _ms(t0: float) -> int:
 async def list_skills() -> list[dict]:
     sk = _rt().skills
     return [{"name": s.name, "description": s.description, "status": s.status, "routable": s.routable,
-             "has_flow": s.flow is not None, "steps": [st.id for st in s.flow.steps] if s.flow else [],
+             "has_flow": s.flow is not None, "steps": [n for n in s.flow.nodes if n != "__done__"] if s.flow else [],
              "tools": sorted(sk.tools(s.name, _DummySession())) if not s.flow else sorted(s.flow.all_tools())}
             for s in sk.skills.values()]
 
 
 @router.get("/skills/{name}", dependencies=auth)
 async def get_skill(name: str) -> dict:
-    files = skills_store.read_files(_rt().skills, name)
+    rt = _rt()
+    files = await skills_store.read_files(rt, name)
     if files is None:
         raise HTTPException(404, "skill not found")
-    return {"name": name, "files": files, "versions": await skills_store.versions(name)}
+    return {"name": name, "files": files, "versions": await skills_store.versions(rt, name)}
 
 
 class SkillBody(BaseModel):
@@ -235,15 +297,24 @@ async def validate_skill(name: str, body: SkillBody) -> dict:
 @router.put("/skills/{name}", dependencies=auth)
 async def save_skill(name: str, body: SkillBody) -> dict:
     rt = _rt()
+    _platform(rt)
     if errors := skills_store.validate(rt.skills, name, body.files):
         raise HTTPException(422, {"errors": errors})
-    version = await skills_store.save(rt.skills, name, body.files, body.author, body.note)
-    return {"version": version}
+    return await skills_store.save(rt, name, body.files, body.author, body.note)
+
+
+@router.get("/skills/{name}/graph", dependencies=auth)
+async def get_skill_graph(name: str) -> dict:
+    """The skill's flow as a graph (nodes, edges, variables) — step flows converted — for the canvas."""
+    graph = _rt().skills.graph(name) if hasattr(_rt().skills, "graph") else None
+    if graph is None:
+        raise HTTPException(404, "this skill has no flow")
+    return {"name": name, "converted": graph.converted, "graph": graph.to_dict(), "errors": graph.errors()}
 
 
 @router.get("/skills/{name}/versions/{version}", dependencies=auth)
 async def get_skill_version(name: str, version: int) -> dict:
-    files = await skills_store.get_version(name, version)
+    files = await skills_store.get_version(_rt(), name, version)
     if files is None:
         raise HTTPException(404, "version not found")
     return {"name": name, "version": version, "files": files}
@@ -268,9 +339,6 @@ class _DummySession:
 
 # ---------------------------------------------------------------- evals (Phase 6)
 
-_eval_jobs: dict[str, dict[str, Any]] = {}
-
-
 @router.get("/evals/cases", dependencies=auth)
 async def eval_cases() -> list[dict]:
     from evals.runner import load_cases
@@ -292,35 +360,43 @@ async def eval_run(body: EvalRunBody) -> dict:
     cases = load_cases(body.suite, body.cases)
     if not cases:
         raise HTTPException(400, "no cases match")
-    if any(j["status"] == "running" for j in _eval_jobs.values()):
+    from runtime.control.eval_jobs import JOBS, spawn
+    from runtime.platform.sync import WORKER_ID
+    if await JOBS.running():
         raise HTTPException(409, "an eval run is already in progress")
     job = f"job-{int(time.time())}"
-    _eval_jobs[job] = {"status": "running", "total": len(cases), "done": [], "run_id": None, "error": None}
+    await JOBS.create(job, len(cases), WORKER_ID)
     rt = _rt()
+    pending: list[asyncio.Task] = []
 
     def progress(r: dict) -> None:
-        _eval_jobs[job]["done"].append({"case": r["case"], "passed": r["passed"]})
+        pending.append(asyncio.create_task(JOBS.progress(job, {"case": r["case"], "passed": r["passed"]})))
 
     async def work() -> None:
         try:
+            # the default agent's published release (its skills, phrases, tool policies and knobs)
             run = await run_suite(cases, mode=body.mode, use_judge=body.judge, agent_llm=rt.providers.llm,
-                                  progress=progress)
+                                  progress=progress, bundle=rt.agent.inline_bundle())
             run["config_version"] = rt.providers.version
+            run["agent"] = {"id": rt.agent.agent_id, "release": rt.agent.version}
             save_report(run)
             await store_run(run)
-            _eval_jobs[job].update(status="done", run_id=run["id"])
+            await asyncio.gather(*pending, return_exceptions=True)
+            await JOBS.finish(job, run_id=run["id"])
         except Exception as e:
-            _eval_jobs[job].update(status="error", error=repr(e)[:300])
+            await JOBS.finish(job, error=repr(e)[:300])
 
-    asyncio.create_task(work())
+    spawn(work())
     return {"job": job, "total": len(cases)}
 
 
 @router.get("/evals/jobs/{job}", dependencies=auth)
 async def eval_job(job: str) -> dict:
-    if job not in _eval_jobs:
+    from runtime.control.eval_jobs import JOBS
+    found = await JOBS.get(job)
+    if found is None:
         raise HTTPException(404, "job not found")
-    return _eval_jobs[job]
+    return found
 
 
 @router.get("/evals/runs", dependencies=auth)

@@ -222,6 +222,9 @@ class ToolExecutor:
     async def _dispatch(self, tool: ToolDef, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, Any]:
         if tool.source == "local":
             return True, await call_local(tool.name, args, ctx)
+        if tool.source == "http":
+            from .http_tool import call_http
+            return await call_http(tool.http or {}, args, tool.timeout_s or 10)
         return await self.mcp.call(tool.name, args, tool.timeout_s or 10)
 
 

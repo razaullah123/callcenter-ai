@@ -61,8 +61,13 @@ The load test uses fake speech/LLM providers with realistic delays and real spee
 - The capacity signal is `/health` → `loop_lag_ms`. Sustained values above ~150 ms mean the process is saturated.
 - Voice activity detection (Silero, ONNX) runs in a thread pool across cores. The IVR's 8 kHz audio needs no resampling.
 - External latency (Groq STT / LLM / TTS) adds to these numbers. See the console dashboard, "Latency by stage".
-- The console's **Live calls** view shows the calls of the process it is connected to. History, stats and logs are
-  shared through the database. A unified live view across processes needs Redis pub/sub (not yet built).
+- **Processes stay in step through Postgres (LISTEN / NOTIFY)** — no extra infrastructure. Publishing a release or
+  changing a connection, secret or skill on one process reloads the agents on all of them (new calls use it within
+  about a second). Console "End call" reaches whichever process runs the call. With `WORKERS > 1` every process
+  shares its call events, so **Live calls** shows all calls whichever process the console is connected to. Several
+  processes starting together seed the database one at a time (advisory lock). `/health` shows the process
+  (`worker`) and whether its sync connection is up (`cluster_sync`).
+- Several *containers* work the same way as long as they share the database.
 
 ## 5. Patient data (PDPL) & security
 
@@ -74,12 +79,13 @@ The load test uses fake speech/LLM providers with realistic delays and real spee
 | **Audit trail**: every patient-data read / write / send (call, tool, patient ID, outcome, confirmed, verified) | `patient_access_audit` table, **separate from logs**, kept `AUDIT_RETENTION_DAYS` (730) |
 | **Retention**: transcripts and events, JSONL logs and eval runs deleted after `EVENT_RETENTION_DAYS` (90); call summaries (no content) kept | Maintenance task every 6 h |
 | Console and API require `CONSOLE_TOKEN`; IVR requires a JWT (`AUTH_SECRET`) and a blacklist check | |
-| Secrets live only in `.env` / the provider config; never returned to the browser | |
+| API keys / tokens are stored **encrypted** (Fernet, key `MASTER_KEY` in `.env`) in the `secrets` table and referenced by name from connections and MCP servers; the console only sees names and hints (`••••2f9a`) | Console → Secrets / Connections |
+| `MASTER_KEY` must be backed up outside the server (password vault): without it the stored secrets can't be decrypted. Rotating a provider key = Console → Secrets → Replace (new calls use it at once; MCP token: after a restart) | |
 | Writes (booking, cancel, complaint) need an explicit spoken or keypad "yes" after a read-back | Enforced in code |
 
 **Data residency:** transcripts, audit and config stay in your Postgres (host it in-Kingdom). Caller audio and text are
 processed by Groq. Confirm with Groq which region serves your account and put a data-processing agreement in place.
-The provider layer is pluggable (Console → Providers), so an in-Kingdom STT, LLM or TTS endpoint can be swapped in
+The provider layer is pluggable (Console → Connections + Agent models), so an in-Kingdom STT, LLM or TTS endpoint can be swapped in
 without code changes. Recommended: Postgres encryption at rest, TLS in front of port 8080 (reverse proxy), and restricting
 `/console` and `/api` to the operations network.
 
@@ -102,4 +108,4 @@ without code changes. Recommended: Postgres encryption at rest, TLS in front of 
 - Keypad (DTMF) is supported on `/ws` but the IVR protocol has no DTMF message yet (pending the IVR team).
 - Transfer destination defaults to the chosen branch's `base_extension` unless `IVR_TRANSFER_DESTINATION` is set.
 - Six skills (manage appointment, send info, insurance, medical reports, post-visit, complaints) are drafts pending flow specs.
-- Unified live view across processes (Redis) and horizontal autoscaling are not built yet.
+- Horizontal autoscaling is not built yet (processes / containers are added by configuration).

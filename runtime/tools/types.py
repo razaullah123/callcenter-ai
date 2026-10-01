@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ToolKind = Literal["read", "write", "send"]
-ToolSource = Literal["mcp", "local"]
+ToolSource = Literal["mcp", "local", "http"]
 ConfirmMode = Literal["none", "affirm", "readback"]
 
 
@@ -19,6 +19,13 @@ class ToolDef:
     idempotent: bool = False      # write tools: never execute the same call twice per session
     timeout_s: float | None = None
     confirm: ConfirmMode = "none"
+    # --- what the harness knows about the tool (all from the tool policy; no tool names in harness code)
+    role: str | None = None                   # a capability the harness drives itself, e.g. "identity.lookup"
+    role_args: dict[str, str] = field(default_factory=dict)   # role parameter → this tool's argument name
+    hooks: tuple[str, ...] = ()               # named hooks (runtime.tools.hooks) run before / after the call
+    backs: str | None = None                  # the claim a success makes true: booked | confirmed | cancelled | sent
+    success_line: str | None = None           # phrase the harness says when the confirmed call succeeds
+    http: dict[str, Any] | None = None        # API-request tools: {url, method, headers, body}
 
 
 @dataclass

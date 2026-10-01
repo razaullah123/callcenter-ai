@@ -16,30 +16,29 @@ import time
 from datetime import date
 from typing import Any, Protocol
 
-from runtime.config import get_settings
+from runtime.config import Settings, get_settings
 from runtime.events import BoundEmitter, EventType, Level
 from runtime.providers import LLMProvider, TextDelta, ToolCall, ToolCallsReady
 from runtime.providers.base import LLMDone
 from runtime.providers.hedge import hedged
 from runtime.tools import ToolContext, ToolExecutor, ToolResult
+from runtime.skills.flow import _eval as flow_eval
+from runtime.skills.graph import ACTION_TYPES
+from runtime.tools.hooks import load_packs, run_tool_hooks, turn_hooks
 
-from . import control, prefetch
+from . import control
 from .context import build_messages, tool_call_message
-from .nlu.dates import describe, resolve_date, resolve_dob, today_riyadh
+from .nlu.dates import resolve_dob, today_riyadh
 from .nlu.gender import gender_from_text
-from .nlu.extract import dateish, extract, numberish
+from .nlu.extract import classify_and_extract, dateish, extract, numberish
 from .nlu.lang import detect
 from .nlu.intents import (EMERGENCY_MESSAGE, describes_location, greeting_only, greeting_reply, loose_earliest, mentions_since, red_flag, red_flag_clinic,
                           wants_earliest, wants_human, yes_no)
 from .nlu.numbers import extract_code, normalize_mobile
 from .policy import (MAX_MATCH_ATTEMPTS, MAX_OTP_ATTEMPTS, Policy, clean_for_speech, normalize_datetime_args,
                      is_reasoning_leak, to_feminine, unbacked_claim)
-from .prompts import (BOOKED_LINE, FALLBACK, FILLER, GREETING, GREETING_NOTE, HANDOFF, HANDOFF_SHORT,
-                      IDENTITY_CONFIRMED_NOTE, IDENTITY_QUESTION,
-                      NOT_THE_PATIENT, OTP_CODE_QUESTION, READBACK_REASK, TRANSLITERATE,
-                      READBACK_UNCLEAR_NOTE, SLOW_TOOL_FILLER, STILL_WORKING,
-                      RED_FLAG_NOTE, REPLY_IN_ENGLISH)
-from .session import Session
+from .prompts import Phrases
+from .session import VERIFY_SKILL, Session
 from .skills import SkillSet
 
 MAX_HOPS = 6
@@ -57,7 +56,6 @@ def _tool_call_error(e: Exception) -> str | None:
         return "malformed tool call"
     return None
 MAX_TOOL_FAILURES = 3
-POST_AUTH_SKILL = "home"
 
 
 class AgentOutput(Protocol):
@@ -125,20 +123,25 @@ async def _dispatch_post(tool, args, result, ctx: ToolContext):
 
 class Agent:
     def __init__(self, session: Session, executor: ToolExecutor, llm: LLMProvider, skills: SkillSet,
-                 output: AgentOutput, emitter: BoundEmitter, *, filler_after_s: float = 0.7) -> None:
+                 output: AgentOutput, emitter: BoundEmitter, *, filler_after_s: float = 0.7,
+                 settings: Settings | None = None) -> None:
         self.s, self.executor, self.skills, self.out = session, executor, skills, output
+        self.settings = settings or get_settings()       # the agent's knobs (per release), frozen for this call
+        self.ph: Phrases = getattr(skills, "phrases", None) or Phrases()
         self.ev = emitter.bind(call_id=session.call_id)
         # Groq's first-token time spikes (0.6 s vs 8 s for similar requests): race a backup when it's slow to start
-        self.llm = hedged(llm, get_settings().llm_hedge_after_s,
+        self.llm = hedged(llm, self.settings.llm_hedge_after_s,
                           on_hedge=lambda d: self.ev.emit(EventType.LLM_HEDGE, **d))
-        self.policy = Policy(session)
+        self.policy = Policy(session, executor.catalog)
         self.filler_after_s = filler_after_s
         self._spoken: list[str] = []
         self._done_tools: set[str] = set()   # write / send tools that succeeded in this call
+        self._done_claims: set[str] = set()  # what those successes back: booked / confirmed / cancelled / sent
         self._turn_answered = False
         self._filler_said = False
         self._filler_idx = 0
         self._last_step: str | None = None
+        load_packs()                                       # named tool / turn hooks referenced by the config
         if _dispatch_pre not in executor.pre_hooks:        # hooks are shared; they route per call via ctx
             executor.pre_hooks.append(_dispatch_pre)
             executor.post_hooks.append(_dispatch_post)
@@ -146,11 +149,18 @@ class Agent:
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
+        if self.settings.main_flow:                          # one flow graph runs the whole call
+            self.s.flow_skill = self.s.active_skill = self.settings.main_flow
+        if not self.settings.require_verification:          # e.g. an information line: straight to its entry skill
+            a = self.s.auth
+            a.required, a.verified, a.identity_confirmed = False, True, True
+            if not self.s.flow_skill:
+                self.s.active_skill = self.settings.entry_skill
         lang = self.s.language.language
         self.ev.emit(EventType.CALL_START, ani_present=self.s.ani is not None, language=lang,
-                     config_version=getattr(self, "config_version", None))
-        await self._say(GREETING[lang])
-        self.s.history.append({"role": "assistant", "content": GREETING[lang]})
+                     config_version=getattr(self, "config_version", None), **getattr(self, "agent_ref", {}))
+        await self._say(self.ph.GREETING[lang])
+        self.s.history.append({"role": "assistant", "content": self.ph.GREETING[lang]})
 
     async def handle(self, text: str, stt_language: str | None = None) -> None:
         s = self.s
@@ -171,7 +181,7 @@ class Agent:
         except Exception as e:
             ev.emit(EventType.ERROR, level=Level.ERROR, error=repr(e))
             s.tool_failures += 1
-            await self._say(FALLBACK[s.language.language])
+            await self._say(self.ph.FALLBACK[s.language.language])
         finally:
             ev.emit(EventType.TURN_END, latency_ms=round((time.perf_counter() - t0) * 1000, 1))
         if s.tool_failures >= MAX_TOOL_FAILURES and not s.handoff:
@@ -208,14 +218,14 @@ class Agent:
             return
         note = ""
         if red_flag(text):
-            mode = get_settings().red_flag_mode
+            mode = self.settings.red_flag_mode
             ev.emit(EventType.POLICY_BLOCK, reason="red_flag_symptoms", mode=mode)
             if mode == "stop":
                 msg = EMERGENCY_MESSAGE[s.language.language]
                 s.history += [{"role": "user", "content": text}, {"role": "assistant", "content": msg}]
                 await self._say(msg)
                 return
-            note = RED_FLAG_NOTE[mode]
+            note = self.ph.RED_FLAG_NOTE[mode]
             if clinic := red_flag_clinic(text):
                 note += f"\n[system: the matching clinic for this symptom is {clinic}.]"
 
@@ -226,14 +236,14 @@ class Agent:
             await self._say(reply)
             return
         if greeting:
-            note += GREETING_NOTE
+            note += self.ph.GREETING_NOTE
         if s.pending_action and s.last_reply not in ("yes", "no"):
-            note += READBACK_UNCLEAR_NOTE
+            note += self.ph.READBACK_UNCLEAR_NOTE
         if s.language.language == "en":
-            note += REPLY_IN_ENGLISH   # the opening greeting is Arabic: keep the model from drifting back
+            note += self.ph.REPLY_IN_ENGLISH   # the opening greeting is Arabic: keep the model from drifting back
         extracted = await self._extract(text, ev)
         s.history.append({"role": "user", "content": text + self._hints(text, extracted) + note})
-        if s.auth.verified and s.active_skill == POST_AUTH_SKILL:
+        if s.auth.verified and not s.flow_skill and s.active_skill == self.settings.entry_skill:
             if routed := getattr(self.skills, "classify", lambda _t: None)(text):
                 s.active_skill = routed
                 ev.emit(EventType.SKILL_ENTER, skill=routed, routed_by="keywords")
@@ -244,9 +254,9 @@ class Agent:
                 s.last_reply = "consumed"          # this yes was for "Am I speaking to …?", nothing else
                 ev.emit(EventType.SLOT_SET, field="identity_confirmed", value=True)
                 if s.history and s.history[-1].get("role") == "user":
-                    s.history[-1]["content"] += IDENTITY_CONFIRMED_NOTE
+                    s.history[-1]["content"] += self.ph.IDENTITY_CONFIRMED_NOTE
             elif s.last_reply == "no":
-                await self._handoff(NOT_THE_PATIENT, ev)
+                await self._handoff(self.ph.NOT_THE_PATIENT, ev)
                 return
             else:
                 # unclear (misheard / loose): the model reads it — record_answer, or it asks again (IDENTITY_STEP).
@@ -257,49 +267,117 @@ class Agent:
                     a.identity_confirmed = True
                     ev.emit(EventType.SLOT_SET, field="identity_confirmed", value=True, source="implicit")
                     if s.history and s.history[-1].get("role") == "user":
-                        s.history[-1]["content"] += IDENTITY_CONFIRMED_NOTE
+                        s.history[-1]["content"] += self.ph.IDENTITY_CONFIRMED_NOTE
+        await self._graph_turn(text, ev)
         if s.pending_action and await self._resolve_pending(ev):
             return
         await self._llm_loop(ev)
 
-    def _asked_date_question(self) -> bool:
-        last = next((m.get("content") or "" for m in reversed(self.s.history) if m.get("role") == "assistant"), "")
-        return "أقرب موعد متاح" in last or "earliest available appointment" in last.lower()
+    # ------------------------------------------------------------------ flow graphs
+
+    def _flow_skill(self) -> str:
+        return self.s.flow_skill or (VERIFY_SKILL if not self.s.auth.verified else self.s.active_skill)
+
+    async def _graph_turn(self, text: str, ev: BoundEmitter) -> None:
+        """The current node's edge questions ("the caller wants a different hospital") and variables, read from
+        the caller's words in one short call — only when the node has any."""
+        skill = self._flow_skill()
+        graph = getattr(self.skills, "graph", lambda _s: None)(skill)
+        if graph is None:
+            return
+        node = self.skills.node(skill, self.s)
+        state = self.skills.graph_state(skill, self.s)
+        state["llm"] = {}
+        questions = graph.llm_conditions(node.id)
+        variables = {n: graph.variables[n] for n in node.extract if n in graph.variables}
+        if not questions and not variables:
+            return
+        last = next((m.get("content") or "" for m in reversed(self.s.history[:-1]) if m.get("role") == "assistant"), "")
+        answers, values, ms = await classify_and_extract(
+            self.llm, text, questions=questions, variables=variables, today=today_riyadh(),
+            context=f"The agent had just said: {last}" if last else "")
+        state["llm"] = answers
+        for name, value in values.items():
+            self.s.slots[name] = value
+            ev.emit(EventType.SLOT_SET, field=name, value=value, source="flow_extract")
+        ev.emit(EventType.SLOT_SET, field="flow:classified", value={q[:60]: a for q, a in answers.items()},
+                node=node.id, latency_ms=ms)
+
+    async def _run_graph_actions(self, ev: BoundEmitter) -> bool:
+        """Nodes the platform performs itself when the flow reaches them: call a tool (then follow its success /
+        failure edge), transfer, end the call, or continue in another skill. True if the turn is over."""
+        node_of = getattr(self.skills, "node", None)
+        if node_of is None:
+            return False
+        for _ in range(6):
+            skill = self._flow_skill()
+            node = node_of(skill, self.s)
+            if node is None or node.type not in ACTION_TYPES:
+                return False
+            state = self.skills.graph_state(skill, self.s)
+            ev.emit(EventType.STEP_TRANSITION, previous=self._last_step, step=f"{skill}/{node.id}", action=node.type)
+            self._last_step = f"{skill}/{node.id}"
+            if node.type == "tool":
+                ctx = {"slots": self.s.slots, "parsed": self.s.memory.get("parsed") or {}}
+                args = {k: flow_eval(v, ctx) for k, v in node.args.items()}
+                call = ToolCall(id=f"flow_{node.id}_{self.s.turn_id}", name=node.tool, arguments=args)
+                state.setdefault("ran", {})[node.id] = self.s.turn_id   # at most once per turn (no retry loops)
+                result = await self._execute_with_filler(call, self._ctx(), ev)
+                self.s.history.append(tool_call_message("", [call]))
+                self.s.history.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
+                self._after_tool(call, result, ev)
+                state.setdefault("outcome", {})[node.id] = result.ok
+                if self.s.handoff or self.s.ended:
+                    return True
+            elif node.type == "transfer":
+                await self._handoff(node.reason or "flow: transfer to a person", ev)
+                return True
+            elif node.type == "end":
+                if line := node.say.get(self.s.language.language):
+                    await self._say(line)
+                    self.s.history.append({"role": "assistant", "content": line})
+                self.s.ended = True
+                ev.emit(EventType.CALL_END, reason="completed", node=node.id)
+                await self.out.hangup()
+                return True
+            elif node.type == "skill":
+                target = node.skill
+                state["node"] = None                    # coming back later starts this skill's flow again
+                if target not in getattr(self.skills, "skills", {}):
+                    ev.emit(EventType.ERROR, level=Level.WARNING, during="flow", error=f"unknown skill {target}")
+                    return False
+                ev.emit(EventType.SKILL_EXIT, skill=skill, reason=f"flow:{node.id}")
+                self.s.active_skill = target
+                ev.emit(EventType.SKILL_ENTER, skill=target, routed_by="flow")
+        return False
+
+    def _turn_hooks(self) -> list:
+        """The active skill's turn hooks (e.g. hmg.booking: dates, times, "I'm at …")."""
+        names = getattr(self.skills, "turn_hook_names", lambda _s: [])(self.s.active_skill)
+        return turn_hooks(names) if self.s.auth.verified else []
 
     # ------------------------------------------------------------------ extraction (regex first, then the LLM)
 
-    def _awaited(self, text: str) -> str | None:
+    def _awaited(self, text: str) -> tuple[str, dict[str, Any]] | None:
         """Which detail the call is waiting for, if the fast parsers didn't find it but the words may hold it."""
-        s = self.s
-        stage = s.auth.stage
+        stage = self.s.auth.stage
         if stage == "awaiting_mobile":
-            return "mobile" if not normalize_mobile(text) and numberish(text) else None
+            return ("mobile", {}) if not normalize_mobile(text) and numberish(text) else None
         if stage == "awaiting_otp":
-            return "otp" if not extract_code(text) and numberish(text) else None
+            return ("otp", {}) if not extract_code(text) and numberish(text) else None
         if stage == "awaiting_dob_and_name":
-            return "dob_name" if not resolve_dob(text) and (numberish(text) or dateish(text)) else None
-        if not (s.auth.verified and s.active_skill == "book_appointment"):
-            return None
-        if self._offered_times_last() and not s.pending_action:
-            return "time_choice"
-        if not s.slots.get("project_id") or resolve_date(text) or wants_earliest(text) or mentions_since(text):
-            return None
-        if self._asked_date_question() or dateish(text):
-            return "date"
+            return ("dob_name", {}) if not resolve_dob(text) and (numberish(text) or dateish(text)) else None
+        for hook in self._turn_hooks():
+            if (awaits := getattr(hook, "awaits", None)) and (found := awaits(self, text)):
+                return found
         return None
 
-    def _offered_times_last(self) -> bool:
-        last = next((m.get("content") or "" for m in reversed(self.s.history) if m.get("role") == "assistant"), "")
-        return bool(self.s.memory.get("offered_slots")) and ("time slots" in last.lower() or "الأوقات المتاحة" in last)
-
     async def _extract(self, text: str, ev: BoundEmitter) -> dict[str, Any]:
-        field = self._awaited(text)
-        if field is None:
+        awaited = self._awaited(text)
+        if awaited is None:
             return {}
-        offered: set[str] = set()
-        for days in (self.s.memory.get("offered_slots") or {}).values():
-            for times in days.values():
-                offered |= set(times)
+        field, options = awaited
+        offered: set[str] = set(options.get("offered") or ())
         last = next((m.get("content") or "" for m in reversed(self.s.history) if m.get("role") == "assistant"), "")
         r = await extract(self.llm, field, text, today=today_riyadh(), offered=offered,
                           context=f"The agent had just said: {last}" if last else "")
@@ -325,29 +403,9 @@ class Agent:
             hints.append(f"date_of_birth: {d.isoformat()}")
             if (x.get("dob_name") or {}).get("first_name"):
                 hints.append(f"first_name: {x['dob_name']['first_name']}")
-        elif s.auth.verified and x.get("time_choice"):
-            hints.append(f"the caller chose the time {x['time_choice']}")
-        elif s.auth.verified and x.get("date") == "earliest":
-            s.memory.pop("requested_date", None)
-            s.memory["wants_earliest"] = True
-            hints.append("the caller wants the earliest available appointment")
-        elif s.auth.verified and isinstance(x.get("date"), date):
-            d = x["date"]
-            hints.append(f"date: {describe(d, s.language.language)}")
-            s.memory["requested_date"] = d.isoformat()
-            s.memory.pop("wants_earliest", None)
-        elif s.auth.verified and not mentions_since(text) and (d := resolve_date(text)):
-            hints.append(f"date: {describe(d, s.language.language)}")
-            s.memory["requested_date"] = d.isoformat()     # slot searches must use this day (policy)
-            s.memory.pop("wants_earliest", None)
-        elif s.auth.verified and (wants_earliest(text) or (self._asked_date_question() and loose_earliest(text))):
-            s.memory.pop("requested_date", None)
-            s.memory["wants_earliest"] = True
-            hints.append("the caller wants the earliest available appointment")
-        if s.auth.verified and s.active_skill == "book_appointment" and "project_id" not in s.slots \
-                and describes_location(text):
-            hints.append("the caller said where they ARE — search nearby hospitals with resolve_location, "
-                         "not find_hospital_by_name")
+        for hook in self._turn_hooks():
+            if hints_for := getattr(hook, "hints", None):
+                hints += hints_for(self, text, x)
         if s.last_reply and s.pending_action:
             hints.append(f"caller answered: {s.last_reply}")
         return f"\n[parsed: {'; '.join(hints)}]" if hints else ""
@@ -365,8 +423,9 @@ class Agent:
             s.history.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
             self._after_tool(call, result, ev)
             s.last_reply = "consumed"   # this "yes" was for the read-back; further actions need a new one
-            if pending.tool == "api_book_Appointment" and result.ok:
-                line = BOOKED_LINE[s.language.language]
+            tool = self.executor.catalog.get(pending.tool)
+            if result.ok and tool is not None and tool.success_line and hasattr(self.ph, tool.success_line):
+                line = getattr(self.ph, tool.success_line)[s.language.language]
                 await self._say(line)
                 s.history.append({"role": "assistant", "content": line})
                 return True
@@ -380,12 +439,14 @@ class Agent:
         for hop in range(MAX_HOPS):
             self._track_step(ev)
             await self._run_auto_calls(ev)
+            if await self._run_graph_actions(ev):
+                return
             if await self._say_harness_lines():
                 return
             messages = build_messages(s, self.skills)
             allowed = self._allowed()
             tools = self.executor.llm_tools(allowed) + control.control_specs(
-                verified=s.auth.verified, routable=self.skills.routable(),
+                verified=s.auth.verified, routable={} if s.flow_skill else self.skills.routable(),
                 disambiguating=s.auth.stage == "awaiting_dob_and_name", awaiting=self._awaiting_answer())
             spoken_before = len(self._spoken)
             try:
@@ -412,9 +473,11 @@ class Agent:
             if not calls:
                 if text:
                     s.history.append({"role": "assistant", "content": text})
-                    prefetch.after_text(self, text)
+                    for hook in self._turn_hooks():
+                        if after := getattr(hook, "after_text", None):
+                            after(self, text)
                 elif len(self._spoken) == spoken_before:
-                    await self._say(FALLBACK[s.language.language])
+                    await self._say(self.ph.FALLBACK[s.language.language])
                 return
             s.history.append(tool_call_message(text, calls))
             # a question anywhere in the reply (it may end with the "more time slots" note, not a "?")
@@ -438,7 +501,7 @@ class Agent:
                 # The caller was asked something: wait for their answer instead of talking over it.
                 ev.emit(EventType.POLICY_BLOCK, reason="question_asked_stop_turn")
                 return
-        await self._say(FALLBACK[s.language.language])
+        await self._say(self.ph.FALLBACK[s.language.language])
 
     async def _stream(self, messages, tools, ev: BoundEmitter, hop: int,
                       mute: bool = False) -> tuple[str, list[ToolCall]]:
@@ -462,7 +525,7 @@ class Agent:
                     if asked:
                         after_question += 1
                     if self._blocked_claim(sentence, ev):
-                        sentence = READBACK_REASK[lang] if self.s.pending_action else ""
+                        sentence = self.ph.READBACK_REASK[lang] if self.s.pending_action else ""
                         asked = True
                         if not sentence:
                             continue
@@ -477,7 +540,7 @@ class Agent:
         if (rest := chunker.flush()) and not mute and (not asked or (after_question == 0 and
                                                                      _MORE_TIMES_NOTE.search(rest))):
             if self._blocked_claim(rest, ev):
-                rest = READBACK_REASK[lang] if self.s.pending_action else ""
+                rest = self.ph.READBACK_REASK[lang] if self.s.pending_action else ""
             if rest:
                 await self._say(rest)
                 spoken.append(rest)
@@ -507,17 +570,17 @@ class Agent:
             done, _ = await asyncio.wait({task}, timeout=self.filler_after_s)
             if not done and not self._filler_said:
                 self._filler_said = True
-                if special := SLOW_TOOL_FILLER.get(call.name):
+                if special := self.ph.SLOW_TOOL_FILLER.get(call.name):
                     await self._say(special[lang])
                 else:
-                    fillers = FILLER[lang]
+                    fillers = self.ph.FILLER[lang]
                     await self._say(fillers[self._filler_idx % len(fillers)])
                     self._filler_idx += 1
                 for _ in range(2):
                     done, _ = await asyncio.wait({task}, timeout=STILL_WORKING_AFTER_S)
                     if done:
                         break
-                    await self._say(STILL_WORKING[lang])     # no long silences on the phone
+                    await self._say(self.ph.STILL_WORKING[lang])     # no long silences on the phone
             return await (asyncio.shield(task) if critical else task)
         except asyncio.CancelledError:
             if critical:   # never abandon a booking / cancellation half-way: finish and record it
@@ -531,7 +594,7 @@ class Agent:
         s, args = self.s, call.arguments
         if call.name == control.SWITCH_SKILL:
             skill = args.get("skill")
-            if not s.auth.verified or skill not in self.skills.routable():
+            if not s.auth.verified or s.flow_skill or skill not in self.skills.routable():
                 return json.dumps({"error": "not available"})
             ev.emit(EventType.SKILL_EXIT, skill=s.active_skill)
             s.active_skill = skill
@@ -576,7 +639,7 @@ class Agent:
             return json.dumps({"ok": True, "next": "ask the question again, briefly"})
         if question == "identity":
             if answer == "no":
-                await self._handoff(NOT_THE_PATIENT, ev)
+                await self._handoff(self.ph.NOT_THE_PATIENT, ev)
                 return json.dumps({"ok": True, "transferred": True})
             s.auth.identity_confirmed = True
             ev.emit(EventType.SLOT_SET, field="identity_confirmed", value=True, source="model")
@@ -601,9 +664,9 @@ class Agent:
         s, lang = self.s, self.s.language.language
         lines: list[str] = []
         if msg := s.memory.pop("otp_message", None):
-            lines = [msg, OTP_CODE_QUESTION[lang]]
+            lines = [msg, self.ph.OTP_CODE_QUESTION[lang]]
         elif s.memory.pop("identity_say", None):
-            lines = [IDENTITY_QUESTION[lang].format(name=await self._spoken_name())]
+            lines = [self.ph.IDENTITY_QUESTION[lang].format(name=await self._spoken_name())]
         if not lines:
             return False
         for line in lines:
@@ -629,7 +692,7 @@ class Agent:
     async def _transliterate(self, name: str) -> str:
         text = ""
         try:
-            async for ev in self.llm.stream([{"role": "user", "content": TRANSLITERATE.format(name=name)}]):
+            async for ev in self.llm.stream([{"role": "user", "content": self.ph.TRANSLITERATE.format(name=name)}]):
                 if isinstance(ev, TextDelta):
                     text += ev.text
         except Exception:
@@ -639,8 +702,8 @@ class Agent:
         return self.s.memory["name_ar"]
 
     def _blocked_claim(self, sentence: str, ev: BoundEmitter) -> bool:
-        pending = self.s.pending_action.tool if self.s.pending_action else None
-        if claim := unbacked_claim(sentence, self._done_tools, pending):
+        tool = self.executor.catalog.get(self.s.pending_action.tool) if self.s.pending_action else None
+        if claim := unbacked_claim(sentence, self._done_claims, tool.backs if tool else None):
             ev.emit(EventType.POLICY_BLOCK, reason="unbacked_claim", claim=claim, text=sentence[:120])
             return True
         return False
@@ -649,22 +712,27 @@ class Agent:
         tool = self.executor.catalog.get(call.name)
         if result.ok and tool is not None and tool.kind in ("write", "send"):
             self._done_tools.add(call.name)
-        if call.name == "api_send_otp_request" and result.ok and isinstance(result.data, dict):
+            if tool.backs:
+                self._done_claims.add(tool.backs)
+        role = tool.role if tool is not None else None
+        if role == "identity.send_code" and result.ok and isinstance(result.data, dict):
             msg = str(result.data.get("message") or "").strip()
-            if msg and detect(msg) == self.s.language.language and len(msg) > 20:   # the HIS's sentence, in our language
+            if msg and detect(msg) == self.s.language.language and len(msg) > 20:   # the system's sentence, in our language
                 self.s.memory["otp_message"] = msg
-        if call.name == "mssql_get_patient_info" and self.s.auth.full_name and self.s.language.language == "ar"                 and "name_ar_task" not in self.s.memory:
+        if role == "identity.lookup" and self.s.auth.full_name and self.s.language.language == "ar" \
+                and "name_ar_task" not in self.s.memory:
             # "هل أتحدث مع …؟" needs the name in Arabic letters: prepare it while the OTP is being sent
             self.s.memory["name_ar_task"] = asyncio.ensure_future(self._transliterate(self.s.auth.full_name))
-        if call.name == "api_verify_otp" and self.s.auth.verified and not self.s.auth.identity_confirmed:
+        if role == "identity.verify_code" and self.s.auth.verified and not self.s.auth.identity_confirmed:
             self.s.memory["identity_say"] = True
         on_tool = getattr(self.skills, "on_tool", None)
         if on_tool:
-            skill = "authenticate" if not self.s.auth.verified else self.s.active_skill
+            skill = self._flow_skill()
             args = normalize_datetime_args(call.arguments)
             for slot, value in on_tool(skill, call.name, args, result.data, result.ok, self.s).items():
                 ev.emit(EventType.SLOT_SET, field=slot, value=value, tool=call.name)
-        prefetch.after_tool(self, call, result)
+        if tool is not None:
+            run_tool_hooks("after", tool, call.arguments, self.s, result=result, agent=self)
 
     async def _run_auto_calls(self, ev: BoundEmitter) -> None:
         """Step-declared lookups the harness performs itself (e.g. the hospital's clinic list once a hospital
@@ -674,7 +742,7 @@ class Agent:
             return
         done = self.s.memory.setdefault("auto_done", set())
         for _ in range(4):                       # chain: lookup → send OTP happen in the same turn
-            skill = "authenticate" if not self.s.auth.verified else self.s.active_skill
+            skill = self._flow_skill()
             ran = False
             for tool, args, blocking in auto(skill, self.s):
                 key = f"{tool}:{json.dumps(args, sort_keys=True)}"
@@ -700,11 +768,11 @@ class Agent:
 
     def _route_if_verified(self, ev: BoundEmitter) -> None:
         s = self.s
-        if s.auth.verified and s.active_skill == "authenticate":
-            ev.emit(EventType.SKILL_EXIT, skill="authenticate", reason="verified")
+        if s.auth.verified and not s.flow_skill and s.active_skill == VERIFY_SKILL:
+            ev.emit(EventType.SKILL_EXIT, skill=VERIFY_SKILL, reason="verified")
             # Route the caller's first request directly (saves a switch_skill round trip).
             routed = getattr(self.skills, "classify", lambda _t: None)(s.pending_intent)
-            s.active_skill = routed or POST_AUTH_SKILL
+            s.active_skill = routed or self.settings.entry_skill
             ev.emit(EventType.SKILL_ENTER, skill=s.active_skill, routed_by="keywords" if routed else None)
 
     def _needs_followup(self) -> bool:
@@ -715,7 +783,7 @@ class Agent:
         current_step = getattr(self.skills, "current_step", None)
         if not current_step:
             return
-        skill = "authenticate" if not self.s.auth.verified else self.s.active_skill
+        skill = self._flow_skill()
         step = f"{skill}/{current_step(skill, self.s)}"
         if step != self._last_step:
             ev.emit(EventType.STEP_TRANSITION, previous=self._last_step, step=step)
@@ -723,7 +791,7 @@ class Agent:
 
     def _allowed(self) -> set[str]:
         s = self.s
-        skill = "authenticate" if not s.auth.verified else s.active_skill
+        skill = self._flow_skill()
         return set(self.skills.tools(skill, s))
 
     def _ctx(self, confirmed: str | None = None) -> ToolContext:
@@ -744,8 +812,9 @@ class Agent:
         if not text:
             return
         self._spoken.append(text)
-        if "أقرب موعد متاح" in text or "earliest available appointment" in text.lower():
-            self.s.memory["date_question_turn"] = self.s.turn_id    # the caller's next reply answers it
+        for hook in self._turn_hooks():
+            if on_say := getattr(hook, "on_say", None):
+                on_say(self, text)
         self.ev.emit(EventType.AGENT_SAY, text=text)
         await self.out.say(text, language=self.s.language.language)
 
@@ -757,7 +826,7 @@ class Agent:
         ev.emit(EventType.HANDOFF, reason=reason)
         announced = any(w in " ".join(self._spoken) for w in ("أحول", "بحول", "الزملاء", "زميل", "transfer",
                                                                  "connect you", "colleague"))
-        msg = (HANDOFF_SHORT if announced else HANDOFF)[s.language.language]
+        msg = (self.ph.HANDOFF_SHORT if announced else self.ph.HANDOFF)[s.language.language]
         s.history.append({"role": "assistant", "content": msg})
         await self._say(msg)
         await self.out.transfer(reason)

@@ -8,6 +8,11 @@
 # confirm:  readback — agent must read the details back and the caller must say yes (harness-enforced)
 #           affirm   — caller's latest reply must be a yes to the agent's question (default for write/send)
 #           none     — no confirmation (default for read)
+# role:     a capability the harness drives itself — identity.lookup / identity.send_code / identity.verify_code
+#           (caller verification); "args" maps the role's parameters to this tool's argument names
+# hooks:    named hooks from a pack (runtime/packs) — grounding checks, bookkeeping, prefetch
+# backs:    the claim a success makes true (booked | confirmed | cancelled | sent): the agent may only say it after
+# success_line: phrase the harness says when the confirmed call succeeds (e.g. BOOKED_LINE)
 # inject:   parameters filled by the harness from session state and HIDDEN from the LLM schema.
 #           This stops the model from guessing patient IDs and forces Arabic responses.
 
@@ -20,35 +25,37 @@ inject:
 
 skills:
   authenticate:
-    mssql_get_patient_info:        { kind: read }   # lookup by caller mobile (ANI) or MRN
+    mssql_get_patient_info:        { kind: read, role: identity.lookup, args: { mobile: mobileNo } }   # lookup by mobile
     mssql_get_patient_by_name_dob: { kind: read }   # fallback: name + DOB (YYYY-MM-DD)
-    api_send_otp_request:          { kind: send, confirm: none, timeout_s: 20 }   # verification; WhatsApp send took >10 s live
-    api_verify_otp:                { kind: read }
+    api_send_otp_request:          { kind: send, confirm: none, timeout_s: 20, role: identity.send_code,
+                                     args: { channel: Channel, default_channel: WhatsApp } }   # WhatsApp send took >10 s live
+    api_verify_otp:                { kind: read, role: identity.verify_code, args: { code: Otp } }
     mssql_get_family_members:      { kind: read }   # acting for a family member
 
   book_appointment:
-    find_hospital_by_name:                                { kind: read, source: local }  # projects.aliases → reference_id, project_name
+    find_hospital_by_name:                                { kind: read, source: local, hooks: [hmg.offer_projects, hmg.prefetch_clinics] }  # projects.aliases → reference_id
     resolve_location:                                     { kind: read, source: local }  # locations: embeddings + aliases → lat, lng
-    mssql_get_Projects_from_Location:                     { kind: read }  # lat/lng → nearby hospitals (top 5, offer 3)
-    mssql_get_clinics_for_project:                        { kind: read, cache_ttl: 3600 }
-    mssql_get_TopFive_nearestClinic_have_doctorSlots:     { kind: read, cache_ttl: 60, timeout_s: 20 }  # earliest, paginated (5/page); live: >16 s under load
+    mssql_get_Projects_from_Location:                     { kind: read, hooks: [hmg.offer_projects, hmg.prefetch_clinics] }  # lat/lng → nearby hospitals
+    mssql_get_clinics_for_project:                        { kind: read, cache_ttl: 3600, hooks: [hmg.pick_offered_project, hmg.clinic_list] }
+    mssql_get_TopFive_nearestClinic_have_doctorSlots:     { kind: read, cache_ttl: 60, timeout_s: 20, hooks: [hmg.slot_search_gate, hmg.offered_slots] }  # earliest; >16 s under load
     mssql_get_nearestClinic_have_doctorSlots:             { kind: read, cache_ttl: 60 }  # earliest, full list
-    mssql_get_TopFive_availableDoctors_with_slots_byDate: { kind: read, cache_ttl: 60, timeout_s: 20 }  # specific date, paginated
+    mssql_get_TopFive_availableDoctors_with_slots_byDate: { kind: read, cache_ttl: 60, timeout_s: 20, hooks: [hmg.slot_search_gate, hmg.offered_slots] }  # specific date
     mssql_get_availableDoctors_with_slots_byDate:         { kind: read, cache_ttl: 60 }  # specific date, full list
-    api_book_Appointment:                                 { kind: write, idempotent: true, confirm: readback }
+    api_book_Appointment:                                 { kind: write, idempotent: true, confirm: readback, backs: booked,
+                                                            success_line: BOOKED_LINE, hooks: [hmg.slot_offered, hmg.booked] }
 
   manage_appointment:
     mssql_get_upcoming_appointment:        { kind: read }
-    mssql_confirm_appointment:             { kind: write }
-    mssql_cancel_appointment:              { kind: write, confirm: readback }
+    mssql_confirm_appointment:             { kind: write, backs: confirmed }
+    mssql_cancel_appointment:              { kind: write, confirm: readback, backs: cancelled }
     mssql_reschudule_getNearestDoctorSlot: { kind: read }
-    api_Rescheduling_book_appointment:     { kind: write, idempotent: true, confirm: readback }
+    api_Rescheduling_book_appointment:     { kind: write, idempotent: true, confirm: readback, backs: booked }
 
   send_info:
-    api_send_AppointmentSms:          { kind: send }
-    api_send_AppointmentWhatsapp:     { kind: send }
-    api_send_ProjectLocationSms:      { kind: send }   # NOTE: needs AppointmentNo
-    api_send_ProjectLocationWhatsapp: { kind: send }   # NOTE: needs AppointmentNo
+    api_send_AppointmentSms:          { kind: send, backs: sent }
+    api_send_AppointmentWhatsapp:     { kind: send, backs: sent }
+    api_send_ProjectLocationSms:      { kind: send, backs: sent }   # NOTE: needs AppointmentNo
+    api_send_ProjectLocationWhatsapp: { kind: send, backs: sent }   # NOTE: needs AppointmentNo
 
   insurance:
     api_get_insurance_detail:        { kind: read }
@@ -69,7 +76,7 @@ skills:
     api_get_done_vaccines:                  { kind: read }
     api_Dental_Treatment_Plan:              { kind: read }
     api_new_medical_report:                 { kind: write, idempotent: true }
-    api_send_medical_report_email:          { kind: send }   # channel_id 1=Email, 2=WhatsApp
+    api_send_medical_report_email:          { kind: send, backs: sent }   # channel_id 1=Email, 2=WhatsApp
 
   post_visit:
     mssql_get_appointment_history:       { kind: read }   # which doctor/clinic the patient saw

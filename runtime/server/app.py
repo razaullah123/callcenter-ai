@@ -5,7 +5,8 @@
 WebSocket protocol (JSON text frames, one call per connection):
 
   client → agent
-    {"event": "start", "call_id": "...", "ani": "+9665...", "audio": {"encoding": "pcm16"|"mulaw", "sample_rate": 16000|8000}}
+    {"event": "start", "call_id": "...", "ani": "+9665...", "agent": "<agent id, optional>",
+     "audio": {"encoding": "pcm16"|"mulaw", "sample_rate": 16000|8000}}
     {"event": "media", "payload": "<base64 audio, 20 ms frames recommended>"}
     {"event": "dtmf",  "digit": "1"}
     {"event": "stop"}
@@ -31,8 +32,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from runtime.app import Runtime
+from runtime.platform.sync import WORKER_ID
 from runtime.voice.call import VoiceCall
-from runtime.voice.phrases import PhraseCache
 from runtime.voice.player import AudioFormat
 
 from . import CLOSED_ERRORS
@@ -53,10 +54,8 @@ async def lifespan(app: FastAPI):
         if not s.allow_insecure_live:
             raise RuntimeError("refusing to start in TOOLS_MODE=live: " + "; ".join(problems) +
                                " (set ALLOW_INSECURE_LIVE=true only for a supervised test)")
-    rt = await Runtime.create()
-    rt.providers.phrases = PhraseCache(rt.tts)
-    await rt.providers.phrases.warm()
-    state.update(rt=rt, phrases=None, loop_lag_ms=0.0)   # calls take phrases from their provider snapshot
+    rt = await Runtime.create()                          # loads the default agent (phrases pre-synthesized)
+    state.update(rt=rt, phrases=None, loop_lag_ms=0.0)   # calls take phrases from their agent
     lag_task = asyncio.create_task(_measure_loop_lag())
     maint_task = asyncio.create_task(maintenance_loop(s))
     log.info("voice agent ready (tools_mode=%s)", rt.settings.tools_mode)
@@ -84,10 +83,16 @@ async def _measure_loop_lag() -> None:
 app = FastAPI(title="HMG Voice Agent", lifespan=lifespan)
 
 from runtime.control import api as control_api  # noqa: E402 — console API /api
+from runtime.control import connections as control_connections  # noqa: E402 — /api/connections, /api/secrets
+from runtime.control import tools_api as control_tools  # noqa: E402 — /api/tool-library, /api/mcp-servers
+from runtime.control import agents_api as control_agents  # noqa: E402 — /api/agents, /api/routes (Agent Studio)
 from runtime.server import ivr  # noqa: E402 — IVR endpoint /ws/voice-pipeline
 
 app.include_router(ivr.router)
 app.include_router(control_api.router)
+app.include_router(control_connections.router)
+app.include_router(control_tools.router)
+app.include_router(control_agents.router)
 
 # Console (React build in console/dist, served at /console with SPA fallback)
 from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
@@ -121,7 +126,9 @@ async def health() -> dict:
     return {"ok": rt is not None, "tools_mode": rt.settings.tools_mode if rt else None,
             "active_calls": len(rt.live.active) if rt and rt.live else None,
             "loop_lag_ms": state.get("loop_lag_ms"),
-            "config_version": rt.providers.version if rt else None}
+            "config_version": rt.providers.version if rt else None,
+            "agent": {"id": rt.agent.agent_id, "release": rt.agent.version} if rt else None,
+            "worker": WORKER_ID, "cluster_sync": bool(rt and rt.sync and rt.sync.connected.is_set())}
 
 
 def _fmt(spec: dict | None, default: AudioFormat) -> AudioFormat:
@@ -158,8 +165,17 @@ async def call_ws(ws: WebSocket) -> None:
         in_fmt = _fmt(first.get("audio"), AudioFormat())
         out_fmt = _fmt(first.get("output_audio"), in_fmt)
         call_id = first.get("call_id") or f"call-{uuid.uuid4().hex[:12]}"
+        agent = None
+        if hasattr(rt, "agent_for_call"):        # start.agent picks one explicitly (playground / console test call)
+            try:
+                agent = await rt.agent_for_call(agent_id=first.get("agent") or None, number=first.get("ani"),
+                                                draft=bool(first.get("draft")))
+            except LookupError as e:
+                await send_event({"event": "error", "message": str(e)})
+                await ws.close(code=1008, reason="unknown agent")
+                return
         call = VoiceCall(rt, call_id=call_id, in_fmt=in_fmt, out_fmt=out_fmt, send_audio=send_audio,
-                         send_event=send_event, ani=first.get("ani"), phrases=state.get("phrases"))
+                         send_event=send_event, ani=first.get("ani"), phrases=state.get("phrases"), agent=agent)
         rt.calls[call_id] = call
 
         async def close_transport() -> None:

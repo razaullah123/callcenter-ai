@@ -16,8 +16,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Groq
-    groq_api_key: SecretStr
+    # Secret store: encrypts API keys / tokens kept in the database (Fernet key; see .env.example)
+    master_key: SecretStr | None = None
+
+    # Groq — defaults for providers that don't set their own (keys move to the secret store; optional here)
+    groq_api_key: SecretStr | None = None
     groq_stt_model: str = "whisper-large-v3-turbo"
     groq_llm_model: str = "openai/gpt-oss-120b"
     groq_tts_model_ar: str = "canopylabs/orpheus-arabic-saudi"
@@ -26,8 +29,8 @@ class Settings(BaseSettings):
     groq_tts_voice_en: str = "hannah"
 
     # MCP
-    mcp_server_url: str
-    mcp_auth_token: SecretStr
+    mcp_server_url: str | None = None           # seeds the MCP server record (then: console / DB)
+    mcp_auth_token: SecretStr | None = None     # seeds the MCP_AUTH_TOKEN secret
     mcp_transport: str = "streamable_http"
     mcp_auth_header: str = "Authorization"
     mcp_auth_scheme: str = "Bearer"
@@ -57,7 +60,11 @@ class Settings(BaseSettings):
     voice_barge_in_confirm: bool = True  # transcribe that speech first: interrupt only for real words, not echo / noise
     voice_level_gate_db: float = 12.0    # ignore speech this far below the caller's own level (background voices); 0 = off
     voice_filler_after_s: float = 0.7
-    llm_hedge_after_s: float = 2.5       # no first LLM output after this → race an identical backup request (0 = off)
+    llm_hedge_after_s: float = 2.5
+    # Agents (per release knobs): does the caller have to be verified first, and where does the conversation start?
+    require_verification: bool = True    # False: e.g. an information line — no mobile / OTP, starts in entry_skill
+    entry_skill: str = "home"            # the skill after verification (or from the start when none is required)
+    main_flow: str = ""                  # one skill runs the whole call (verification included), as one flow graph       # no first LLM output after this → race an identical backup request (0 = off)
 
     # IVR endpoint /ws/voice-pipeline (compatible with the existing IVR integration)
     auth_secret: SecretStr | None = None      # HS256 JWT secret shared with the IVR auth service (AUTH_SECRET)
@@ -81,6 +88,10 @@ class Settings(BaseSettings):
     allow_insecure_live: bool = False         # start in TOOLS_MODE=live despite missing CONSOLE_TOKEN / AUTH_SECRET
     workers: int = 1                          # server processes (~50 concurrent calls each; see docs/deployment.md)
 
+    # Platform (Phase 12): agents, providers, tools and skills live in the database. In development, repo edits to
+    # skills/, config/tools.yaml and the default phrases are imported as new versions + releases at start-up.
+    platform_repo_sync: bool = True
+
     # Console / control plane
     console_token: SecretStr | None = None    # if set, /api requires "Authorization: Bearer <token>"
 
@@ -91,11 +102,15 @@ class Settings(BaseSettings):
     log_level: str = "info"
 
     def mcp_headers(self) -> dict[str, str]:
+        if self.mcp_auth_token is None:
+            return {}
         value = f"{self.mcp_auth_scheme} {self.mcp_auth_token.get_secret_value()}".strip()
         return {self.mcp_auth_header: value}
 
     def mcp_server_config(self) -> dict[str, dict]:
         """Named MCP servers. Tools are namespaced by server name, so more can be added later."""
+        if not self.mcp_server_url:
+            return {}
         return {
             "hmg_tools": {
                 "transport": self.mcp_transport,

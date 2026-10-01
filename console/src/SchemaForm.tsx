@@ -1,4 +1,4 @@
-import type { JsonSchema } from "./api";
+import { isSecretRef, type JsonSchema } from "./api";
 
 // Minimal JSON-schema form for provider settings (pydantic model schemas): strings, numbers, booleans,
 // enums, secrets, and string maps (headers). Empty fields fall back to the provider's default.
@@ -15,10 +15,12 @@ const MASK = "••••••";
 
 const shown = (x: unknown) => x == null || x === "" ? "" : typeof x === "object" ? JSON.stringify(x) : String(x);
 
-export default function SchemaForm({ schema, value, onChange, effective }: {
+export default function SchemaForm({ schema, value, onChange, effective, secretNames }: {
   schema: JsonSchema; value: Record<string, unknown>; onChange: (v: Record<string, unknown>) => void;
   /** Values in use now (from .env when nothing is stored) — shown in empty fields. */
   effective?: Record<string, unknown>;
+  /** Stored secret names: secret fields can reference one instead of taking a typed value. */
+  secretNames?: string[];
 }) {
   const props = schema.properties ?? {};
   const set = (k: string, v: unknown) => onChange({ ...value, [k]: v });
@@ -58,6 +60,20 @@ export default function SchemaForm({ schema, value, onChange, effective }: {
           input = <textarea className="w-full font-mono text-xs" rows={2} placeholder={eff ? `${eff} (in use)` : '{"Authorization": "Bearer …"}'}
             value={v == null ? "" : typeof v === "string" ? v : JSON.stringify(v)}
             onChange={e => { try { set(name, e.target.value ? JSON.parse(e.target.value) : undefined); } catch { set(name, e.target.value); } }} />;
+        } else if (secret && secretNames) {
+          // a key is never shown: the field references a stored secret, or takes a new value (stored encrypted)
+          const ref = isSecretRef(v) ? v.secret : "";
+          input = (
+            <div className="flex gap-2">
+              <input type="password" className="min-w-0 flex-1" value={isSecretRef(v) || v == null ? "" : String(v)}
+                placeholder={ref ? `stored as ${ref} — type to replace` : "paste a key (stored encrypted)"}
+                onChange={e => set(name, e.target.value || (ref ? { secret: ref } : undefined))} />
+              <select className="w-40" value={ref} onChange={e => set(name, e.target.value ? { secret: e.target.value } : undefined)}>
+                <option value="">use a secret…</option>
+                {secretNames.map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          );
         } else {
           input = <input type={secret ? "password" : "text"} className="w-full" value={v == null ? "" : String(v)}
             placeholder={secret ? (v === MASK ? "stored" : eff === "set" ? "set in .env" : "from .env if empty")

@@ -17,6 +17,9 @@ from runtime.harness.session import Session
 from runtime.providers import AudioInput
 from runtime.providers.audio import mulaw_to_pcm16, resample_pcm16
 
+from runtime.platform.bundle import DEFAULT_STT_HINT
+from runtime.platform.loader import LoadedAgent, agent_of
+
 from .phrases import PhraseCache
 from .player import AudioFormat, SendAudio, SendEvent, SpeechPlayer
 from .stt_quality import LevelGate, noise_reason, speech_level_db, speech_stats
@@ -34,21 +37,22 @@ def vad_rate_for(line_rate: int) -> int:
 
 # Whisper "hallucinations" on noise / silence (subtitle credits etc.) — never real caller speech.
 
-STT_HINT = {
-    # place names only: a longer hint (the group's name) came back verbatim on noise again and again
-    "ar": "أقرب موعد متاح، عيادة، مستشفى العليا، الحمراء، الريان، السويدي، التخصصي، الخرج.",
-    "en": "Appointment, clinic, Olaya, Al Hamra, Arryan, Suwaidi.",
-}
 
 
 class VoiceCall:
+    stt_hint: dict[str, str] = DEFAULT_STT_HINT     # replaced by the call's agent's own vocabulary hint
+
     def __init__(self, rt: Runtime, *, call_id: str, in_fmt: AudioFormat, out_fmt: AudioFormat,
                  send_audio: SendAudio, send_event: SendEvent, ani: str | None = None,
                  phrases: PhraseCache | None = None, chunk_ms: int = 20, aec: bool = False,
-                 barge_in_grace_ms: int = 0, min_suppression_ratio: float = 0.0) -> None:
-        s = rt.settings
+                 barge_in_grace_ms: int = 0, min_suppression_ratio: float = 0.0,
+                 agent: LoadedAgent | None = None) -> None:
+        # the agent answering this call, loaded complete and frozen: a publish never changes a call in progress
+        self.loaded = agent or agent_of(rt)
+        s = self.loaded.settings
         self.rt, self.in_fmt, self._send_event = rt, in_fmt, send_event
-        self.providers = rt.providers          # snapshot: config changes never affect a call in progress
+        self.providers = self.loaded.providers
+        self.stt_hint = self.loaded.stt_hint
         phrases = phrases if phrases is not None else self.providers.phrases
         self.session = Session(call_id=call_id, ani=ani)
         self.ev = rt.bus.bind(call_id=call_id)
@@ -65,9 +69,10 @@ class VoiceCall:
         self.min_suppression_ratio = min_suppression_ratio
         self.player = SpeechPlayer(self.providers.tts, out_fmt, self._send_and_reference, send_event, self.ev,
                                    phrases, frame_ms=chunk_ms)
-        self.agent = Agent(self.session, rt.executor, self.providers.llm, rt.skills, self.player, rt.bus.bind(),
-                           filler_after_s=s.voice_filler_after_s)
-        self.agent.config_version = self.providers.version
+        self.agent = Agent(self.session, self.loaded.executor, self.providers.llm, self.loaded.skills, self.player,
+                           rt.bus.bind(), filler_after_s=s.voice_filler_after_s, settings=s)
+        self.agent.config_version = self.loaded.version
+        self.agent.agent_ref = {"agent_id": self.loaded.agent_id, "release_id": self.loaded.release_id}
         self.vad_rate = vad_rate_for(in_fmt.sample_rate)
         self._in_resampler = self._make_resampler(in_fmt.sample_rate)
         self.turns = TurnDetector(TurnConfig(end_silence_ms=s.voice_end_silence_ms), sample_rate=self.vad_rate)
@@ -282,7 +287,7 @@ class VoiceCall:
 
     def _prompt(self) -> str:
         s = self.session
-        return STT_HINT.get(s.language.language if s.language.decided else "ar", "")
+        return self.stt_hint.get(s.language.language if s.language.decided else "ar", "")
 
     def _is_echo(self, text: str) -> bool:
         from rapidfuzz import fuzz
@@ -317,10 +322,10 @@ class VoiceCall:
         s = self.session
         lang = s.language.language if s.language.decided else None
         audio = AudioInput(pcm, self.vad_rate)
-        tr = await self.providers.stt.transcribe(audio, language=lang, prompt=STT_HINT.get(lang or "ar"))
+        tr = await self.providers.stt.transcribe(audio, language=lang, prompt=self.stt_hint.get(lang or "ar"))
         if lang is None and tr.language not in ("ar", "en"):
             retry = await self.providers.stt.transcribe(audio, language=s.language.language,
-                                                        prompt=STT_HINT.get(s.language.language))
+                                                        prompt=self.stt_hint.get(s.language.language))
             retry.raw["first_guess"] = {"language": tr.language, "text": tr.text[:80]}
             tr = retry
         return tr

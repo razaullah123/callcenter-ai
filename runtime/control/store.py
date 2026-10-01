@@ -68,12 +68,14 @@ class EventStore:
             return
         if e.type == EventType.CALL_START:
             await conn.execute(
-                """INSERT INTO calls (call_id, channel, started_at, language, config_version)
-                   VALUES ($1, $2, $3, $4, $5)
+                """INSERT INTO calls (call_id, channel, started_at, language, config_version, agent_id, release_id)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
                    ON CONFLICT (call_id) DO UPDATE SET channel = EXCLUDED.channel, started_at = EXCLUDED.started_at,
                        language = COALESCE(EXCLUDED.language, calls.language),
-                       config_version = EXCLUDED.config_version""",
-                cid, channel_of(cid), e.ts, d.get("language"), d.get("config_version"))
+                       config_version = EXCLUDED.config_version, agent_id = EXCLUDED.agent_id,
+                       release_id = EXCLUDED.release_id""",
+                cid, channel_of(cid), e.ts, d.get("language"), d.get("config_version"), d.get("agent_id"),
+                d.get("release_id"))
             return
         await conn.execute("INSERT INTO calls (call_id, channel, started_at) VALUES ($1, $2, $3) "
                            "ON CONFLICT (call_id) DO NOTHING", cid, channel_of(cid), e.ts)

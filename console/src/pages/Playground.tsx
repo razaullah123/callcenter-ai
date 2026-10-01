@@ -18,7 +18,10 @@ registerProcessor("capture", Capture);`;
 
 type Line = { role: "user" | "agent" | "sys"; text: string };
 
-export default function Playground() {
+export default function Playground({ agent, draft, embedded }: {
+  /** Call this agent (default: whichever the phone routes pick) — its draft when `draft`. */
+  agent?: string; draft?: boolean; embedded?: boolean;
+} = {}) {
   const [state, setState] = useState<"idle" | "connecting" | "listening" | "speaking">("idle");
   const [lines, setLines] = useState<Line[]>([]);
   const [lat, setLat] = useState<number[]>([]);
@@ -54,7 +57,8 @@ export default function Playground() {
     r.ctx.createMediaStreamSource(r.mic).connect(node);
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
     r.ws = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ event: "start", audio: { encoding: "pcm16", sample_rate: RATE } }));
+    ws.onopen = () => ws.send(JSON.stringify({ event: "start", audio: { encoding: "pcm16", sample_rate: RATE },
+                                               ...(agent ? { agent, draft: !!draft } : {}) }));
     node.port.onmessage = e => {
       const f = e.data as Float32Array, i16 = new Int16Array(f.length); let peak = 0;
       for (let i = 0; i < f.length; i++) { const v = Math.max(-1, Math.min(1, f[i])); i16[i] = v * 32767; peak = Math.max(peak, Math.abs(v)); }
@@ -74,6 +78,7 @@ export default function Playground() {
       else if (m.event === "metric") setLat(p => [...p, m.ms]);
       else if (m.event === "transfer") add({ role: "sys", text: `↪ transfer to human: ${m.reason}` });
       else if (m.event === "hangup") { add({ role: "sys", text: "☎ agent ended the call" }); hang(); }
+      else if (m.event === "error") add({ role: "sys", text: `⚠ ${m.message}` });
     };
     ws.onclose = () => hang();
   };
@@ -90,11 +95,11 @@ export default function Playground() {
 
   const avg = lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) : null;
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
-      <div>
+    <div className={embedded ? "space-y-4" : "mx-auto max-w-3xl space-y-4"}>
+      {!embedded && <div>
         <h1 className="text-xl font-semibold">Playground</h1>
         <p className="text-sm text-muted">Talk to the agent with your microphone (same pipeline as phone calls). Use headphones for clean interruptions. In hybrid test mode: mobile 0551234567, OTP 1234.</p>
-      </div>
+      </div>}
       <Card>
         <div className="flex flex-wrap items-center gap-3">
           {state === "idle" ? <Button kind="primary" onClick={start}>Start call</Button> : <Button kind="danger" onClick={hang}>Hang up</Button>}

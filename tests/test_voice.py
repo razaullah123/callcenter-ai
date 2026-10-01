@@ -192,7 +192,7 @@ def test_noise_rule_matches_groq_probe():
 
 
 def test_prompt_echo_and_level_gate():
-    from runtime.voice.call import STT_HINT
+    from runtime.platform.bundle import DEFAULT_STT_HINT as STT_HINT
     from runtime.voice.stt_quality import LevelGate, echoes_prompt, noise_reason, speech_level_db
     assert noise_reason("Appointment, clinic, Olaya, Al Hamra, Arryan.", {}, STT_HINT["en"]) == "prompt_echo"
     assert not echoes_prompt("Olaya", STT_HINT["en"]) and not echoes_prompt("مستشفى العليا", STT_HINT["ar"])

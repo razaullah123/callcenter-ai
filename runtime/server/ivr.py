@@ -123,6 +123,9 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
             log.warning("extension lookup failed: %r", e)
 
     call_id = f"ivr-{uuid.uuid4().hex[:12]}"
+    # which agent answers: the phone routes (number / extension prefix), else the default agent
+    agent = await rt.agent_for_call(number=digits) if hasattr(rt, "agent_for_call") else None
+    knobs = agent.settings if agent else s      # the agent's own knobs (chunk size, barge-in grace, transfer)
     lock = asyncio.Lock()
     in_fmt = AudioFormat("pcm16", s.ivr_inbound_rate)
     out_fmt = AudioFormat("pcm16", s.ivr_outbound_rate or 24000)
@@ -139,7 +142,7 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
     async def send_event(msg: dict) -> None:
         kind = msg.get("event")
         if kind == "transfer":
-            dest = transfer_destination(call, s)
+            dest = transfer_destination(call, knobs)
             async with lock:
                 await ws.send_text(json.dumps({"action": "transfer", "destination": dest}))
             rt.bus.bind(call_id=call_id).emit(EventType.HANDOFF, destination=dest, reason=msg.get("reason"))
@@ -150,8 +153,8 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
 
     call = VoiceCall(rt, call_id=call_id, in_fmt=in_fmt, out_fmt=out_fmt, send_audio=send_audio,
                      send_event=send_event, ani=None if branch else (phone or None), phrases=state.get("phrases"),
-                     chunk_ms=s.ivr_chunk_ms, aec=s.ivr_aec, barge_in_grace_ms=s.ivr_barge_in_grace_ms,
-                     min_suppression_ratio=s.ivr_min_suppression_ratio)
+                     chunk_ms=knobs.ivr_chunk_ms, aec=s.ivr_aec, barge_in_grace_ms=knobs.ivr_barge_in_grace_ms,
+                     min_suppression_ratio=s.ivr_min_suppression_ratio, agent=agent)
     rt.calls[call_id] = call
     ev = rt.bus.bind(call_id=call_id)
     ev.emit(EventType.SLOT_SET, field="ivr_connect", number=mask(phone), extension_call=bool(branch))
