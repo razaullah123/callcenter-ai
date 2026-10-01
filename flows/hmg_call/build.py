@@ -77,7 +77,7 @@ nodes = [
      "instructions": ("The booking is parked until the caller says yes — NOTHING is booked yet. " + readback_text()
                       + "\nIf the caller wants a different time, doctor, day, clinic or hospital, handle that change "
                         "instead (the parked booking is dropped).")},
-    {"id": "booked", "type": "conversation", "position": P(3600, 200), "extract": ["next_step"],
+    {"id": "booked", "type": "conversation", "position": P(3600, 200), "extract": ["confirm_now"],
      "tools": HOSPITAL_TOOLS + book["after_booking"]["tools"], "instructions": book["after_booking"]["instructions"]},
     {"id": "anything_else", "type": "conversation", "position": P(3900, 200), "extract": ["next_step"],
      "instructions": ("If the appointment was just confirmed, say exactly: English \"Your appointment is confirmed "
@@ -88,7 +88,7 @@ nodes = [
      "set": {"intent": "=book", "next_step": None, "project_id": None, "project_name": None, "project_name_en": None,
              "clinic_id": None, "date_mode": None, "date": None, "booked": None, "appointment": None,
              "appointment_no": None, "doctor_id": None, "slot_date": None, "slot_time": None, "confirm_done": None,
-             "location_lat": None, "location_lng": None}},
+             "location_lat": None, "location_lng": None, "confirm_now": None}},
     {"id": "goodbye", "type": "end", "position": P(4200, 200),
      "say": {"ar": "شكراً لاتصالك بمجموعة الدكتور سليمان الحبيب، مع السلامة.",
              "en": "Thank you for calling Dr. Sulaiman Al Habib Medical Group. Goodbye!"}},
@@ -131,10 +131,10 @@ edges = [
     W(**{"from": "confirm_booking", "to": "booked", "when": {"filled": ["booked"]}}),
     W(**{"from": "confirm_booking", "to": "symptoms_and_clinic", "when": {"empty": ["clinic_id"]}}),
     W(**{"from": "confirm_booking", "to": "doctor_and_time", "when": {"equals": {"awaiting_confirmation": False}}}),
+    # the booked step only waits for the answer to "confirm it now?" — it never ends the call itself
+    # (live 2026-10-01: "Yes, please confirm the appointment" was read as "done" and the call ended unconfirmed)
     W(**{"from": "booked", "to": "anything_else", "when": {"filled": ["confirm_done"]}}),
-    W(**{"from": "booked", "to": "goodbye", "when": {"equals": {"next_step": "done"}}}),
-    W(**{"from": "booked", "to": "new_booking", "when": {"equals": {"next_step": "new_booking"}}}),
-    W(**{"from": "booked", "to": "other_service", "when": {"equals": {"next_step": "other_request"}}}),
+    W(**{"from": "booked", "to": "anything_else", "when": {"equals": {"confirm_now": "no"}}}),
     # wrap-up
     W(**{"from": "anything_else", "to": "goodbye", "when": {"equals": {"next_step": "done"}}}),
     W(**{"from": "anything_else", "to": "new_booking", "when": {"equals": {"next_step": "new_booking"}}}),
@@ -148,6 +148,9 @@ graph = {
         "intent": {"type": "string", "enum": ["book", "other"],
                    "description": "book = a new appointment; other = any other request they made (cancel, reschedule, "
                                   "results, reports, insurance, a complaint …); null if they haven't said what they need"},
+        "confirm_now": {"type": "string", "enum": ["yes", "no"],
+                        "description": "the caller's answer to 'Would you like me to confirm it now?': yes or no; "
+                                       "null if they didn't answer that question"},
         "next_step": {"type": "string", "enum": ["done", "new_booking", "other_request"],
                       "description": "only when answering 'anything else?' or after a booking: done = nothing else / "
                                      "goodbye / thanks; new_booking = wants another appointment; other_request = "

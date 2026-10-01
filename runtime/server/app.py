@@ -86,9 +86,11 @@ from runtime.control import api as control_api  # noqa: E402 — console API /ap
 from runtime.control import connections as control_connections  # noqa: E402 — /api/connections, /api/secrets
 from runtime.control import tools_api as control_tools  # noqa: E402 — /api/tool-library, /api/mcp-servers
 from runtime.control import agents_api as control_agents  # noqa: E402 — /api/agents, /api/routes (Agent Studio)
+from runtime.server import chat as chat_ws  # noqa: E402 — text test channel /ws/chat (Agent Studio)
 from runtime.server import ivr  # noqa: E402 — IVR endpoint /ws/voice-pipeline
 
 app.include_router(ivr.router)
+app.include_router(chat_ws.router)
 app.include_router(control_api.router)
 app.include_router(control_connections.router)
 app.include_router(control_tools.router)

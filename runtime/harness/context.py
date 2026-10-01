@@ -33,8 +33,12 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
         facts.append(f"Caller is VERIFIED. Name: {a.full_name or a.first_name or 'unknown'}"
                      + ("" if a.identity_confirmed else " (not yet confirmed they are the patient)") + ".")
     else:
-        facts.append(f"Caller is NOT verified yet (stage: {a.stage}). Verify before helping with anything else.")
-    if session.pending_intent and not a.verified:
+        if session.flow_skill:      # one flow runs the call: its steps decide when to verify (after the request)
+            facts.append("Caller is not verified yet. Follow the current step — it asks for the mobile number only "
+                         "when it is time; never before.")
+        else:
+            facts.append(f"Caller is NOT verified yet (stage: {a.stage}). Verify before helping with anything else.")
+    if session.pending_intent and not a.verified and not session.flow_skill:
         facts.append(f"The caller's request (handle it after verification): \"{session.pending_intent}\"")
     if session.slots.get("branch"):
         facts.append(f"The caller dialed the {session.slots['branch']} branch directly: use it as the hospital "

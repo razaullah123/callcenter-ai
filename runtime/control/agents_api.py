@@ -318,6 +318,21 @@ async def activate(agent_id: str, release_id: int) -> dict:
     return {"release_id": release_id, "version": rel["version"]}
 
 
+@router.get("/agents/{agent_id}/export", dependencies=auth)
+async def export_agent(agent_id: str, draft: bool = True) -> dict:
+    """The agent as one JSON document: its bundle with every skill's files inline (secrets stay references)."""
+    rt, store = _platform()
+    a = await _agent(store, agent_id)
+    bundle = await _working(store, a) if draft else await _published_bundle(store, a)
+    files = {}
+    for key, ref in (bundle.get("skills") or {}).items():
+        lib, version = skill_ref(key, ref)
+        files[key] = {"skill": lib, "version": version, "files": await store.skill_version(WORKSPACE, lib, version)}
+    out = {k: v for k, v in bundle.items() if k != "skills"}
+    return {"format": "voice-agent/1", "agent": {"id": a["id"], "name": a["name"], "description": a.get("description", "")},
+            "from": "draft" if draft and a.get("draft") is not None else "published", "bundle": out, "skills": files}
+
+
 @router.get("/agents/{agent_id}/releases/{release_id}", dependencies=auth)
 async def get_release(agent_id: str, release_id: int) -> dict:
     rt, store = _platform()
