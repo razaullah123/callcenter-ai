@@ -13,7 +13,8 @@ flow.yaml (graph form):
        position: {x: 0, y: 0}}          # position: for the canvas only
     - {id: route, type: router}         # only chooses an edge
     - {id: remember, type: set, set: {tries: "=1"}}
-    - {id: lookup, type: tool, tool: some_tool, args: {id: slots.order_id}}   # the platform calls it; on success / failure
+    - {id: lookup, type: tool, tool: some_tool, args: {id: slots.order_id},    # the platform calls it; on success / failure
+       outputs: {order_status: result.status}}                                   # result values → slots
     - {id: human, type: transfer, reason: "wants a person"}
     - {id: bye, type: end, say: {ar: "...", en: "..."}}
     - {id: other, type: skill, skill: send_info}                             # continue in another skill
@@ -25,7 +26,11 @@ flow.yaml (graph form):
     - {from: "*", to: human, when: {llm: "the caller asks for a human agent"}}
 
 Conditions: filled / empty (lists of slots), equals ({slot: value}), stage (the caller-verification stage),
-llm (a short classifier call on the caller's latest words — no paragraph-long edge texts), all / any (lists).
+llm (a short classifier call on the caller's latest words — no paragraph-long edge texts), replied (true: the caller
+has spoken since this node was entered), all / any (lists).
+
+Values (set nodes, tool args) and conversation instructions may be Jinja templates over the slots:
+"{{ patient_name }}", "{% if symptom %}…{% endif %}" (see runtime.skills.flow.render).
 
 Step flows (the older `steps:` form) are converted into graphs with one global edge per step ("the first step whose
 conditions hold"), so they behave exactly as before.
@@ -58,6 +63,7 @@ class Node:
     reason: str = ""
     say: dict[str, str] = field(default_factory=dict)
     skill: str | None = None
+    outputs: dict[str, str] = field(default_factory=dict)     # tool nodes: slot ← path in {"result": data}
     position: dict[str, float] | None = None
 
 
@@ -96,7 +102,7 @@ class Graph:
                         auto_call=list(n.get("auto_call") or []), extract=list(n.get("extract") or []),
                         set=dict(n.get("set") or {}), tool=n.get("tool"), args=dict(n.get("args") or {}),
                         reason=n.get("reason", ""), say=dict(n.get("say") or {}), skill=n.get("skill"),
-                        position=n.get("position"))
+                        outputs=dict(n.get("outputs") or {}), position=n.get("position"))
             nodes[node.id] = node
         # `on:` unquoted in YAML is the boolean true — accept that, and `result:` as a clearer name
         edges = [Edge(str(e["from"]), str(e["to"]), e.get("when"), e.get("result") or e.get("on") or e.get(True))
@@ -131,7 +137,7 @@ class Graph:
         def node(n: Node) -> dict[str, Any]:
             d: dict[str, Any] = {"id": n.id, "type": n.type}
             for k in ("instructions", "tools", "auto_call", "extract", "set", "tool", "args", "reason", "say", "skill",
-                      "position"):
+                      "outputs", "position"):
                 if (v := getattr(n, k)) not in (None, "", [], {}):
                     d[k] = v
             return d
@@ -196,12 +202,13 @@ class Graph:
             node_id = nxt
             entered = self.nodes[node_id]
             (state.get("outcome") or {}).pop(node_id, None)      # a tool node entered again runs again
+            state["entered"] = (facts or {}).get("_turn")         # for `replied`: the caller speaks after this
             if entered.type == "set":
                 for slot, expr in entered.set.items():
                     if expr is None:
                         slots.pop(slot, None)                    # `slot: null` forgets it
                     else:
-                        slots[slot] = _eval(expr, {"slots": slots})
+                        slots[slot] = _eval(expr, {"slots": slots, **(facts or {})})
         state["node"] = node_id
         return self.nodes[node_id]
 
@@ -213,6 +220,8 @@ class Graph:
         if node.type == "tool" and outcome is None:
             return None                              # waits for the harness to run the tool
         ran = state.get("ran") or {}
+        turn = slots.get("_turn")
+        replied = turn is not None and state.get("entered") != turn       # the caller spoke since we got here
         for e in self._edges_from(node.id):
             target = self.nodes.get(e.target)
             if target is not None and target.type == "tool" and target.id != node.id \
@@ -221,7 +230,7 @@ class Graph:
             if e.on is not None:
                 if e.source != node.id or outcome is None or (e.on == "success") != bool(outcome):
                     continue
-            if _holds(e.when, slots, stage, state.get("llm") or {}):
+            if _holds(e.when, slots, stage, state.get("llm") or {}, replied):
                 return e.target
         return None
 
@@ -249,13 +258,16 @@ def _collect_llm(cond: Any, out: list[str]) -> None:
             _collect_llm(c, out)
 
 
-def _holds(cond: dict[str, Any] | None, slots: dict[str, Any], stage: str | None, llm: dict[str, bool]) -> bool:
+def _holds(cond: dict[str, Any] | None, slots: dict[str, Any], stage: str | None, llm: dict[str, bool],
+           replied: bool = False) -> bool:
     if not cond:
         return True
     for key, v in cond.items():
-        if key == "all" and not all(_holds(c, slots, stage, llm) for c in v or []):
+        if key == "all" and not all(_holds(c, slots, stage, llm, replied) for c in v or []):
             return False
-        if key == "any" and not any(_holds(c, slots, stage, llm) for c in v or []):
+        if key == "any" and not any(_holds(c, slots, stage, llm, replied) for c in v or []):
+            return False
+        if key == "replied" and bool(v) != replied:
             return False
         if key == "filled" and not all(_filled(slots.get(s)) for s in v):
             return False

@@ -36,7 +36,7 @@ export function Badge({ children, tone = "neutral" }: {
 }) {
   const tones = {
     neutral: "bg-soft text-muted", good: "bg-good/15 text-good", warn: "bg-warn/15 text-warn",
-    bad: "bg-bad/15 text-bad", info: "bg-accent/15 text-accent",
+    bad: "bg-bad/15 text-bad", info: "bg-accent/15 text-accent-text",
   };
   return <span className={cx("inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium", tones[tone])}>{children}</span>;
 }
@@ -47,7 +47,7 @@ export function Button({ children, onClick, kind = "default", disabled, type = "
 }) {
   const kinds = {
     default: "border border-line bg-panel hover:bg-soft",
-    primary: "bg-accent text-white hover:opacity-90",
+    primary: "bg-accent text-accent-fg hover:opacity-90",
     danger: "bg-bad text-white hover:opacity-90",
     ghost: "hover:bg-soft",
   };
@@ -65,7 +65,7 @@ export function Empty({ children }: { children: ReactNode }) {
 
 export function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
-  const msg = error instanceof Error ? error.message : JSON.stringify(error);
+  const msg = error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error);
   return <div className="rounded-lg border border-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad">{msg}</div>;
 }
 

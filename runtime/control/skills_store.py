@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from runtime.platform import WORKSPACE
+from runtime.platform import WORKSPACE, current_project
 from runtime.platform.loader import skill_ref
 from runtime.skills import Graph, SkillSet, parse_skill_md, read_skill_dir
 
@@ -49,7 +49,7 @@ async def read_files(rt, name: str) -> dict[str, str] | None:
     bundle = rt.agent.bundle or {}
     if rt.platform is not None and name in (bundle.get("skills") or {}):
         lib, version = skill_ref(name, bundle["skills"][name])
-        return await rt.platform.skill_version(WORKSPACE, lib, version)
+        return await rt.platform.skill_version(current_project(), lib, version)
     if name in (bundle.get("skill_files") or {}):
         return bundle["skill_files"][name]
     return read_skill_dir().get(name)
@@ -59,9 +59,9 @@ async def save(rt, name: str, files: dict[str, str], author: str, note: str) -> 
     """New skill version + a new published release of every agent using it (a new skill joins the default agent)."""
     store = rt.platform
     clean = {f: files[f] for f in FILES if files.get(f, "").strip()}
-    version = await store.add_skill_version(WORKSPACE, name, clean, author, note)
+    version = await store.add_skill_version(current_project(), name, clean, author, note)
     releases = []
-    for agent in await store.agents(WORKSPACE):
+    for agent in await store.agents(current_project()):
         if not agent.get("published_release_id"):
             continue
         rel = await store.release(agent["published_release_id"])
@@ -81,8 +81,8 @@ async def save(rt, name: str, files: dict[str, str], author: str, note: str) -> 
 
 
 async def versions(rt, name: str) -> list[dict[str, Any]]:
-    return await rt.platform.skill_versions(WORKSPACE, name) if rt.platform is not None else []
+    return await rt.platform.skill_versions(current_project(), name) if rt.platform is not None else []
 
 
 async def get_version(rt, name: str, version: int) -> dict[str, str] | None:
-    return await rt.platform.skill_version(WORKSPACE, name, version) if rt.platform is not None else None
+    return await rt.platform.skill_version(current_project(), name, version) if rt.platform is not None else None

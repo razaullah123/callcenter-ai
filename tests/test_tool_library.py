@@ -245,6 +245,48 @@ def test_only_read_tools_can_be_tested(api):
     assert "ok" in r and "ms" in r
 
 
+def test_http_tool_auth_types():
+    from runtime.tools.http_tool import auth_errors, auth_headers
+    assert auth_headers({"type": "bearer", "token": "k"}) == {"Authorization": "Bearer k"}
+    assert auth_headers({"type": "basic", "username": "u", "password": "p"}) == {"Authorization": "Basic dTpw"}
+    assert auth_headers({"type": "api_key", "header": "X-Key", "value": "v"}) == {"X-Key": "v"}
+    assert auth_headers(None) == {} and auth_headers({"type": "none"}) == {}
+    _, _, headers, _, _ = build_request({"url": "https://x/a", "headers": {"A": "1"},
+                                         "auth": {"type": "bearer", "token": "t"}}, {})
+    assert headers == {"A": "1", "Authorization": "Bearer t"}
+    assert auth_errors({"type": "bearer"}) == ["http.auth.token is required for bearer"]
+    assert auth_errors({"type": "oauth"}) and auth_errors(None) == []
+    policy = {"kind": "read", "source": "http", "description": "x",
+              "http": {"url": "https://x", "auth": {"type": "basic", "username": "u"}}}
+    assert any("password" in e for e in toollib.validate_policy("t", policy, mcp_tools=set(), local_tools=set()))
+
+
+def test_api_tool_test_run_with_overrides(api, monkeypatch):
+    from runtime.tools import http_tool
+    c, rt, store = api
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, str(request.url), request.headers.get("x-test"), request.headers.get("authorization")))
+        return httpx.Response(200, json={"open": "9-5"})
+    monkeypatch.setattr(http_tool, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    policy = {"kind": "read", "source": "http", "description": "Opening hours of a branch",
+              "input_schema": {"type": "object", "properties": {"branch": {"type": "string"}}},
+              "http": {"method": "GET", "url": "https://hours.example.com/{branch}",
+                       "auth": {"type": "bearer", "token": "abc"}}}
+    assert c.put("/api/tool-library/branch_hours", json={"group": "home", "policy": policy}).status_code == 200
+    r = c.post("/api/tool-library/branch_hours/test", json={"args": {"branch": "olaya"}}).json()
+    assert r["ok"] and r["data"] == {"open": "9-5"}
+    r = c.post("/api/tool-library/branch_hours/test", json={
+        "args": {"branch": "olaya"},
+        "override": {"url": "https://staging.example.com/{branch}", "method": "POST", "headers": {"X-Test": "1"}}}).json()
+    assert r["ok"]
+    assert seen == [("GET", "https://hours.example.com/olaya", None, "Bearer abc"),
+                    ("POST", "https://staging.example.com/olaya", "1", "Bearer abc")]     # auth kept, rest overridden
+    bad = c.post("/api/tool-library/branch_hours/test", json={"args": {}, "override": {"url": "file:///etc"}})
+    assert bad.status_code == 422
+
+
 async def test_releases_from_before_roles_still_verify_callers():
     """A schema-1 release (12.1–12.3) loads with the roles / hooks / turn hooks it didn't have yet."""
     from runtime.platform.bundle import repo_bundle

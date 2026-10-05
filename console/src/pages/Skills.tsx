@@ -130,7 +130,7 @@ function SkillEditor({ name, toolNames }: { name: string; toolNames: string[] })
                 onClick={() => navigator.clipboard?.writeText(t)}>{t}</button>
             ))}
           </div>
-          <button className="mt-2 text-xs text-accent" onClick={() => navigate("/playground")}>Try it in the Playground →</button>
+          <button className="mt-2 text-xs text-accent-text" onClick={() => navigate("/playground")}>Try it in the Playground →</button>
         </Card>
       </div>
     </div>

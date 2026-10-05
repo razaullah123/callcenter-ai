@@ -326,6 +326,13 @@ class Agent:
                 self.s.history.append(tool_call_message("", [call]))
                 self.s.history.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
                 self._after_tool(call, result, ev)
+                for slot, path in node.outputs.items() if result.ok else ():
+                    value = flow_eval(path, {"result": result.data})
+                    if value is None and isinstance(result.data, dict) and "result" in result.data:
+                        value = flow_eval(path, {"result": result.data["result"]})   # {"result": {...}} replies
+                    self.s.slots[slot] = value
+                    ev.emit(EventType.SLOT_SET, field=slot, value=value if not isinstance(value, (list, dict))
+                            else f"{type(value).__name__}[{len(value)}]", source=f"tool:{node.id}")
                 state.setdefault("outcome", {})[node.id] = result.ok
                 if self.s.handoff or self.s.ended:
                     return True
@@ -337,7 +344,7 @@ class Agent:
                     await self._say(line)
                     self.s.history.append({"role": "assistant", "content": line})
                 self.s.ended = True
-                ev.emit(EventType.CALL_END, reason="completed", node=node.id)
+                ev.emit(EventType.CALL_END, reason="completed", node=node.id, verified=self.s.auth.verified)
                 await self.out.hangup()
                 return True
             elif node.type == "skill":
@@ -414,6 +421,8 @@ class Agent:
         """Runs a parked write on "yes". True if the turn is complete (the harness already answered)."""
         s = self.s
         pending = s.pending_action
+        if pending.turn_id >= s.turn_id:            # parked this turn: the read-back hasn't been heard yet
+            return False
         if s.last_reply == "yes":
             s.pending_action = None
             call = ToolCall(id=f"confirmed_{s.turn_id}", name=pending.tool, arguments=dict(pending.args))
@@ -614,7 +623,7 @@ class Agent:
             return json.dumps({"ok": True})
         if call.name == control.END_CALL:
             s.ended = True
-            ev.emit(EventType.CALL_END, reason="completed")
+            ev.emit(EventType.CALL_END, reason="completed", verified=s.auth.verified)
             await self.out.hangup()
             return json.dumps({"ok": True})
         return json.dumps({"error": "unknown control tool"})
@@ -626,12 +635,20 @@ class Agent:
         waiting = []
         if a.verified and not a.identity_confirmed and s.memory.get("identity_asked"):
             waiting.append("identity")
-        if s.pending_action is not None:
+        # only once the read-back was said: in the turn that parked the booking nobody has heard it yet
+        # (live 2026-10-04: booking parked, then record_answer "yes" in the same turn booked with no read-back)
+        if s.pending_action is not None and s.pending_action.turn_id < s.turn_id:
             waiting.append("booking_confirmation")
         return waiting
 
     async def _record_answer(self, question: str, answer: str, ev: BoundEmitter) -> str:
         s = self.s
+        if question == "booking_confirmation" and s.pending_action is not None \
+                and s.pending_action.turn_id >= s.turn_id:
+            ev.emit(EventType.POLICY_BLOCK, reason="answer_before_readback", tool=s.pending_action.tool)
+            return json.dumps({"error": "NOTHING is booked: the caller hasn't heard the details yet. Read them back "
+                                        "in one short sentence and ask whether to go ahead; then wait for their "
+                                        "answer."})
         if question not in self._awaiting_answer():
             return json.dumps({"error": f"no {question or 'such'} question is waiting for an answer"})
         ev.emit(EventType.SLOT_SET, field=f"answer:{question}", value=answer, source="model")

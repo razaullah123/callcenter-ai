@@ -1,3 +1,4 @@
+import AgentPicker from "../AgentPicker";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -14,9 +15,10 @@ export default function Logs() {
   const [applied, setApplied] = useState(filters);
   const [tail, setTail] = useState(false);
   const [open, setOpen] = useState<string | number | null>(null);
+  const [agent, setAgent] = useState("");
   const q = useQuery({
-    queryKey: ["events", applied],
-    queryFn: () => api.events({ ...applied, type: applied.type ? [applied.type] : undefined, limit: 300 }),
+    queryKey: ["events", applied, agent],
+    queryFn: () => api.events({ ...applied, type: applied.type ? [applied.type] : undefined, limit: 300, agent: agent || undefined }),
     enabled: !tail,
   });
   const live = useLive(undefined, 300);
@@ -30,6 +32,7 @@ export default function Logs() {
     <div className="mx-auto max-w-6xl space-y-4">
       <h1 className="text-xl font-semibold">Logs</h1>
       <form className="flex flex-wrap gap-2" onSubmit={e => { e.preventDefault(); setApplied(filters); }}>
+        <AgentPicker value={agent} onChange={setAgent} />
         <input placeholder="Call id" value={filters.call_id} onChange={e => setFilters({ ...filters, call_id: e.target.value })} className="w-48" />
         <select value={filters.type} onChange={e => setFilters({ ...filters, type: e.target.value })}>
           {TYPES.map(t => <option key={t} value={t}>{t || "All types"}</option>)}
@@ -51,7 +54,7 @@ export default function Logs() {
               <button className="grid w-full min-w-[48rem] grid-cols-[10rem_9rem_9rem_4.5rem_1fr] gap-2 py-1 text-left hover:bg-soft/60"
                 onClick={() => setOpen(open === e.id ? null : e.id)}>
                 <span className="text-muted">{fmtTime(e.ts)}</span>
-                <span className="truncate">{e.call_id ? <Link to={`/calls/${e.call_id}`} className="text-accent" onClick={ev => ev.stopPropagation()}>{e.call_id}</Link> : "—"}</span>
+                <span className="truncate">{e.call_id ? <Link to={`/calls/${e.call_id}`} className="text-accent-text" onClick={ev => ev.stopPropagation()}>{e.call_id}</Link> : "—"}</span>
                 <span><Badge tone={levelTone(e.level)}>{e.type}</Badge></span>
                 <span className="tabular-nums text-muted">{e.latency_ms != null ? fmtMs(e.latency_ms) : ""}</span>
                 <span className="truncate" dir="auto">{summary(e)}</span>

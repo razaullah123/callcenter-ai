@@ -4,7 +4,8 @@ import { Link, useParams } from "react-router-dom";
 import { api, type AgentDetail, type Bundle, type FlowGraph } from "../api";
 import SchemaForm from "../SchemaForm";
 import FlowCanvas from "../studio/FlowCanvas";
-import TestPanel, { type LiveEvent } from "../studio/TestPanel";
+import TestPanel, { Icon, ICONS, loadFollow, saveFollow, type LiveEvent } from "../studio/TestPanel";
+import TestsTab, { AuditCard, gateBadge, PublishDialog } from "../studio/TestsTab";
 import { useTestCall, type TestMode } from "../studio/useTestCall";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
 
@@ -12,26 +13,26 @@ const JsonDiff = lazy(() => import("../studio/JsonDiff"));      // Monaco only l
 
 const KINDS: [string, string][] = [["llm", "Language model"], ["stt", "Speech-to-text"], ["tts", "Voice (text-to-speech)"], ["embedding", "Embeddings"]];
 const CONNECTION_FIELDS = new Set(["api_key", "base_url", "url", "headers", "timeout_s", "token", "secret", "password"]);
-type Tab = "flow" | "settings" | "versions";
+type Tab = "flow" | "settings" | "tests" | "versions";
 
 export default function Studio() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["agent", id], queryFn: () => api.agent(id) });
   const [tab, setTab] = useState<Tab>("flow");
-  const [note, setNote] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const [menu, setMenu] = useState(false);
   const [useDraft, setUseDraft] = useState(true);
   const [panel, setPanel] = useState<"chat" | "logs" | null>(null);
-  const [follow, setFollow] = useState(true);
+  const [follow, setFollowState] = useState(loadFollow);       // saved on this device, like Hamsa
+  const setFollow = (v: boolean) => { setFollowState(v); saveFollow(v); };
   const [active, setActive] = useState<string | null>(null);        // "skill/node" the test call is in
   const [locate, setLocate] = useState<{ step: string; n: number } | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [logSearch, setLogSearch] = useState<{ text: string; n: number } | null>(null);
+  const [logNode, setLogNode] = useState<{ node: string; n: number } | null>(null);
   const call = useTestCall();
   const menuRef = useRef<HTMLDivElement>(null);
   const refresh = () => { qc.invalidateQueries({ queryKey: ["agent", id] }); qc.invalidateQueries({ queryKey: ["agents"] }); };
-  const publish = useMutation({ mutationFn: () => api.publishAgent(id, note), onSuccess: () => { setNote(""); refresh(); } });
   const discard = useMutation({ mutationFn: () => api.discardDraft(id), onSuccess: refresh });
   const exportAgent = useMutation({
     mutationFn: () => api.exportAgent(id),
@@ -98,30 +99,30 @@ export default function Studio() {
               )}
             </div>
           )}
-          <Button onClick={() => { setTab("flow"); setPanel(p => (p === "logs" ? null : "logs")); }}>〰 Live call logs</Button>
-          <input id="publish-note" className="w-44" placeholder="What changed?" value={note} onChange={e => setNote(e.target.value)} />
-          <Button kind="primary" onClick={() => publish.mutate()} disabled={!d.has_draft || publish.isPending}>
-            {publish.isPending ? "Publishing…" : "⇪ Publish"}</Button>
+          <Button onClick={() => { setTab("flow"); setPanel(p => (p === "logs" ? null : "logs")); }}><span className="inline-flex items-center gap-1.5"><Icon d={ICONS.activity} />Live Call Logs</span></Button>
+          <Button kind="primary" onClick={() => setPublishing(true)} disabled={!d.has_draft}>⇪ Publish</Button>
           <span className={`rounded-lg border px-3 py-1.5 text-sm ${dirty ? "border-warn/50 text-warn" : "border-good/40 text-good"}`}>
             {dirty ? "● Unsaved changes" : "✓ Saved"}</span>
           <Button onClick={() => exportAgent.mutate()} disabled={exportAgent.isPending}>⤓ Export</Button>
           {d.has_draft && <Button kind="ghost" onClick={() => discard.mutate()} disabled={discard.isPending}>Discard draft</Button>}
         </div>
       </div>
-      <ErrorBox error={publish.error ?? discard.error ?? exportAgent.error} />
+      <ErrorBox error={discard.error ?? exportAgent.error} />
+      {publishing && <PublishDialog d={d} onClose={() => setPublishing(false)} onPublished={refresh} />}
 
       <div className="flex gap-1 border-b border-line">
-        {([["flow", "Flow"], ["settings", "Settings"], ["versions", "Versions"]] as [Tab, string][]).map(([t, l]) => (
+        {([["flow", "Flow"], ["settings", "Settings"], ["tests", "Tests"], ["versions", "Versions"]] as [Tab, string][]).map(([t, l]) => (
           <button key={t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === t ? "border-accent font-medium" : "border-transparent text-muted hover:text-ink"}`}>{l}</button>
         ))}
       </div>
 
       {tab === "flow" && <FlowTab d={d} onSaved={refresh} onDirty={setDirty} active={active} follow={follow}
-        locate={locate} onViewLogs={node => { setLogSearch({ text: node, n: Date.now() }); setPanel("logs"); }}
+        locate={locate} onViewLogs={node => { setLogNode({ node, n: Date.now() }); setPanel("logs"); }}
         onOpenSettings={() => setTab("settings")} onInspect={() => setPanel(null)}
-        aside={panel && <TestPanel call={call} tab={panel} onTab={setPanel} follow={follow} onFollow={setFollow} presetSearch={logSearch}
+        aside={panel && <TestPanel call={call} tab={panel} onTab={setPanel} follow={follow} onFollow={setFollow} presetNode={logNode}
           onEvent={onEvent} onLocate={step => setLocate({ step, n: Date.now() })} onClose={() => setPanel(null)} />} />}
       {tab === "settings" && <SettingsTab key={JSON.stringify(d.bundle).length} d={d} onSaved={refresh} />}
+      {tab === "tests" && <TestsTab d={d} />}
       {tab === "versions" && <VersionsTab d={d} onChanged={refresh} />}
     </div>
   );
@@ -211,6 +212,32 @@ function GlobalPanel({ d, skill, onSaved, onOpenSettings }: {
   );
 }
 
+/** Which knowledge base items this agent searches (it gets a search tool in every step when any are chosen). */
+function KnowledgeCard({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+  const q = useQuery({ queryKey: ["knowledge"], queryFn: api.knowledge });
+  const all = q.data?.items ?? [];
+  const missing = items.filter(i => !all.some(x => x.id === i));
+  return (
+    <Card title="Knowledge base" actions={<Link to="/knowledge-base" className="text-xs text-accent-text hover:underline">Manage →</Link>}>
+      {!all.length ? <p className="text-sm text-muted">No knowledge base items in this project yet.</p> : (
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          {all.map(i => (
+            <label key={i.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-soft">
+              <input type="checkbox" checked={items.includes(i.id)} className="accent-[var(--color-accent)]"
+                onChange={e => onChange(e.target.checked ? [...items, i.id] : items.filter(x => x !== i.id))} />
+              <span className="truncate">{i.name}</span>
+              <span className="ml-auto shrink-0 text-[11px] text-muted">{i.type === "file" ? (i.extension ?? "").toUpperCase() : "Text"} · {i.words.toLocaleString()} words</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {missing.length > 0 && <p className="mt-2 text-xs text-warn">{missing.length} chosen item(s) were deleted — save to drop them.</p>}
+      <p className="mt-2 text-[11px] text-muted">With items chosen, the agent can call “search the knowledge base” in every step and answers
+        from what it finds. Saved to the draft; callers get it after Publish.</p>
+    </Card>
+  );
+}
+
 function SettingsTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
   const [b, setB] = useState<Bundle>(structuredClone(d.bundle));
   const [meta, setMeta] = useState({ name: d.agent.name, description: d.agent.description ?? "" });
@@ -295,6 +322,9 @@ function SettingsTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
         </div>
       </Card>
 
+      <KnowledgeCard items={b.knowledge?.items ?? []}
+        onChange={items => setB(items.length ? { ...b, knowledge: { items } } : (({ knowledge: _k, ...rest }) => { void _k; return rest; })(b) as Bundle)} />
+
       <Card title="Speech recognition hint">
         <div className="grid gap-3 sm:grid-cols-2">
           {(["ar", "en"] as const).map(l => (
@@ -350,7 +380,9 @@ function SettingsTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
 function VersionsTab({ d, onChanged }: { d: AgentDetail; onChanged: () => void }) {
   const [a, setA] = useState<number | "draft" | null>(null);
   const [bb, setBb] = useState<number | "draft" | null>(null);
-  const activate = useMutation({ mutationFn: (rid: number) => api.activateRelease(d.agent.id, rid), onSuccess: onChanged });
+  const qc = useQueryClient();
+  const activate = useMutation({ mutationFn: (rid: number) => api.activateRelease(d.agent.id, rid),
+    onSuccess: () => { onChanged(); qc.invalidateQueries({ queryKey: ["agent-audit", d.agent.id] }); } });
   const load = async (x: number | "draft") => x === "draft" ? d.bundle : (await api.release(d.agent.id, x)).bundle;
   const diff = useQuery({ queryKey: ["diff", d.agent.id, a, bb], enabled: a !== null && bb !== null,
     queryFn: async () => ({ left: JSON.stringify(await load(a!), null, 2), right: JSON.stringify(await load(bb!), null, 2) }) });
@@ -364,6 +396,7 @@ function VersionsTab({ d, onChanged }: { d: AgentDetail; onChanged: () => void }
               <td className="py-2 text-xs text-muted">{fmtTime(r.created_at)}</td>
               <td className="py-2 text-xs">{r.author}</td>
               <td className="py-2 text-xs">{r.note}</td>
+              <td className="py-2">{gateBadge(r.gate)}</td>
               <td className="py-2 text-right whitespace-nowrap">
                 <Button kind="ghost" onClick={() => { setA(r.id); if (bb === null) setBb(d.has_draft ? "draft" : d.agent.published_release_id); }}>Compare</Button>{" "}
                 {r.id === d.agent.published_release_id ? <Badge tone="good">live</Badge>
@@ -385,6 +418,7 @@ function VersionsTab({ d, onChanged }: { d: AgentDetail; onChanged: () => void }
             : <ErrorBox error={diff.error} />}
         </Card>
       )}
+      <AuditCard agentId={d.agent.id} />
     </div>
   );
 }

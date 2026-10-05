@@ -86,6 +86,8 @@ class EventStore:
             f = d.get("field")
             if f == "language":
                 await conn.execute("UPDATE calls SET language = $2 WHERE call_id = $1", cid, d.get("value"))
+            elif f == "identity_confirmed" and d.get("value"):     # only asked after the code was verified
+                await conn.execute("UPDATE calls SET verified = true WHERE call_id = $1", cid)
             elif f in ("booked", "appointment_no") and d.get("value"):
                 await conn.execute("UPDATE calls SET booked = true WHERE call_id = $1", cid)
             elif f == "ivr_connect":
@@ -126,80 +128,233 @@ class EventStore:
 
 # ---------------------------------------------------------------- queries
 
+# A project scope: (agent ids, include calls without an agent). Calls from before agents existed (no agent_id)
+# belong to the default project. None = every call (scripts, tests).
+Scope = tuple[list[str], bool] | None
 
-async def stats(hours: int = 24) -> dict[str, Any]:
+
+def _scope_sql(scope: Scope, args: list, col: str = "agent_id") -> str:
+    if scope is None:
+        return "true"
+    agents, unassigned = scope
+    args.append(list(agents))
+    cond = f"{col} = ANY(${len(args)}::text[])"
+    return f"({cond} OR {col} IS NULL)" if unassigned else cond
+
+
+def _calls_of(scope: Scope, args: list) -> str:
+    """call_events filter: only events of calls in scope."""
+    if scope is None:
+        return "true"
+    return f"call_id IN (SELECT call_id FROM calls WHERE {_scope_sql(scope, args)})"
+
+
+def _flat(q: tuple[str, list]) -> list:
+    return [q[0], *q[1]]
+
+
+async def stats(hours: int = 24, scope: Scope = None) -> dict[str, Any]:
     pool = await get_pool()
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    def q(sql: str, events: bool = False) -> tuple[str, list]:
+        args: list = [since]
+        cond = _calls_of(scope, args) if events else _scope_sql(scope, args)
+        return sql.replace("{scope}", cond), args
+
     async with pool.acquire() as c:
-        totals = await c.fetchrow(
+        totals = await c.fetchrow(*_flat(q(
             """SELECT count(*) AS calls,
                       count(*) FILTER (WHERE verified) AS verified,
                       count(*) FILTER (WHERE booked) AS booked,
                       count(*) FILTER (WHERE handoff IS NOT NULL) AS handoffs,
                       count(*) FILTER (WHERE ended_at IS NULL AND started_at > now() - interval '30 minutes') AS active,
                       avg(turns)::float AS avg_turns
-               FROM calls WHERE started_at >= $1""", since)
-        lat = await c.fetchrow(
+               FROM calls WHERE started_at >= $1 AND {scope}""")))
+        lat = await c.fetchrow(*_flat(q(
             """SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
                       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95, count(*) AS n
-               FROM call_events WHERE type = 'tts.first_byte' AND data->>'metric' IS NOT NULL AND ts >= $1""", since)
-        per_hour = await c.fetch(
+               FROM call_events WHERE type = 'tts.first_byte' AND data->>'metric' IS NOT NULL AND ts >= $1
+                 AND {scope}""", events=True)))
+        per_hour = await c.fetch(*_flat(q(
             """SELECT date_trunc('hour', started_at) AS hour, count(*) AS calls,
                       count(*) FILTER (WHERE booked) AS booked, count(*) FILTER (WHERE handoff IS NOT NULL) AS handoffs
-               FROM calls WHERE started_at >= $1 GROUP BY 1 ORDER BY 1""", since)
-        stages = await c.fetch(
+               FROM calls WHERE started_at >= $1 AND {scope} GROUP BY 1 ORDER BY 1""")))
+        stages = await c.fetch(*_flat(q(
             """SELECT type, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50
                FROM call_events WHERE ts >= $1 AND latency_ms IS NOT NULL
-                 AND type IN ('stt.result', 'llm.first_token', 'tts.first_byte', 'tool.end')
-               GROUP BY type""", since)
-        skills = await c.fetch(
+                 AND type IN ('stt.result', 'llm.first_token', 'tts.first_byte', 'tool.end') AND {scope}
+               GROUP BY type""", events=True)))
+        skills = await c.fetch(*_flat(q(
             """SELECT coalesce(last_skill, 'none') AS skill, count(*) AS calls FROM calls
-               WHERE started_at >= $1 GROUP BY 1 ORDER BY 2 DESC""", since)
+               WHERE started_at >= $1 AND {scope} GROUP BY 1 ORDER BY 2 DESC""")))
     return {"window_hours": hours, "totals": dict(totals),
             "latency": {"p50": lat["p50"], "p95": lat["p95"], "samples": lat["n"]},
             "stages": {r["type"]: r["p50"] for r in stages},
             "per_hour": [dict(r) for r in per_hour], "skills": [dict(r) for r in skills]}
 
 
+async def dashboard(start: datetime, end: datetime, scope: Scope = None, tz: str = "UTC") -> dict[str, Any]:
+    """Everything the console dashboard shows for calls started in [start, end): sessions and durations, outcomes,
+    per-stage latency averages, words per agent reply, error rate and a calls-over-time series (hourly up to two
+    days, else daily, in the viewer's time zone `tz`)."""
+    if not re.fullmatch(r"[A-Za-z0-9_+\-/]{1,64}", tz):
+        raise ValueError(f"bad time zone {tz!r}")
+    pool = await get_pool()
+    hourly = (end - start) <= timedelta(days=2)
+
+    def q(sql: str, events: bool = False) -> tuple[str, list]:
+        args: list = [start, end]
+        cond = _calls_of(scope, args) if events else _scope_sql(scope, args)
+        return sql.replace("{scope}", cond), args
+
+    in_window = "started_at >= $1 AND started_at < $2 AND {scope}"
+    ev_window = "call_id IN (SELECT call_id FROM calls WHERE started_at >= $1 AND started_at < $2) AND {scope}"
+    dur = "EXTRACT(EPOCH FROM (ended_at - started_at))"
+    async with pool.acquire() as c:
+        t = await c.fetchrow(*_flat(q(
+            f"""SELECT count(*) AS calls,
+                      count(*) FILTER (WHERE ended_at IS NOT NULL) AS ended,
+                      coalesce(sum({dur}), 0)::float AS total_duration_s,
+                      avg({dur})::float AS avg_duration_s,
+                      count(*) FILTER (WHERE {dur} < 30) AS lt30,
+                      count(*) FILTER (WHERE {dur} >= 30 AND {dur} <= 120) AS s30_120,
+                      count(*) FILTER (WHERE {dur} > 120) AS gt120,
+                      count(*) FILTER (WHERE verified) AS verified,
+                      count(*) FILTER (WHERE booked) AS booked,
+                      count(*) FILTER (WHERE handoff IS NOT NULL) AS handoffs,
+                      count(*) FILTER (WHERE verified AND NOT booked AND handoff IS NULL) AS verified_only,
+                      count(*) FILTER (WHERE NOT verified AND NOT booked AND handoff IS NULL) AS unresolved,
+                      avg(turns)::float AS avg_turns
+               FROM calls WHERE {in_window}""")))
+        series = await c.fetch(*_flat(q(
+            f"""SELECT date_trunc('{"hour" if hourly else "day"}', started_at AT TIME ZONE '{tz}') AS t,
+                      count(*) AS calls,
+                      count(*) FILTER (WHERE booked) AS booked, count(*) FILTER (WHERE handoff IS NOT NULL) AS handoffs
+               FROM calls WHERE {in_window} GROUP BY 1 ORDER BY 1""")))
+        channels = await c.fetch(*_flat(q(
+            f"SELECT coalesce(channel, 'web') AS key, count(*) AS calls FROM calls WHERE {in_window} "
+            "GROUP BY 1 ORDER BY 2 DESC")))
+        languages = await c.fetch(*_flat(q(
+            f"SELECT coalesce(language, 'unknown') AS key, count(*) AS calls FROM calls WHERE {in_window} "
+            "GROUP BY 1 ORDER BY 2 DESC")))
+        skills = await c.fetch(*_flat(q(
+            f"SELECT coalesce(last_skill, 'none') AS key, count(*) AS calls FROM calls WHERE {in_window} "
+            "GROUP BY 1 ORDER BY 2 DESC")))
+        stages = await c.fetch(*_flat(q(
+            f"""SELECT type, avg(latency_ms)::float AS avg,
+                      percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50,
+                      percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95
+               FROM call_events WHERE latency_ms IS NOT NULL AND {ev_window}
+                 AND (type IN ('stt.result', 'llm.first_token', 'tool.end')
+                      OR (type = 'tts.first_byte' AND data->>'metric' IS NOT NULL))
+               GROUP BY type""", events=True)))
+        # agent.say / tts.first_byte carry no turn id: each event belongs to the turn started last before it
+        per_turn = f"""WITH ev AS (
+                 SELECT call_id, type, latency_ms, data, data->>'metric' AS metric,
+                        max(turn_id) OVER (PARTITION BY call_id ORDER BY id) AS turn
+                 FROM call_events WHERE type IN ('turn.start', 'llm.first_token', 'tts.first_byte', 'agent.say')
+                   AND {ev_window})"""
+        # speech synthesis: per turn, first audio minus the LLM's first token (TTS + writing the first sentence)
+        tts = await c.fetchval(*_flat(q(
+            per_turn + """ SELECT avg(GREATEST(a.ms - l.ms, 0))::float FROM
+                 (SELECT call_id, turn, min(latency_ms) AS ms FROM ev
+                  WHERE type = 'tts.first_byte' AND metric IS NOT NULL AND turn IS NOT NULL GROUP BY 1, 2) a
+               JOIN (SELECT call_id, turn, min(latency_ms) AS ms FROM ev WHERE type = 'llm.first_token'
+                     GROUP BY 1, 2) l USING (call_id, turn)""", events=True)))
+        words = await c.fetchval(*_flat(q(
+            per_turn + r""" SELECT avg(n)::float FROM (
+                 SELECT sum(array_length(regexp_split_to_array(btrim(data->>'text'), '\s+'), 1)) AS n
+                 FROM ev WHERE type = 'agent.say' AND coalesce(btrim(data->>'text'), '') <> ''
+                 GROUP BY call_id, turn) r""", events=True)))
+        errors = await c.fetchval(*_flat(q(
+            f"SELECT count(DISTINCT call_id) FROM call_events WHERE level = 'error' AND {ev_window}", events=True)))
+        reasons = await c.fetch(*_flat(q(
+            f"SELECT handoff AS key, count(*) AS calls FROM calls "
+            f"WHERE handoff IS NOT NULL AND {in_window} GROUP BY 1 ORDER BY 2 DESC")))
+    st = {r["type"]: {"avg": r["avg"], "p50": r["p50"], "p95": r["p95"]} for r in stages}
+    lat = st.get("tts.first_byte") or {}
+    return {"start": start.isoformat(), "end": end.isoformat(), "granularity": "hour" if hourly else "day",
+            "totals": {**dict(t), "errors": errors or 0, "avg_words_per_reply": words},
+            "performance": {"stt_ms": (st.get("stt.result") or {}).get("avg"),
+                            "llm_ms": (st.get("llm.first_token") or {}).get("avg"),
+                            "tool_ms": (st.get("tool.end") or {}).get("avg"),
+                            "tts_ms": tts, "latency_ms": lat.get("avg"),
+                            "latency_p50_ms": lat.get("p50"), "latency_p95_ms": lat.get("p95")},
+            "series": [dict(r) for r in series],
+            "channels": [dict(r) for r in channels], "languages": [dict(r) for r in languages],
+            "skills": [dict(r) for r in skills], "handoff_reasons": [dict(r) for r in reasons]}
+
+
 DURATION = "EXTRACT(EPOCH FROM (ended_at - started_at))::int AS duration_s"
 
 
+# Hamsa's call statuses, from what a call row and its events record
+STATUSES = ("in_progress", "completed", "failed", "forwarded", "terminated")
+STATUS = """CASE
+    WHEN ended_at IS NULL AND started_at > now() - interval '30 minutes' THEN 'in_progress'
+    WHEN handoff IS NOT NULL OR end_reason = 'transferred' THEN 'forwarded'
+    WHEN EXISTS (SELECT 1 FROM call_events e WHERE e.call_id = calls.call_id AND e.level = 'error') THEN 'failed'
+    WHEN ended_at IS NULL OR end_reason = 'ended_from_console' THEN 'terminated'
+    ELSE 'completed' END"""
+SORTS = {"time": "started_at", "duration": "duration_s"}
+
+
 async def list_calls(limit: int = 50, offset: int = 0, q: str | None = None, outcome: str | None = None,
-                     channel: str | None = None) -> dict[str, Any]:
+                     channel: str | None = None, scope: Scope = None, *, channels: list[str] | None = None,
+                     statuses: list[str] | None = None, start: datetime | None = None, end: datetime | None = None,
+                     sort: str = "time", desc: bool = True) -> dict[str, Any]:
     pool = await get_pool()
-    where, args = ["true"], []
+    args: list = []
+    where = [_scope_sql(scope, args)]
     if q:
-        # call id, or the mobile number however it's typed: 0548802968, 548802968, +966 54 880 2968, 2968
+        # call id, agent id, or the mobile number however it's typed: 0548802968, 548802968, +966 54 880 2968, 2968
         digits = re.sub(r"\D", "", q)
         if digits.startswith("966"):
             digits = "0" + digits[3:]
         args.append(f"%{q.strip()}%")
-        cond = f"call_id ILIKE ${len(args)}"
+        cond = f"call_id ILIKE ${len(args)} OR agent_id ILIKE ${len(args)}"
         if len(digits) >= 3:
             args.append(f"%{digits.lstrip('0') or digits}%")
             cond += f" OR mobile LIKE ${len(args)}"
         where.append(f"({cond})")
     if channel:
-        args.append(channel)
-        where.append(f"channel = ${len(args)}")
+        channels = [*(channels or []), channel]
+    if channels:
+        args.append(channels)
+        where.append(f"channel = ANY(${len(args)}::text[])")
+    if start:
+        args.append(start)
+        where.append(f"started_at >= ${len(args)}")
+    if end:
+        args.append(end)
+        where.append(f"started_at < ${len(args)}")
     if outcome == "booked":
         where.append("booked")
     elif outcome == "handoff":
         where.append("handoff IS NOT NULL")
     elif outcome == "unverified":
         where.append("NOT verified")
-    sql_where = " AND ".join(where)
+    rows_sql = f"SELECT *, {DURATION}, {STATUS} AS status FROM calls WHERE {' AND '.join(where)}"
+    outer = ""
+    if statuses is not None:
+        args.append([x for x in statuses if x in STATUSES])
+        outer = f"WHERE status = ANY(${len(args)}::text[])"
+    order = f"{SORTS.get(sort, 'started_at')} {'DESC' if desc else 'ASC'} NULLS LAST, started_at DESC"
     async with pool.acquire() as c:
-        total = await c.fetchval(f"SELECT count(*) FROM calls WHERE {sql_where}", *args)
-        rows = await c.fetch(f"SELECT *, {DURATION} FROM calls WHERE {sql_where} ORDER BY started_at DESC "
+        total = await c.fetchval(f"SELECT count(*) FROM ({rows_sql}) x {outer}", *args)
+        rows = await c.fetch(f"SELECT * FROM ({rows_sql}) x {outer} ORDER BY {order} "
                              f"LIMIT {int(limit)} OFFSET {int(offset)}", *args)
     return {"total": total, "items": [dict(r) for r in rows]}
 
 
-async def get_call(call_id: str) -> dict[str, Any] | None:
+async def get_call(call_id: str, scope: Scope = None) -> dict[str, Any] | None:
     pool = await get_pool()
+    args: list = [call_id]
+    in_scope = _scope_sql(scope, args)
     async with pool.acquire() as c:
-        call = await c.fetchrow(f"SELECT *, {DURATION} FROM calls WHERE call_id = $1", call_id)
+        call = await c.fetchrow(f"SELECT *, {DURATION}, {STATUS} AS status FROM calls "
+                                f"WHERE call_id = $1 AND {in_scope}", *args)
         if call is None:
             return None
         rows = await c.fetch("SELECT * FROM call_events WHERE call_id = $1 ORDER BY ts, id", call_id)
@@ -208,9 +363,11 @@ async def get_call(call_id: str) -> dict[str, Any] | None:
 
 
 async def query_events(*, call_id: str | None = None, types: list[str] | None = None, level: str | None = None,
-                       text: str | None = None, before_id: int | None = None, limit: int = 200) -> list[dict]:
+                       text: str | None = None, before_id: int | None = None, limit: int = 200,
+                       scope: Scope = None) -> list[dict]:
     pool = await get_pool()
-    where, args = ["true"], []
+    args: list = []
+    where = [_calls_of(scope, args)]
     for cond, val in (("call_id = ${}", call_id), ("type = ANY(${})", types), ("level = ${}", level),
                       ("data::text ILIKE ${}", f"%{text}%" if text else None), ("id < ${}", before_id)):
         if val:

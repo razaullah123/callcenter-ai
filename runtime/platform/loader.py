@@ -7,6 +7,7 @@ loads the new version.
 """
 
 import asyncio
+import copy
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,10 +18,11 @@ from runtime.harness.prompts import Phrases
 from runtime.providers import create
 from runtime.skills import SkillSet
 from runtime.tools import ToolExecutor
+from runtime.tools.catalog import load_tools_config
 from runtime.tools.factory import executor_for
 
 from .bundle import DEFAULT_AGENT, DEFAULT_STT_HINT, agent_settings, phrases_of, repo_bundle, upgrade
-from .store import WORKSPACE
+from .store import WORKSPACE, current_project, in_project
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +124,7 @@ class AgentLoader:
         """Which agent answers: an explicit id, else the phone routes (exact number, 'prefix*', then '*')."""
         if agent_id or self.store is None:
             return agent_id
-        routes = await self.store.routes(WORKSPACE)
+        routes = await self.store.all_routes()     # phone routes are unique across projects
         digits = (number or "").strip()
         best, rank = None, None
         for r in routes:                      # exact number > longest prefix > '*'; then priority
@@ -178,6 +180,14 @@ class AgentLoader:
 
     async def build(self, bundle: dict[str, Any], *, agent_id: str, name: str, release_id: int | None,
                     version: int | None, warm: bool | None = None) -> LoadedAgent:
+        """Builds in the agent's own project: its connections, secrets and skill library."""
+        row = await self.store.agent(agent_id) if self.store is not None else None
+        with in_project((row or {}).get("workspace_id") or current_project()):
+            return await self._build(bundle, agent_id=agent_id, name=name, release_id=release_id, version=version,
+                                     warm=warm)
+
+    async def _build(self, bundle: dict[str, Any], *, agent_id: str, name: str, release_id: int | None,
+                     version: int | None, warm: bool | None = None) -> LoadedAgent:
         bundle = upgrade(bundle)                    # releases from before tool roles / hooks
         settings = agent_settings(self.settings, bundle.get("knobs") or {})
         phrases = phrases_of(bundle)
@@ -185,9 +195,20 @@ class AgentLoader:
         tools_cfg = bundle.get("tools")
         if tools_cfg and self.secrets is not None:
             tools_cfg = await self.secrets.resolve(tools_cfg)     # e.g. an API tool's {"secret": NAME} header
+        kb_items = [str(i) for i in ((bundle.get("knowledge") or {}).get("items") or [])]
+        if kb_items:                                              # the knowledge base search, in every skill
+            from runtime.tools.local_tools.knowledge import NAME as KB_TOOL
+            tools_cfg = copy.deepcopy(tools_cfg if tools_cfg is not None else load_tools_config())
+            tools_cfg.setdefault("skills", {}).setdefault("knowledge", {})[KB_TOOL] = {"kind": "read", "source": "local",
+                                                                                         "timeout_s": 8}
         executor = executor_for(self.backend, tools_cfg)
         skill_files = await self._skill_files(bundle)
         skills = SkillSet(executor.catalog, skill_files, phrases)
+        if kb_items:
+            from runtime.platform.knowledge import embedder_from
+            executor.knowledge = {"store": self.store, "workspace": current_project(), "items": kb_items,
+                                  "embed": embedder_from(self._embedding(providers))}
+            skills.global_tools.add(KB_TOOL)
         for skill_name, hooks in (bundle.get("legacy_turn_hooks") or {}).items():
             if (sk := skills.skills.get(skill_name)) is not None and not sk.turn_hooks:
                 sk.turn_hooks = list(hooks)
@@ -201,6 +222,31 @@ class AgentLoader:
                            phrases=phrases, stt_hint=dict((bundle.get("voice") or {}).get("stt_hint")
                                                           or DEFAULT_STT_HINT),
                            languages=languages, skill_files=skill_files)
+
+    @staticmethod
+    def _embedding(providers: ProviderSet):
+        """The agent's embedding connection as a provider (None when it can't be created)."""
+        spec = (providers.config or {}).get("embedding") or {}
+        try:
+            return create("embedding", spec.get("provider") or "custom_http", _drop_empty(spec.get("settings") or {}))
+        except Exception as e:                                    # noqa: BLE001 — keyword search still works
+            log.warning("embedding provider unavailable: %r", e)
+            return None
+
+    async def embedder(self, ws: str):
+        """The project's embedding connection (for adding knowledge items), or None."""
+        from runtime.platform.knowledge import embedder_from
+        rows = [p for p in (await self.store.providers(ws) if self.store else []) if p["kind"] == "embedding"]
+        if not rows:
+            return None
+        conn = rows[0].get("settings") or {}
+        if self.secrets is not None:
+            conn = await self.secrets.resolve(conn)
+        try:
+            return embedder_from(create("embedding", rows[0]["type"], _drop_empty(conn)))
+        except Exception as e:                                    # noqa: BLE001
+            log.warning("project %s: embedding provider unavailable: %r", ws, e)
+            return None
 
     async def _providers(self, bundle: dict[str, Any], version: int) -> ProviderSet:
         resolved: dict[str, dict] = {}
@@ -231,7 +277,7 @@ class AgentLoader:
         files = {}
         for key, ref in (bundle.get("skills") or {}).items():
             name, version = skill_ref(key, ref)
-            got = await self.store.skill_version(WORKSPACE, name, version) if self.store else None
+            got = await self.store.skill_version(current_project(), name, version) if self.store else None
             if got is None:
                 raise LookupError(f"skill {name} v{version} not found")
             files[key] = got

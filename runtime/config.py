@@ -68,8 +68,7 @@ class Settings(BaseSettings):
 
     # IVR endpoint /ws/voice-pipeline (compatible with the existing IVR integration)
     auth_secret: SecretStr | None = None      # HS256 JWT secret shared with the IVR auth service (AUTH_SECRET)
-    auth_database_url: SecretStr | None = None  # DB with blacklisted_tokens / white_listed_numbers (default SOURCE_DATABASE_URL)
-    source_database_url: SecretStr | None = None
+    source_database_url: SecretStr | None = None  # ONLY for scripts/clone_reference_data.py — never read at run time
     ivr_inbound_rate: int = 8000              # caller audio: raw PCM16 mono
     ivr_outbound_rate: int = 8000             # agent audio WAV pieces (TTS resampled; 0 = keep TTS rate)
     ivr_chunk_ms: int = 300                   # outbound WAV piece size (real-time paced)
@@ -94,6 +93,12 @@ class Settings(BaseSettings):
 
     # Console / control plane
     console_token: SecretStr | None = None    # if set, /api requires "Authorization: Bearer <token>"
+    # invitation emails (optional — without them the console shows the invitation link to copy)
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None
 
     # Runtime
     default_language: str = "ar"

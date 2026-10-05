@@ -99,10 +99,30 @@ async def seed(store, settings: Settings, *, repo_sync: bool = True, secrets=Non
     elif changed:
         report["releases"] = await _release_changes(store, changed)
     report["synced"] = sorted(changed)
+    report["eval_cases"] = await _seed_eval_cases(store)
     if secrets is not None:
         report["secrets"] = await migrate_secrets(store, settings, secrets)
     report["materialized"] = await materialize_defaults(store)
     return report
+
+
+async def _seed_eval_cases(store) -> int:
+    """Once: the repo's eval cases (evals/cases/*.yaml) become the HMG agent's test cases, all of them gating Publish
+    (Phase 12.7). After that they are edited in the console."""
+    key = f"eval_cases_seeded:{DEFAULT_AGENT['id']}"
+    if not hasattr(store, "eval_cases") or await store.meta_get(key) or await store.agent(DEFAULT_AGENT["id"]) is None:
+        return 0
+    try:
+        from evals.runner import case_spec, load_cases
+        cases = load_cases()
+    except Exception as e:                       # evals/ not shipped with this deployment
+        log.warning("eval cases not seeded: %r", e)
+        return 0
+    if not await store.eval_cases(DEFAULT_AGENT["id"]):
+        for c in cases:
+            await store.put_eval_case(DEFAULT_AGENT["id"], c.id, case_spec(c), True, "seed")
+    await store.meta_set(key, True)
+    return len(cases)
 
 
 def _plain(v) -> str | None:

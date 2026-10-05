@@ -105,7 +105,7 @@ export default function Playground({ agent, draft, embedded }: {
           {state === "idle" ? <Button kind="primary" onClick={start}>Start call</Button> : <Button kind="danger" onClick={hang}>Hang up</Button>}
           <Badge tone={state === "speaking" ? "warn" : state === "listening" ? "good" : "neutral"}>{state}</Badge>
           <div className="h-2 w-28 overflow-hidden rounded bg-soft"><div className="h-2 bg-accent transition-all" style={{ width: `${Math.min(100, level * 160)}%` }} /></div>
-          {callId && <Link to={`/calls/${callId}`} className="font-mono text-xs text-accent">{callId}</Link>}
+          {callId && <Link to={`/calls/${callId}`} className="font-mono text-xs text-accent-text">{callId}</Link>}
           <span className="ml-auto text-xs tabular-nums text-muted">
             {lat.length ? `last ${Math.round(lat[lat.length - 1])} ms · avg ${avg} ms` : "latency appears after the first reply"}
           </span>

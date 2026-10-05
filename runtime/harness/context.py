@@ -8,6 +8,8 @@ import json
 from typing import Any
 
 from runtime.providers.base import Message
+from runtime.skills.flow import is_template, render
+from runtime.skills.loader import template_vars
 
 from .nlu.dates import describe, today_riyadh
 from .prompts import GENDER_DIRECTIVE, Phrases
@@ -58,6 +60,8 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
         facts.append("Available services (use switch_skill to change): " +
                      "; ".join(f"{k}: {v}" for k, v in routable.items()) + f". Current: {session.active_skill}.")
     persona = getattr(skills, "persona", lambda _l: None)(lang) or ph.PERSONA[lang]
+    if is_template(persona):                               # e.g. an imported Hamsa preamble: {{ lang_id }}, dates
+        persona = render(persona, {"slots": session.slots, **template_vars(session)})
     parts = [persona, "\n## Call facts\n" + "\n".join(f"- {f}" for f in facts)]
     skill = session.flow_skill or (VERIFY_SKILL if not a.verified else session.active_skill)
     instr = skills.instructions(skill, session) or (ph.AUTH_STEPS.get(a.stage, "") if not a.verified else "")

@@ -24,11 +24,16 @@ flow.yaml:
         ...
 """
 
+import functools
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,6 +124,8 @@ def _filled(v: Any) -> bool:
 def _eval(expr: Any, ctx: dict[str, Any]) -> Any:
     if not isinstance(expr, str):
         return expr
+    if is_template(expr):
+        return render(expr, ctx)
     if expr.startswith("="):
         literal = expr[1:]
         return {"true": True, "false": False}.get(literal, literal)
@@ -152,3 +159,31 @@ def _deep_find(obj: Any, key: str) -> Any:
             if (found := _deep_find(v, key)) is not None:
                 return found
     return None
+
+
+# ---------------------------------------------------------------- templates
+
+# Values and node instructions may be Jinja templates over the call's variables — "{{ patient_name }}",
+# "{{ '2' if lang == 'en' else '1' }}", "{% if symptom %}…{% endif %}" (flows imported from Hamsa use them a lot).
+# Sandboxed; an unknown name is empty (and `x|default(…)` / `(a|default({})).b` work).
+
+def is_template(text: str) -> bool:
+    return "{{" in text or "{%" in text
+
+
+@functools.lru_cache(maxsize=2048)
+def _template(text: str):
+    from jinja2 import ChainableUndefined
+    from jinja2.sandbox import SandboxedEnvironment
+    return SandboxedEnvironment(undefined=ChainableUndefined, autoescape=False).from_string(text)
+
+
+def render(text: str, ctx: dict[str, Any]) -> str:
+    """`text` rendered with the slots as plain names (plus `slots`, `parsed` and any other ctx keys). A template
+    error leaves the text as it was (logged) — a typo in a prompt must not break the call."""
+    slots = ctx.get("slots") or {}
+    try:
+        return _template(text).render({**slots, **ctx})
+    except Exception as e:                                    # noqa: BLE001 — any template error
+        log.warning("template error %r in %.80r", e, text)
+        return text

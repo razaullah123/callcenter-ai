@@ -46,7 +46,7 @@ def test_phone_repair():
 
 
 def _settings(**kw):
-    return Settings(auth_secret=SECRET, auth_database_url=None, source_database_url=None, **kw)   # no real DB
+    return Settings(auth_secret=SECRET, database_url=None, **kw)   # no real DB
 
 
 async def test_token_verification():
@@ -150,3 +150,13 @@ def test_ivr_protocol_greeting_audio_ping_and_transfer(client):
                 transfer = json.loads(msg["text"])
                 break
         assert transfer == {"action": "transfer", "destination": "9999"}
+
+
+def test_runtime_never_reads_the_source_database():
+    # everything the agent needs is imported into its own database (scripts/clone_reference_data.py)
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "runtime"
+    hits = [str(p.relative_to(root)) for p in root.rglob("*.py")
+            if p.name != "config.py" and ("source_database_url" in (t := p.read_text(encoding="utf-8"))
+                                          or "ai_agent_patient_appointment" in t)]
+    assert hits == []

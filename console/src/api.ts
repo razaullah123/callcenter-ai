@@ -5,6 +5,15 @@ export type CallRow = {
   verified: boolean; booked: boolean; handoff: string | null; end_reason: string | null; turns: number;
   last_skill: string | null; config_version: number | null; latency_p50_ms: number | null; extension_call: boolean;
   mobile: string | null; duration_s: number | null;
+  agent_id?: string | null; release_id?: number | null;
+  /** in_progress | completed | failed | forwarded | terminated */
+  status?: CallStatus;
+};
+export type CallStatus = "in_progress" | "completed" | "failed" | "forwarded" | "terminated";
+export type CallAgent = {
+  id: string; name: string; version: number | null;
+  llm: { provider: string | null; model: string | null }; stt: { provider: string | null; model: string | null };
+  tts: { provider: string | null; voice: string | null; model: string | null };
 };
 
 export type EventRow = {
@@ -20,7 +29,7 @@ export type TurnLatency = {
 };
 
 export type CallDetail = {
-  call: CallRow; events: EventRow[]; turns: TurnLatency[];
+  call: CallRow; events: EventRow[]; turns: TurnLatency[]; agent?: CallAgent | null;
   transcript: { role: "user" | "agent" | "system"; text: string; ts: string; turn: number | null }[];
 };
 
@@ -33,10 +42,27 @@ export type Stats = {
   skills: { skill: string; calls: number }[];
 };
 
+export type Count = { key: string; calls: number };
+export type DashboardData = {
+  start: string; end: string; granularity: "hour" | "day"; live_calls: number;
+  totals: {
+    calls: number; ended: number; total_duration_s: number; avg_duration_s: number | null;
+    lt30: number; s30_120: number; gt120: number; verified: number; booked: number; handoffs: number;
+    verified_only: number; unresolved: number; avg_turns: number | null; errors: number; avg_words_per_reply: number | null;
+  };
+  performance: {
+    stt_ms: number | null; llm_ms: number | null; tool_ms: number | null; tts_ms: number | null;
+    latency_ms: number | null; latency_p50_ms: number | null; latency_p95_ms: number | null;
+  };
+  /** t: local wall time of the bucket start ("2026-10-04 09:00:00") */
+  series: { t: string; calls: number; booked: number; handoffs: number }[];
+  channels: Count[]; languages: Count[]; skills: Count[]; handoff_reasons: Count[];
+};
+
 export type ActiveCall = {
   call_id: string; started: number; duration_s: number; skill: string | null; step: string | null; turns: number;
   language: string | null; verified: boolean; slots: Record<string, unknown>; last_user: string | null;
-  last_agent: string | null;
+  last_agent: string | null; agent_id: string | null;
 };
 
 export type ProviderSpec = { provider: string; settings: Record<string, unknown> };
@@ -88,8 +114,15 @@ export type ToolPolicy = {
   kind: "read" | "write" | "send"; confirm?: string; timeout_s?: number; cache_ttl?: number; idempotent?: boolean;
   role?: string; args?: Record<string, string>; hooks?: string[]; backs?: string; success_line?: string;
   source?: "mcp" | "local" | "http"; description?: string; input_schema?: Record<string, unknown>;
-  http?: { method?: string; url?: string; headers?: Record<string, unknown> };
+  http?: { method?: string; url?: string; headers?: Record<string, unknown>; auth?: ToolAuth };
 };
+/** An API tool's authentication; secret parts are {"secret": NAME} references. */
+export type ToolAuth =
+  | { type: "none" }
+  | { type: "bearer"; token: unknown }
+  | { type: "basic"; username: unknown; password: unknown }
+  | { type: "api_key"; header: string; value: unknown };
+export type ToolTestOverride = { url?: string; method?: string; timeout_s?: number; headers?: Record<string, unknown> };
 export type LibraryTool = {
   name: string; group: string; source: string; policy: ToolPolicy; description: string;
   input_schema: Record<string, unknown> | null; server: string | null; available: boolean; used_by: string[];
@@ -109,11 +142,20 @@ export type ToolLibrary = {
 export type AgentSummary = {
   id: string; name: string; description: string; version: number | null; published_at: string | null;
   has_draft: boolean; draft_updated_at: string | null; routes: string[]; default: boolean; skills: string[];
+  /** flow: a flow graph drives the call · prompt: the model follows a prompt */
+  type?: "flow" | "prompt"; languages?: string[]; default_language?: string; voice?: string | null;
+  voice_provider?: string | null; created_at?: string | null; updated_at?: string | null;
+};
+export type ImportResult = {
+  id: string; release_id: number; version: number; name: string; tools: string[]; report: string[];
+  stats: { nodes: number; edges: number; tools: number; variables: number };
 };
 export type FlowNode = {
   id: string; type: string; instructions?: string; tools?: string[]; auto_call?: Record<string, unknown>[];
   extract?: string[]; set?: Record<string, unknown>; tool?: string; args?: Record<string, unknown>; reason?: string;
   say?: Record<string, string>; skill?: string; position?: { x: number; y: number };
+  /** tool nodes: slot ← path in the tool's result ("result.count") */
+  outputs?: Record<string, string>;
 };
 export type FlowEdge = { from: string; to: string; when?: Record<string, unknown>; on?: string };
 export type FlowGraph = {
@@ -127,6 +169,20 @@ export type Bundle = {
   knobs: Record<string, unknown>; voice: { stt_hint?: Record<string, string> };
   phrases: Record<string, unknown>; skills: Record<string, number | { skill: string; version: number }>;
   tools: Record<string, unknown>;
+  /** knowledge base items this agent searches (search_knowledge_base) */
+  knowledge?: { items: string[] };
+};
+
+export type KbStatus = "processing" | "completed" | "completed_with_errors" | "failed";
+export type KbItem = {
+  id: string; name: string; type: "text" | "file"; extension: string | null; size_bytes: number; words: number;
+  chunks: number; status: KbStatus; error: string | null; created_by: string | null; created_at: string;
+  updated_at: string; used_by: { agent: string; name: string }[]; draft_by: { agent: string; name: string }[];
+  content?: string;
+};
+export type KbList = {
+  items: KbItem[]; usage_bytes: number; quota_bytes: number;
+  limits: { file_bytes: number; text_chars: number; extensions: string[] };
 };
 export type AgentDetail = {
   agent: { id: string; name: string; description: string; published_release_id: number | null;
@@ -135,20 +191,62 @@ export type AgentDetail = {
   skills: Record<string, { library: string; version: number; files: Record<string, string>;
                            flow: { converted?: boolean; graph?: FlowGraph; errors?: string[]; error?: string } | null;
                            versions: { version: number; created_at: string; author: string; note: string }[] }>;
-  releases: { id: number; version: number; author: string; note: string; created_at: string }[];
+  releases: { id: number; version: number; author: string; note: string; created_at: string; gate?: ReleaseGate | null }[];
   routes: { pattern: string; agent_id: string; priority: number }[];
   connections: { id: string; kind: string; type: string; name: string }[];
   schemas: Record<string, Record<string, JsonSchema>>;
   choices: { knobs: Record<string, string>; phrases: string[]; library_skills: string[] };
 };
 
+// ---- test cases + publish gate (12.7)
+export type CaseSpec = {
+  suite?: string; title?: string; max_turns?: number; tags?: string[]; judge_note?: string;
+  caller: { language?: "ar" | "en"; script?: string[]; goal?: string; persona?: string; opening?: string;
+            facts?: Record<string, string> };
+  expect: Record<string, unknown>;
+};
+export type AgentCase = { id: string; spec: CaseSpec; gate: boolean; updated_by?: string | null; updated_at?: string };
+export type CaseResult = { passed: boolean; failed: string[]; run_id: string; at: string; turns?: number; duration_s?: number };
+export type GateStatus = { draft_hash: string | null; required: number; passed: string[]; failed: string[]; not_run: string[];
+                           ok: boolean; results: Record<string, CaseResult> };
+export type EvalJob = { id: string; status?: "running" | "done" | "error"; total?: number; error?: string | null;
+                        run_id?: string | null; done?: { case: string; passed: boolean; failed?: string[] }[] };
+export type ReleaseGate = { checks: { required: number; passed: number; failed: string[]; not_run: string[] };
+                            runs: string[]; override?: { reason: string; by: string | null } };
+export type AuditRow = { id: number; ts: string; action: string; actor: string | null; detail: Record<string, unknown>;
+                         agent_id?: string; workspace_id?: string | null };
+
+export type Project = { id: string; name: string; created_at: string | null; platform_default: boolean; agents: number;
+  connections: number; mcp_servers: number; tools: number; secrets: number; routes: string[];
+  role: "owner" | "admin"; mine: boolean; label: string | null; owner: string | null; default: boolean | null };
+export type User = { id: string; email: string; name: string; default_project: string | null };
+export type AuthStatus = { mode: "setup" | "login" | "signed_in" | "token" | "open"; user?: User; accounts: boolean;
+  mail: boolean; open?: boolean };
+export type Member = { user_id: string; name: string; email: string; role: string; status: "joined"; joined_at: string; you: boolean };
+export type Invitation = { id: string; email: string; role: string; status: "invited" | "expired" | "joined";
+  invited_by: string | null; created_at: string; expires_at: string };
+
 const TOKEN_KEY = "hmg-console-token";
+const PROJECT_KEY = "hmg-console-project";
+const DEFAULT_PROJECT_KEY = "hmg-console-default-project";
+const store = {
+  get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+/** The default project (★): the one this browser opens with. */
+export const getDefaultProject = () => store.get(DEFAULT_PROJECT_KEY) ?? "hmg";
+export const setDefaultProject = (id: string) => store.set(DEFAULT_PROJECT_KEY, id);
+/** The project every console request works in (sent as X-Project; empty: the server picks the user's default). */
+let currentProject = store.get(PROJECT_KEY) ?? "";
+export const getProject = () => currentProject;
+export const setProject = (id: string) => { currentProject = id; store.set(PROJECT_KEY, id); };
 export const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) ?? ""; } catch { return ""; } };
 export const setToken = (t: string) => { try { localStorage.setItem(TOKEN_KEY, t); } catch { /* private mode */ } };
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {
-    super(typeof detail === "string" ? detail : `HTTP ${status}`);
+    super(typeof detail === "string" ? detail
+      : (detail as { message?: string } | null)?.message ?? `HTTP ${status}`);
   }
 }
 
@@ -156,12 +254,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}),
-               ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...(currentProject ? { "X-Project": currentProject } : {}),
+               ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
     let detail: unknown = res.statusText;
     try { detail = (await res.json()).detail; } catch { /* not json */ }
+    const d = detail as { login?: boolean; project?: boolean } | null;
+    if (res.status === 401 && d?.login) window.dispatchEvent(new Event("console-auth"));      // sign in again
+    if (res.status === 404 && d?.project && currentProject) {                                  // project gone / no access
+      setProject(""); window.dispatchEvent(new Event("console-project"));
+    }
     throw new ApiError(res.status, detail);
   }
   return res.json() as Promise<T>;
@@ -177,22 +280,73 @@ const qs = (p: Record<string, unknown>) => {
   return s ? `?${s}` : "";
 };
 
+export type CatalogVoice = { voice: string; language: string; gender: string; dialect: string; model?: string; style?: string;
+  provider: string; used_by: { agent: string; name: string }[]; draft_by: { agent: string; name: string }[] };
+export type AgentVoices = { agent: string; name: string; provider: string | null; languages: string[];
+  draft_voices: Record<string, string | null>;
+  voices: Record<string, { voice: string | null; model: string | null }> };
+
 export const api = {
-  stats: (hours = 24) => req<Stats>(`/api/stats${qs({ hours })}`),
-  calls: (p: { limit?: number; offset?: number; q?: string; outcome?: string; channel?: string }) =>
+  voices: () => req<AgentVoices[]>("/api/voices"),
+  voiceCatalog: () => req<CatalogVoice[]>("/api/voices/catalog"),
+  useVoice: (body: { agent: string; language: string; voice: string }) =>
+    req<{ agent: string; language: string; voice: string; previous: string | null }>("/api/voices/use",
+      { method: "POST", body: JSON.stringify(body) }),
+  voicePreview: (body: { agent?: string; language: string; voice?: string; text?: string }) =>
+    req<{ audio: string; sample_rate: number; text: string; ms: number; seconds: number }>("/api/voices/preview",
+      { method: "POST", body: JSON.stringify(body) }),
+  authStatus: () => req<AuthStatus>("/api/auth/status"),
+  setup: (body: { name: string; email: string; password: string }) =>
+    req<{ token: string; user: User }>("/api/auth/setup", { method: "POST", body: JSON.stringify(body) }),
+  login: (email: string, password: string) =>
+    req<{ token: string; user: User }>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => req<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  updateMe: (body: { name?: string; password?: string; current_password?: string }) =>
+    req<{ user: User }>("/api/me", { method: "PUT", body: JSON.stringify(body) }),
+  setDefaultProjectOnServer: (project: string) =>
+    req<{ default_project: string }>("/api/me/default-project", { method: "PUT", body: JSON.stringify({ project }) }),
+  setProjectLabel: (id: string, label: string) =>
+    req<{ label: string | null }>(`/api/projects/${encodeURIComponent(id)}/label`, { method: "PUT", body: JSON.stringify({ label }) }),
+  members: (id: string) => req<{ members: Member[]; invitations: Invitation[]; can_manage: boolean; you: string | null;
+    mail: boolean; accounts: boolean }>(`/api/projects/${encodeURIComponent(id)}/members`),
+  invite: (id: string, email: string) =>
+    req<{ invitation: Invitation; link: string; emailed: boolean }>(`/api/projects/${encodeURIComponent(id)}/invitations`,
+      { method: "POST", body: JSON.stringify({ email, role: "admin" }) }),
+  resendInvite: (id: string, inv: string) =>
+    req<{ link: string; emailed: boolean }>(`/api/projects/${encodeURIComponent(id)}/invitations/${inv}/resend`, { method: "POST" }),
+  revokeInvite: (id: string, inv: string) =>
+    req<{ ok: boolean }>(`/api/projects/${encodeURIComponent(id)}/invitations/${inv}`, { method: "DELETE" }),
+  removeMember: (id: string, user: string) =>
+    req<{ ok: boolean }>(`/api/projects/${encodeURIComponent(id)}/members/${user}`, { method: "DELETE" }),
+  invitation: (token: string) =>
+    req<{ project: string; email: string; invited_by: string | null; status: string; has_account: boolean }>(`/api/invitations/${token}`),
+  acceptInvitation: (token: string, body: { name?: string; password: string }) =>
+    req<{ token: string; user: User; project: string }>(`/api/invitations/${token}/accept`, { method: "POST", body: JSON.stringify(body) }),
+  projects: () => req<Project[]>("/api/projects"),
+  createProject: (name: string, copy_setup: boolean) =>
+    req<{ id: string; name: string }>("/api/projects", { method: "POST", body: JSON.stringify({ name, copy_setup }) }),
+  renameProject: (id: string, name: string) =>
+    req<{ id: string; name: string }>(`/api/projects/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ name }) }),
+  stats: (hours = 24, agent?: string) => req<Stats>(`/api/stats${qs({ hours, agent })}`),
+  dashboard: (p: { start: string; end: string; agent?: string; tz?: string }) =>
+    req<DashboardData>(`/api/dashboard${qs(p)}`),
+  calls: (p: { limit?: number; offset?: number; q?: string; outcome?: string; channel?: string; agent?: string;
+                channels?: string; status?: string; start?: string; end?: string; sort?: string; desc?: boolean }) =>
     req<{ total: number; items: CallRow[] }>(`/api/calls${qs(p)}`),
   call: (id: string) => req<CallDetail>(`/api/calls/${encodeURIComponent(id)}`),
-  events: (p: { call_id?: string; type?: string[]; level?: string; text?: string; before_id?: number; limit?: number }) =>
+  events: (p: { call_id?: string; type?: string[]; level?: string; text?: string; before_id?: number; limit?: number; agent?: string }) =>
     req<EventRow[]>(`/api/events${qs(p)}`),
   liveCalls: () => req<ActiveCall[]>("/api/live/calls"),
   endCall: (id: string) => req<{ call_id: string; ended: boolean }>(`/api/calls/${encodeURIComponent(id)}/end`,
     { method: "POST" }),
-  providers: () => req<ProvidersResponse>("/api/providers"),
-  saveProviders: (config: AgentConfig, note: string) =>
-    req<{ version: number }>("/api/providers", { method: "PUT", body: JSON.stringify({ config, note }) }),
-  activate: (version: number) => req<{ version: number }>(`/api/providers/activate/${version}`, { method: "POST" }),
-  testProvider: (kind: string, provider: string, settings: Record<string, unknown>) =>
-    req<Record<string, unknown>>("/api/providers/test", { method: "POST", body: JSON.stringify({ kind, provider, settings }) }),
+  providers: (agent?: string) => req<ProvidersResponse>(`/api/providers${qs({ agent })}`),
+  saveProviders: (config: AgentConfig, note: string, agent?: string) =>
+    req<{ version: number }>("/api/providers", { method: "PUT", body: JSON.stringify({ config, note, agent: agent || null }) }),
+  activate: (version: number, agent?: string) =>
+    req<{ version: number }>(`/api/providers/activate/${version}${qs({ agent })}`, { method: "POST" }),
+  testProvider: (kind: string, provider: string, settings: Record<string, unknown>, agent?: string) =>
+    req<Record<string, unknown>>("/api/providers/test", { method: "POST", body: JSON.stringify({ kind, provider, settings, agent: agent || null }) }),
+  projectAudit: (id: string) => req<AuditRow[]>(`/api/projects/${encodeURIComponent(id)}/audit`),
   skills: () => req<SkillSummary[]>("/api/skills"),
   skill: (name: string) => req<SkillDetail>(`/api/skills/${name}`),
   validateSkill: (name: string, files: Record<string, string>) =>
@@ -214,8 +368,10 @@ export const api = {
     req<Record<string, unknown>>(`/api/connections/${encodeURIComponent(id)}/test`, { method: "POST" }),
   agents: () => req<AgentSummary[]>("/api/agents"),
   agent: (id: string) => req<AgentDetail>(`/api/agents/${encodeURIComponent(id)}`),
-  createAgent: (body: { name: string; description?: string; copy_from?: string }) =>
+  createAgent: (body: { name: string; description?: string; copy_from?: string; type?: "flow" | "prompt" }) =>
     req<{ id: string }>("/api/agents", { method: "POST", body: JSON.stringify(body) }),
+  importAgent: (body: { content: string; name?: string; filename?: string }) =>
+    req<ImportResult>("/api/agents/import", { method: "POST", body: JSON.stringify(body) }),
   renameAgent: (id: string, body: { name: string; description: string }) =>
     req<{ id: string }>(`/api/agents/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteAgent: (id: string) => req<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -225,8 +381,20 @@ export const api = {
     req<{ skill: string; version: number }>(`/api/agents/${encodeURIComponent(id)}/draft/skills/${encodeURIComponent(key)}`,
       { method: "PUT", body: JSON.stringify(body) }),
   discardDraft: (id: string) => req<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/draft/discard`, { method: "POST" }),
-  publishAgent: (id: string, note: string) =>
-    req<{ id: number; version: number }>(`/api/agents/${encodeURIComponent(id)}/publish`, { method: "POST", body: JSON.stringify({ note }) }),
+  publishAgent: (id: string, note: string, override_reason?: string) =>
+    req<{ id: number; version: number; gate: ReleaseGate }>(`/api/agents/${encodeURIComponent(id)}/publish`,
+      { method: "POST", body: JSON.stringify({ note, override_reason: override_reason || null }) }),
+  agentEvals: (id: string) =>
+    req<{ cases: AgentCase[]; gate: GateStatus; has_draft: boolean; job: EvalJob | null }>(`/api/agents/${encodeURIComponent(id)}/evals`),
+  putAgentEval: (id: string, caseId: string, spec: CaseSpec, gate: boolean) =>
+    req<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/evals/${encodeURIComponent(caseId)}`,
+      { method: "PUT", body: JSON.stringify({ spec, gate }) }),
+  deleteAgentEval: (id: string, caseId: string) =>
+    req<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}/evals/${encodeURIComponent(caseId)}`, { method: "DELETE" }),
+  runAgentEvals: (id: string, body: { cases?: string[]; only?: "gate" | "failed" | "all" }) =>
+    req<{ job: string; total: number; draft: boolean }>(`/api/agents/${encodeURIComponent(id)}/evals/run`,
+      { method: "POST", body: JSON.stringify(body) }),
+  agentAudit: (id: string) => req<AuditRow[]>(`/api/agents/${encodeURIComponent(id)}/audit`),
   activateRelease: (id: string, release: number) =>
     req<{ version: number }>(`/api/agents/${encodeURIComponent(id)}/activate/${release}`, { method: "POST" }),
   exportAgent: (id: string) => req<Record<string, unknown>>(`/api/agents/${encodeURIComponent(id)}/export`),
@@ -237,15 +405,28 @@ export const api = {
     req<{ ok: boolean }>("/api/routes", { method: "PUT", body: JSON.stringify(body) }),
   deleteRoute: (pattern: string) => req<{ ok: boolean }>(`/api/routes?pattern=${encodeURIComponent(pattern)}`, { method: "DELETE" }),
   toolLibrary: () => req<ToolLibrary>("/api/tool-library"),
+  knowledge: () => req<KbList>("/api/knowledge"),
+  kbItem: (id: string) => req<KbItem>(`/api/knowledge/${encodeURIComponent(id)}`),
+  addKbText: (body: { name: string; content: string }) =>
+    req<{ id: string }>("/api/knowledge/text", { method: "POST", body: JSON.stringify(body) }),
+  addKbFile: (body: { filename: string; data: string; name?: string }) =>
+    req<{ id: string; words: number }>("/api/knowledge/file", { method: "POST", body: JSON.stringify(body) }),
+  deleteKb: (id: string) => req<{ deleted: string }>(`/api/knowledge/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  reprocessKb: (id: string) => req<{ id: string }>(`/api/knowledge/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
+  searchKb: (body: { query: string; items?: string[] }) =>
+    req<{ mode?: string; results: { source: string; text: string }[] }>("/api/knowledge/search",
+      { method: "POST", body: JSON.stringify(body) }),
+  useKb: (body: { agent: string; items: string[] }) =>
+    req<{ agent: string; items: string[] }>("/api/knowledge/use", { method: "POST", body: JSON.stringify(body) }),
   putTool: (name: string, body: { group: string; policy: ToolPolicy; agents?: string[]; note?: string }) =>
     req<{ name: string; releases: unknown[] }>(`/api/tool-library/${encodeURIComponent(name)}`,
       { method: "PUT", body: JSON.stringify(body) }),
   deleteTool: (name: string, agent?: string) =>
     req<Record<string, unknown>>(`/api/tool-library/${encodeURIComponent(name)}${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`,
       { method: "DELETE" }),
-  testTool: (name: string, args: Record<string, unknown>) =>
+  testTool: (name: string, args: Record<string, unknown>, override?: ToolTestOverride) =>
     req<{ ok: boolean; ms: number; data?: unknown; error?: string }>(`/api/tool-library/${encodeURIComponent(name)}/test`,
-      { method: "POST", body: JSON.stringify({ args }) }),
+      { method: "POST", body: JSON.stringify({ args, override: override ?? {} }) }),
   discoverServer: (body: Record<string, unknown>) =>
     req<{ ok: boolean; tools?: { name: string; description: string }[]; error?: string }>("/api/mcp-servers/discover",
       { method: "POST", body: JSON.stringify(body) }),
@@ -265,7 +446,7 @@ export const api = {
 
 export function wsUrl(path: string, params: Record<string, string | undefined> = {}) {
   const token = getToken();
-  const p = qs({ ...params, token: token || undefined });
+  const p = qs({ ...params, project: currentProject || undefined, token: token || undefined });
   return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}${p}`;
 }
 
@@ -286,9 +467,9 @@ export type EvalRun = { id: string; started_at: string; finished_at: string; mod
 
 export const evalsApi = {
   cases: () => req<EvalCase[]>("/api/evals/cases"),
-  run: (body: { suite?: string; cases?: string[]; mode: string; judge: boolean }) =>
+  run: (body: { suite?: string; cases?: string[]; mode: string; judge: boolean; agent?: string }) =>
     req<{ job: string; total: number }>("/api/evals/run", { method: "POST", body: JSON.stringify(body) }),
   job: (job: string) => req<{ status: string; total: number; done: { case: string; passed: boolean }[]; run_id: string | null; error: string | null }>(`/api/evals/jobs/${job}`),
-  runs: () => req<EvalRun[]>("/api/evals/runs"),
+  runs: (agent?: string) => req<EvalRun[]>(`/api/evals/runs${qs({ agent })}`),
   runDetail: (id: string) => req<EvalRun & { results: EvalResult[] }>(`/api/evals/runs/${id}`),
 };

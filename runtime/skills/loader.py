@@ -29,6 +29,7 @@ from runtime.config import ROOT_DIR
 from runtime.text.arabic import normalize
 from runtime.tools import Catalog
 
+from .flow import is_template, render
 from .graph import DONE, Graph, Node
 
 SKILLS_DIR = ROOT_DIR / "skills"
@@ -94,7 +95,19 @@ def call_facts(session: Any) -> dict[str, Any]:
             "mobile_heard": bool(parsed.get("mobile")), "code_heard": bool(parsed.get("code")),
             "files_found": len(a.candidates) if a.lookup_attempts else None,
             "otp_exhausted": a.otp_attempts >= 3, "awaiting_confirmation": session.pending_action is not None,
-            "_turn": session.turn_id}
+            "_turn": session.turn_id, **template_vars(session)}
+
+
+def template_vars(session: Any) -> dict[str, Any]:
+    """Built-in names for templates (the ones Hamsa flows use): the time in Riyadh, the call language and the
+    caller's number."""
+    from datetime import datetime
+    from runtime.harness.nlu.dates import RIYADH
+    now = datetime.now(RIYADH)
+    number = getattr(session, "ani", None) or ""
+    return {"current_datetime": now.strftime("%Y-%m-%dT%H:%M:%S"), "current_weekday": now.strftime("%A"),
+            "call_lang": session.language.language, "userNumber": number,
+            "callParams": {"userNumber": number, "from": number}}
 
 
 class SkillSet:
@@ -104,6 +117,7 @@ class SkillSet:
         self.catalog = catalog
         self.phrases = phrases          # the agent's fixed lines (harness.prompts.Phrases); None → defaults
         self.skills: dict[str, Skill] = {}
+        self.global_tools: set[str] = set()   # offered everywhere (e.g. search_knowledge_base)
         self._load(files)
 
     def _load(self, files: dict[str, dict[str, str]]) -> None:
@@ -166,17 +180,22 @@ class SkillSet:
         text = s.text(lang)
         node = self.node(skill, session)
         if node is not None and node.id != DONE and node.type == "conversation":
-            text += f"\n\n### Current step: {node.id}\n{node.instructions}"
+            body = node.instructions
+            if is_template(body):
+                body = render(body, {"slots": session.slots, **call_facts(session)})
+            text += f"\n\n### Current step: {node.id}\n{body}"
         return text
 
     def tools(self, skill: str, session: Any) -> set[str]:
         s = self.skills.get(skill)
         if s is None:
-            return set()
+            return set(self.global_tools)
         if s.flow:
             node = self.node(skill, session)
-            return set(s.flow.common_tools) | set(node.tools if node else []) | ({node.tool} if node and node.tool else set())
-        return ({t.name for t in self.catalog.for_skill(skill)} | set(s.extra_tools)) - set(s.hidden_tools)
+            return set(s.flow.common_tools) | set(node.tools if node else []) | \
+                ({node.tool} if node and node.tool else set()) | self.global_tools
+        return ({t.name for t in self.catalog.for_skill(skill)} | set(s.extra_tools) | self.global_tools) \
+            - set(s.hidden_tools)
 
     def current_step(self, skill: str, session: Any) -> str | None:
         node = self.node(skill, session)

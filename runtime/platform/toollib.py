@@ -22,7 +22,7 @@ from typing import Any
 from runtime.harness.prompts import PHRASE_NAMES
 from runtime.tools.hooks import TOOL_HOOKS, load_packs
 
-from .store import WORKSPACE
+from .store import WORKSPACE, current_project
 
 KINDS = ("read", "write", "send")
 CONFIRM = ("none", "affirm", "readback")
@@ -74,6 +74,8 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
             e.append("http.url must start with http:// or https://")
         if str(http.get("method", "GET")).upper() not in METHODS:
             e.append(f"http.method must be one of {', '.join(METHODS)}")
+        from runtime.tools.http_tool import auth_errors
+        e += auth_errors(http.get("auth"))
         schema = policy.get("input_schema") or {"type": "object", "properties": {}}
         if not isinstance(schema, dict) or schema.get("type") != "object":
             e.append("input_schema must be a JSON schema object ({\"type\": \"object\", \"properties\": {...}})")
@@ -108,7 +110,7 @@ def tools_in(cfg: dict[str, Any]) -> dict[str, tuple[str, dict]]:
 async def usage(store) -> dict[str, list[str]]:
     """tool name → agents whose published release has it."""
     used: dict[str, list[str]] = {}
-    for agent in await store.agents(WORKSPACE):
+    for agent in await store.agents(current_project()):
         if agent.get("published_release_id"):
             bundle = (await store.release(agent["published_release_id"]))["bundle"]
             for name in tools_in(bundle.get("tools") or {}):
@@ -120,7 +122,7 @@ async def publish_tool(store, name: str, group: str, policy: dict[str, Any], *, 
                        note: str) -> list[dict]:
     """New release for each agent in `agents` (and every agent that already has the tool) with this policy."""
     out = []
-    for agent in await store.agents(WORKSPACE):
+    for agent in await store.agents(current_project()):
         if not agent.get("published_release_id"):
             continue
         bundle = (await store.release(agent["published_release_id"]))["bundle"]

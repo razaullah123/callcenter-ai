@@ -64,7 +64,7 @@ are the least reliable input over 8 kHz audio.
 | Setting | Default | |
 |---|---|---|
 | `AUTH_SECRET` | — | Must equal the IVR auth service's secret. If it is unset, tokens are **not verified** (development only). |
-| `AUTH_DATABASE_URL` | `SOURCE_DATABASE_URL` | Database with `blacklisted_tokens` / `white_listed_numbers` |
+| `DATABASE_URL` | — | The voice agent's own database; `blacklisted_tokens` / `white_listed_numbers` are imported into it by `scripts/clone_reference_data.py` (re-run it, or write revocations there, to block a token) |
 | `IVR_INBOUND_RATE` | 8000 | |
 | `IVR_OUTBOUND_RATE` | 8000 | 0 = keep the TTS provider's rate |
 | `IVR_CHUNK_MS` | 300 | Outbound WAV piece length |

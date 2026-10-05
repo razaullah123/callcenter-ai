@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* dark: utilities follow the system unless the top bar chose a theme (data-theme on <html>) */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) { &:where(:root:not([data-theme="light"]) *) { @slot; } }
+  &:where([data-theme="dark"], [data-theme="dark"] *) { @slot; }
+}
+
 /* Design tokens: light by default, dark via prefers-color-scheme. */
 @theme {
   --color-bg: #f5f6f8;
@@ -8,27 +14,52 @@
   --color-line: #e2e5ea;
   --color-ink: #151b24;
   --color-muted: #667085;
-  --color-accent: #0e7a5a;
+  --color-nav: #000000;              /* sidebar labels: pure black like Hamsa's */
+  --color-accent: #97de00;           /* Hamsa lime: fills, borders, focus, bars */
+  --color-accent-fg: #0b0f06;        /* text / icons on a lime fill */
+  --color-accent-text: #4d7c0f;      /* lime-toned text on light backgrounds (links, labels) */
+  --color-brand: var(--color-accent);   /* kept for the log panel / canvas classes */
   --color-good: #12805c;
   --color-warn: #b25e09;
   --color-bad: #c0362c;
-  --font-sans: "Segoe UI", system-ui, -apple-system, "Noto Sans Arabic", Tahoma, sans-serif;
+  --font-sans: "Baloo 2 Variable", "IBM Plex Sans Arabic", system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
   --font-mono: "Cascadia Code", Consolas, ui-monospace, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --color-bg: #0f1318;
     --color-panel: #161b22;
     --color-soft: #1f2630;
     --color-line: #29313c;
     --color-ink: #e6ebf1;
     --color-muted: #8b96a5;
-    --color-accent: #3ecf8e;
+    --color-nav: #f1f4f8;
+    --color-accent: #97de00;
+    --color-accent-fg: #0b0f06;
+    --color-accent-text: #b5f23d;
     --color-good: #3ecf8e;
     --color-warn: #f0a13a;
     --color-bad: #f07167;
+    color-scheme: dark;
   }
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  --color-bg: #0f1318;
+  --color-panel: #161b22;
+  --color-soft: #1f2630;
+  --color-line: #29313c;
+  --color-ink: #e6ebf1;
+  --color-muted: #8b96a5;
+  --color-nav: #f1f4f8;
+  --color-accent: #97de00;
+  --color-accent-fg: #0b0f06;
+  --color-accent-text: #b5f23d;
+  --color-good: #3ecf8e;
+  --color-warn: #f0a13a;
+  --color-bad: #f07167;
+  color-scheme: dark;
 }
 
 html, body, #root { height: 100%; }

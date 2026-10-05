@@ -15,7 +15,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .store import WORKSPACE
+from .store import WORKSPACE, current_project
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class Secrets:
         self.store, self.cipher, self.settings = store, cipher, settings
 
     async def get(self, name: str) -> str | None:
-        row = await self.store.secret(WORKSPACE, name) if self.store is not None else None
+        row = await self.store.secret(current_project(), name) if self.store is not None else None
         if row is not None:
             return self.cipher.decrypt(row["ciphertext"])
         v = getattr(self.settings, name.lower(), None) if self.settings is not None else None
@@ -99,7 +99,7 @@ class Secrets:
             raise ValueError("secret names are UPPER_SNAKE_CASE (letters, digits, _), 2–64 characters")
         if not value:
             raise ValueError("the secret value is empty")
-        await self.store.put_secret(WORKSPACE, name, self.cipher.encrypt(value), hint(value), by)
+        await self.store.put_secret(current_project(), name, self.cipher.encrypt(value), hint(value), by)
 
     async def resolve(self, obj: Any) -> Any:
         """A copy of `obj` with every {"secret": name} replaced by its value. Missing → error naming the secret."""

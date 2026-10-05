@@ -4,16 +4,20 @@ Auth: if CONSOLE_TOKEN is set, every request needs `Authorization: Bearer <token
 """
 
 import asyncio
+import logging
+import functools
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from runtime.control import config_store, skills_store, store
-from runtime.platform import WORKSPACE
+from runtime.platform import WORKSPACE, current_project
 from runtime.providers import AudioInput, TextDelta, available, create, schemas
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 ACTIVE_REFRESH_S = 5.0     # "Active now" refresh on the live console socket
 
@@ -32,37 +36,163 @@ async def changed(rt, kind: str, **detail) -> None:
     await (notify(kind, **detail) if notify else rt.reload())
 
 
-def require_console(request: Request) -> None:
-    token = _rt().settings.console_token
-    if token is None:
-        return
-    if request.headers.get("authorization", "") != f"Bearer {token.get_secret_value()}":
-        raise HTTPException(401, "console token required")
+def bearer_of(request: Request) -> str | None:
+    h = request.headers.get("authorization", "")
+    return h[7:].strip() if h.lower().startswith("bearer ") else None
 
 
-auth = [Depends(require_console)]
+async def require_console(request: Request) -> None:
+    """A signed-in user, the CONSOLE_TOKEN, or (no accounts and no token yet) anyone — see control/accounts.py."""
+    from runtime.control.accounts import resolve, set_principal
+    rt = _rt()
+    who = await resolve(rt.platform, rt.settings, bearer_of(request))
+    if who is None:
+        raise HTTPException(401, {"message": "sign in required", "login": True})
+    set_principal(who)
+
+
+async def use_project(request: Request) -> None:
+    """The console's current project (X-Project header; else the user's default / first project, else the default
+    project). A signed-in user only reaches projects they are a member of."""
+    from runtime.control.accounts import principal
+    rt = _rt()
+    who = principal()
+    ws = request.headers.get("x-project")
+    if who.is_user:
+        if not ws:
+            ws = who.user.get("default_project") if who.role(who.user.get("default_project") or "") else None
+            ws = ws or (WORKSPACE if who.role(WORKSPACE) else next(iter(sorted(who.memberships)), None))
+        if ws is None or who.role(ws) is None:
+            raise HTTPException(404, {"message": f"project {ws!r} not found", "project": True})
+    else:
+        ws = ws or WORKSPACE
+        if ws != WORKSPACE and rt.platform is not None and not any(
+                w["id"] == ws for w in await rt.platform.list_workspaces()):
+            raise HTTPException(404, {"message": f"project {ws!r} not found", "project": True})
+    from runtime.platform import set_project
+    set_project(ws)
+
+
+auth = [Depends(require_console), Depends(use_project)]
+
+# what a project audit entry may show about a request (never secret values or settings)
+AUDIT_FIELDS = ("name", "pattern", "agent_id", "kind", "type", "url", "group", "description")
+
+
+def audited(action: str):
+    """Record a successful console change in the project's audit log (Project settings → Audit log)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def inner(*args, **kw):
+            result = await fn(*args, **kw)
+            rt = _rt()
+            if rt.platform is not None:
+                detail: dict[str, Any] = {k: v for k, v in kw.items() if isinstance(v, (str, int)) and v != ""
+                                          and k not in ("author", "token")}
+                body = next((v for v in kw.values() if isinstance(v, BaseModel)), None)
+                if body is not None:
+                    detail.update({k: getattr(body, k) for k in AUDIT_FIELDS
+                                   if isinstance(getattr(body, k, None), (str, int)) and getattr(body, k)})
+                agent = str(kw.get("agent_id") or detail.get("agent_id") or
+                            (result.get("id") if action.startswith("agent.") and isinstance(result, dict) else "")
+                            or "")
+                from runtime.control.accounts import principal
+                try:
+                    await rt.platform.audit(agent, action, principal().actor, detail)
+                except Exception as e:                       # the change is done; a missing log line must not fail it
+                    log.warning("audit %s not recorded: %r", action, e)
+            return result
+        return inner
+    return deco
 
 
 # ---------------------------------------------------------------- overview
 
 
+async def project_scope(agent: str | None = None, ws: str | None = None) -> tuple[list[str], bool]:
+    """The calls a console request may see: its project's agents (or one of them). Calls without an agent (from
+    before agents existed) belong to the default project."""
+    ws = ws or current_project()
+    rt = _rt()
+    agents = [a["id"] for a in await rt.platform.agents(ws)] if rt.platform is not None else [rt.agent.agent_id]
+    if agent:
+        if agent not in agents:
+            raise HTTPException(404, "agent not found in this project")
+        return [agent], False
+    return agents, ws == WORKSPACE
+
+
+async def primary_agent(agent: str | None = None):
+    """The agent a project-wide page works on: the one asked for, else the project's default-route agent, else
+    its first agent — loaded as callers get it (published release)."""
+    rt = _rt()
+    if rt.platform is None:
+        return rt.agent
+    if not agent:
+        mine = [a["id"] for a in await rt.platform.agents(current_project())]
+        if not mine:
+            raise HTTPException(404, "this project has no agents yet")
+        routed = [r["agent_id"] for r in await rt.platform.routes(current_project()) if r["agent_id"] in mine]
+        agent = rt.agent.agent_id if rt.agent.agent_id in mine else (routed[0] if routed else sorted(mine)[0])
+    scope, _ = await project_scope(agent)
+    return rt.agent if agent == rt.agent.agent_id else await rt.loader.for_call(agent_id=scope[0])
+
+
 @router.get("/stats", dependencies=auth)
-async def get_stats(hours: int = 24) -> dict:
-    data = await store.stats(hours)
-    data["active_calls"] = len(_rt().live.active) if _rt().live else 0
+async def get_stats(hours: int = 24, agent: str | None = None) -> dict:
+    scope = await project_scope(agent)
+    data = await store.stats(hours, scope)
+    data["active_calls"] = len(_rt().live.active_calls(scope)) if _rt().live else 0
     return data
+
+
+@router.get("/dashboard", dependencies=auth)
+async def get_dashboard(start: datetime | None = None, end: datetime | None = None, agent: str | None = None,
+                        tz: str = "UTC") -> dict:
+    """Dashboard numbers for calls started in [start, end) (ISO times; default: the last 24 hours); the
+    calls-over-time series is bucketed in the viewer's time zone `tz` (IANA name)."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, f"unknown time zone {tz!r}") from None
+    end = _aware(end) if end else datetime.now(timezone.utc)
+    start = _aware(start) if start else end - timedelta(hours=24)
+    if start >= end:
+        raise HTTPException(422, "start must be before end")
+    await _rt().store.flush()
+    scope = await project_scope(agent)
+    data = await store.dashboard(start, end, scope, tz)
+    data["live_calls"] = len(_rt().live.active_calls(scope)) if _rt().live else 0
+    return data
+
+
+def _aware(t: datetime) -> datetime:
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 @router.get("/calls", dependencies=auth)
 async def get_calls(limit: int = 50, offset: int = 0, q: str | None = None, outcome: str | None = None,
-                    channel: str | None = None) -> dict:
-    return await store.list_calls(limit, offset, q, outcome, channel)
+                    channel: str | None = None, agent: str | None = None, channels: str | None = None,
+                    status: str | None = None, start: datetime | None = None, end: datetime | None = None,
+                    sort: str = "time", desc: bool = True) -> dict:
+    """Call history. `channels` / `status`: comma lists (status: in_progress, completed, failed, forwarded,
+    terminated; an empty `status=` matches nothing); `start` / `end`: started in [start, end); sort: time | duration."""
+    def split(v: str) -> list[str]:
+        return [x for x in v.split(",") if x]
+    return await store.list_calls(min(limit, 200), offset, q, outcome, channel, await project_scope(agent),
+                                  channels=split(channels) if channels else None,
+                                  statuses=split(status) if status is not None else None,
+                                  start=_aware(start) if start else None, end=_aware(end) if end else None,
+                                  sort=sort, desc=desc)
 
 
 @router.post("/calls/{call_id}/end", dependencies=auth)
 async def end_call(call_id: str) -> dict:
     """End a live call (browser playground or IVR) from the console — on whichever worker runs it."""
     rt = _rt()
+    if rt.live is not None and call_id in rt.live.active and not rt.live.visible(call_id, await project_scope()):
+        raise HTTPException(404, "this call is not running (it may have just ended)")
     ender = getattr(rt, "end_call", None)
     if ender is not None:
         ok = await ender(call_id)
@@ -79,35 +209,64 @@ async def end_call(call_id: str) -> dict:
 @router.get("/calls/{call_id}", dependencies=auth)
 async def get_call(call_id: str) -> dict:
     await _rt().store.flush()
-    data = await store.get_call(call_id)
+    data = await store.get_call(call_id, await project_scope())
     if data is None:
         raise HTTPException(404, "call not found")
+    data["agent"] = await _call_agent(data["call"])
     return data
+
+
+async def _call_agent(call: dict) -> dict | None:
+    """The agent and the exact release a call ran on: name, version, LLM / STT / TTS (voice in the call's language)."""
+    rt = _rt()
+    if rt.platform is None or not call.get("agent_id"):
+        return None
+    a = await rt.platform.agent(call["agent_id"])
+    rel = await rt.platform.release(call["release_id"]) if call.get("release_id") else None
+    models = ((rel or {}).get("bundle") or {}).get("models") or {}
+    spec = lambda kind: models.get(kind) or {}
+    tts = spec("tts").get("settings") or {}
+    lang = call.get("language") or "ar"
+    return {"id": call["agent_id"], "name": (a or {}).get("name") or call["agent_id"],
+            "version": (rel or {}).get("version"),
+            "llm": {"provider": spec("llm").get("provider"), "model": (spec("llm").get("settings") or {}).get("model")},
+            "stt": {"provider": spec("stt").get("provider"), "model": (spec("stt").get("settings") or {}).get("model")},
+            "tts": {"provider": spec("tts").get("provider"), "voice": tts.get(f"voice_{lang}") or tts.get("voice"),
+                    "model": tts.get(f"model_{lang}") or tts.get("model")}}
 
 
 @router.get("/events", dependencies=auth)
 async def get_events(call_id: str | None = None, type: list[str] | None = Query(None), level: str | None = None,
-                     text: str | None = None, before_id: int | None = None, limit: int = 200) -> list[dict]:
+                     text: str | None = None, before_id: int | None = None, limit: int = 200,
+                     agent: str | None = None) -> list[dict]:
     await _rt().store.flush()
     return await store.query_events(call_id=call_id, types=type, level=level, text=text, before_id=before_id,
-                                    limit=limit)
+                                    limit=limit, scope=await project_scope(agent))
 
 
 @router.get("/live/calls", dependencies=auth)
-async def live_calls() -> list[dict]:
-    return _rt().live.active_calls()
+async def live_calls(agent: str | None = None) -> list[dict]:
+    return _rt().live.active_calls(await project_scope(agent))
 
 
 @router.websocket("/live")
-async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None = None) -> None:
+async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None = None,
+                  project: str | None = None) -> None:
+    from runtime.control.accounts import resolve
     rt = _rt()
-    if rt.settings.console_token is not None and token != rt.settings.console_token.get_secret_value():
+    who = await resolve(rt.platform, rt.settings, token)
+    if who is not None and who.is_user and not project:          # a user's own default / first project
+        d = who.user.get("default_project")
+        project = d if who.role(d or "") else (WORKSPACE if who.role(WORKSPACE) else next(iter(sorted(who.memberships)), None))
+    if who is None or (who.is_user and project is None) or (project and who.role(project) is None):
         await ws.close(code=1008)
         return
     await ws.accept()
-    q = rt.live.subscribe(call_id)
+    # one call (a test panel) is shown as asked; the overview only shows the project's calls
+    scope = None if call_id else await project_scope(ws=project or WORKSPACE)
+    q = rt.live.subscribe(call_id, scope)
     try:
-        await ws.send_text(rt.live.active_message())
+        await ws.send_text(rt.live.active_message(scope))
         last_active = time.monotonic()
         while True:
             try:
@@ -118,7 +277,7 @@ async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None =
             # refresh "Active now" (durations, turns) even while events keep flowing — before, it only came after
             # 15 s of silence, so a busy call never showed up in the list
             if time.monotonic() - last_active >= ACTIVE_REFRESH_S:
-                await ws.send_text(rt.live.active_message())
+                await ws.send_text(rt.live.active_message(scope))
                 last_active = time.monotonic()
     except (WebSocketDisconnect, RuntimeError):
         pass
@@ -130,17 +289,20 @@ async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None =
 
 
 @router.get("/providers", dependencies=auth)
-async def get_providers() -> dict:
-    """The default agent's providers + knobs (its published release), and its release history."""
+async def get_providers(agent: str | None = None) -> dict:
+    """An agent's providers + knobs (its published release), and its release history — by default the project's
+    main agent."""
     rt = _rt()
-    ag = rt.agent
+    ag = await primary_agent(agent)
     history = []
     if rt.platform is not None and ag.release_id:
         history = [{**r, "active": r["id"] == ag.release_id} for r in await rt.platform.releases(ag.agent_id)]
     return {"available": available(), "schemas": schemas(), "active_version": ag.version,
             "agent": {"id": ag.agent_id, "name": ag.name, "release_id": ag.release_id, "version": ag.version},
-            "config": config_store.masked(rt.providers.config), "history": history,
-            "effective": config_store.effective(rt.providers),
+            "config": config_store.masked(ag.providers.config), "history": history,
+            "effective": config_store.effective(ag.providers),
+            "agents": [{"id": a["id"], "name": a["name"]} for a in await rt.platform.agents(current_project())]
+            if rt.platform is not None else [],
             "runtime_knobs": {k: t.__name__ for k, t in config_store.RUNTIME_KNOBS.items()}}
 
 
@@ -148,6 +310,7 @@ class ConfigBody(BaseModel):
     config: dict[str, Any]
     note: str = ""
     author: str = "console"
+    agent: str | None = None
 
 
 def _platform(rt):
@@ -164,10 +327,10 @@ async def save_providers(body: ConfigBody) -> dict:
     from runtime.platform.seed import KIND_NAMES, PROVIDER_NAMES, provider_id
     rt = _rt()
     store = _platform(rt)
-    config = config_store.merge_secrets(body.config, rt.providers.config)
+    ag = await primary_agent(body.agent)
+    config = config_store.merge_secrets(body.config, ag.providers.config)
     if errors := config_store.validate(config):
         raise HTTPException(422, {"errors": errors})
-    ag = rt.agent
     bundle = (await store.release(ag.release_id))["bundle"]
     for kind in KINDS:
         spec = config.get(kind)
@@ -179,7 +342,7 @@ async def save_providers(body: ConfigBody) -> dict:
         row = await store.provider(pid) if pid else None
         if row is None or row["type"] != type_:
             pid = provider_id(kind, type_)
-            row = await store.provider(pid) or {"id": pid, "workspace_id": WORKSPACE, "kind": kind, "type": type_,
+            row = await store.provider(pid) or {"id": pid, "workspace_id": current_project(), "kind": kind, "type": type_,
                                                 "name": f"{PROVIDER_NAMES.get(type_, type_)} {KIND_NAMES[kind]}",
                                                 "settings": {}}
         if rt.secrets is not None and rt.secrets.cipher.available:     # keys → encrypted secrets, references here
@@ -194,15 +357,17 @@ async def save_providers(body: ConfigBody) -> dict:
 
 
 @router.post("/providers/activate/{version}", dependencies=auth)
-async def activate_version(version: int) -> dict:
-    """Roll the default agent back / forward to one of its releases."""
+async def activate_version(version: int, agent: str | None = None) -> dict:
+    """Roll an agent (default: the project's main agent) back / forward to one of its releases."""
     rt = _rt()
     store = _platform(rt)
-    match = [r for r in await store.releases(rt.agent.agent_id, limit=1000) if r["version"] == version]
+    ag = await primary_agent(agent)
+    match = [r for r in await store.releases(ag.agent_id, limit=1000) if r["version"] == version]
     if not match:
         raise HTTPException(404, "version not found")
-    await store.publish(rt.agent.agent_id, match[0]["id"])
-    await changed(rt, "release", agent=rt.agent.agent_id)
+    await store.publish(ag.agent_id, match[0]["id"])
+    await store.audit(ag.agent_id, "activate", "console", {"release_id": match[0]["id"], "version": version})
+    await changed(rt, "release", agent=ag.agent_id)
     return {"version": version}
 
 
@@ -210,19 +375,21 @@ class TestBody(BaseModel):
     kind: str
     provider: str
     settings: dict[str, Any] = {}
+    agent: str | None = None
 
 
 @router.post("/providers/test", dependencies=auth)
 async def test_provider(body: TestBody) -> dict:
     """Quick live check of a provider config (before saving it)."""
     rt = _rt()
+    ag = await primary_agent(body.agent)
     settings = config_store.merge_secrets({body.kind: {"provider": body.provider, "settings": body.settings}},
-                                          rt.providers.config)[body.kind]["settings"]
+                                          ag.providers.config)[body.kind]["settings"]
     try:
         p = create(body.kind, body.provider, config_store._drop_empty(settings))
     except Exception as e:
         return {"ok": False, "error": f"invalid settings: {e}"}
-    return await probe(body.kind, p, rt)
+    return await probe(body.kind, p, ag)
 
 
 async def probe(kind: str, p, rt) -> dict:
@@ -351,6 +518,7 @@ class EvalRunBody(BaseModel):
     cases: list[str] | None = None
     mode: str = "auto"
     judge: bool = False
+    agent: str | None = None
 
 
 @router.post("/evals/run", dependencies=auth)
@@ -364,6 +532,7 @@ async def eval_run(body: EvalRunBody) -> dict:
     from runtime.platform.sync import WORKER_ID
     if await JOBS.running():
         raise HTTPException(409, "an eval run is already in progress")
+    ag = await primary_agent(body.agent)
     job = f"job-{int(time.time())}"
     await JOBS.create(job, len(cases), WORKER_ID)
     rt = _rt()
@@ -374,11 +543,13 @@ async def eval_run(body: EvalRunBody) -> dict:
 
     async def work() -> None:
         try:
-            # the default agent's published release (its skills, phrases, tool policies and knobs)
-            run = await run_suite(cases, mode=body.mode, use_judge=body.judge, agent_llm=rt.providers.llm,
-                                  progress=progress, bundle=rt.agent.inline_bundle())
-            run["config_version"] = rt.providers.version
-            run["agent"] = {"id": rt.agent.agent_id, "release": rt.agent.version}
+            # the agent's published release (its skills, phrases, tool policies and knobs)
+            run = await run_suite(cases, mode=body.mode, use_judge=body.judge, agent_llm=ag.providers.llm,
+                                  progress=progress, bundle=ag.inline_bundle())
+            run["config_version"] = ag.providers.version
+            run["agent"] = {"id": ag.agent_id, "release": ag.version}
+            run["agent_id"] = ag.agent_id
+            run["target"] = {"draft": False, "release": ag.version}
             save_report(run)
             await store_run(run)
             await asyncio.gather(*pending, return_exceptions=True)
@@ -387,7 +558,7 @@ async def eval_run(body: EvalRunBody) -> dict:
             await JOBS.finish(job, error=repr(e)[:300])
 
     spawn(work())
-    return {"job": job, "total": len(cases)}
+    return {"job": job, "total": len(cases), "agent": ag.agent_id}
 
 
 @router.get("/evals/jobs/{job}", dependencies=auth)
@@ -400,13 +571,16 @@ async def eval_job(job: str) -> dict:
 
 
 @router.get("/evals/runs", dependencies=auth)
-async def eval_runs(limit: int = 30) -> list[dict]:
+async def eval_runs(limit: int = 30, agent: str | None = None) -> list[dict]:
+    """The project's runs (runs from before agents were recorded belong to the default project)."""
     from runtime.data.db import get_pool
+    agents, unassigned = await project_scope(agent)
     pool = await get_pool()
     async with pool.acquire() as c:
-        rows = await c.fetch("SELECT id, started_at, finished_at, model, mode, summary FROM eval_runs "
-                             "ORDER BY started_at DESC LIMIT $1", limit)
-    return [{**dict(r), "summary": _json(r["summary"])} for r in rows]
+        rows = await c.fetch("SELECT id, started_at, finished_at, model, mode, summary, agent_id, target FROM eval_runs "
+                             "WHERE agent_id = ANY($2::text[]) OR ($3 AND agent_id IS NULL) "
+                             "ORDER BY started_at DESC LIMIT $1", limit, agents, unassigned)
+    return [{**dict(r), "summary": _json(r["summary"]), "target": _json(r["target"])} for r in rows]
 
 
 @router.get("/evals/runs/{run_id}", dependencies=auth)
@@ -415,6 +589,9 @@ async def eval_run_detail(run_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as c:
         r = await c.fetchrow("SELECT * FROM eval_runs WHERE id = $1", run_id)
+    agents, unassigned = await project_scope()
+    if r is not None and not (r["agent_id"] in agents or (unassigned and r["agent_id"] is None)):
+        r = None
     if r is None:
         raise HTTPException(404, "run not found")
     return {**dict(r), "summary": _json(r["summary"]), "results": _json(r["results"])}

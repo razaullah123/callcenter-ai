@@ -127,6 +127,16 @@ class GroqLLM(LLMProvider):
 
 @register("groq")
 class GroqTTS(TTSProvider):
+    # Groq's own list (its API names the allowed voices when an unknown one is asked for, 2026-10-04)
+    VOICES = [
+        *({"voice": v, "language": "ar", "gender": g, "dialect": "KSA - AR", "model": "canopylabs/orpheus-arabic-saudi"}
+          for v, g in (("fahad", "male"), ("sultan", "male"), ("abdullah", "male"),
+                       ("noura", "female"), ("lulwa", "female"), ("aisha", "female"))),
+        *({"voice": v, "language": "en", "gender": g, "dialect": "US - EN", "model": "canopylabs/orpheus-v1-english"}
+          for v, g in (("autumn", "female"), ("diana", "female"), ("hannah", "female"),
+                       ("austin", "male"), ("daniel", "male"), ("troy", "male"))),
+    ]
+
     class Settings(_GroqBase):
         model_ar: str = Field(default_factory=_env("groq_tts_model_ar"))
         model_en: str = Field(default_factory=_env("groq_tts_model_en"))

@@ -49,6 +49,7 @@ function describe(w: Record<string, unknown> | undefined): string {
     if (k === "equals") return Object.entries(v as object).map(([a, b]) => `${a} = ${b}`).join(", ");
     if (k === "stage") return `stage ${v}`;
     if (k === "llm") return `“${String(v)}”`;
+    if (k === "replied") return v ? "after the caller replies" : "before the caller replies";
     return `${k}: ${JSON.stringify(v)}`;
   }).join(" and ");
 }
@@ -121,13 +122,13 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
   return (
     <div className={cx("w-64 rounded-xl border bg-panel text-left shadow-sm",
       selected ? "border-accent ring-2 ring-accent/30" : "border-line",
-      data.active && "!border-[#84cc16] shadow-[0_0_0_4px_rgba(132,204,22,0.35)]")}>
+      data.active && "!border-brand shadow-[0_0_0_4px_rgba(151,222,0,0.35)]")}>
       {!anywhere && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-400" />}
       <div className="flex items-center gap-2 border-b border-line px-2 py-1.5">
         <span className={cx("flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] text-white", t.color)}>{t.icon}</span>
         <button className="min-w-0 flex-1 truncate text-left text-xs font-semibold" onClick={e => { e.stopPropagation(); act.open(id); }}>
           {n.id === DONE ? "Done" : anywhere ? "Anywhere" : n.id}</button>
-        {data.start && <span className="rounded bg-accent/15 px-1 text-[9px] font-semibold text-accent">START</span>}
+        {data.start && <span className="rounded bg-accent/15 px-1 text-[9px] font-semibold text-accent-text">START</span>}
         {!anywhere && <button title="Settings" className="text-muted hover:text-ink" onClick={e => { e.stopPropagation(); act.open(id); }}>⚙</button>}
         {!anywhere && <div className="relative">
           <button title="More" className="px-1 text-muted hover:text-ink" onClick={e => { e.stopPropagation(); setMenu(m => !m); }}>⋯</button>
@@ -418,7 +419,7 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
 function ToolButton({ label, active, accent, onClick, children }: { label: string; active?: boolean; accent?: boolean; onClick: () => void; children: ReactNode }) {
   return <button title={label} aria-label={label} onClick={onClick}
     className={cx("flex h-11 w-11 items-center justify-center rounded-xl border text-base shadow-sm transition",
-      accent ? "border-transparent bg-[#84cc16] text-white hover:opacity-90" : active ? "border-accent bg-accent/10" : "border-line bg-panel hover:bg-soft")}>{children}</button>;
+      accent ? "border-transparent bg-brand text-white hover:opacity-90" : active ? "border-accent bg-accent/10" : "border-line bg-panel hover:bg-soft")}>{children}</button>;
 }
 
 function ToolPicker({ tools, info, current, onPick, onClose }: {
@@ -522,12 +523,14 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
           <button className="w-full rounded-lg border border-line px-3 py-2 text-left hover:bg-soft" onClick={onPickTool}>
             <div className="font-mono text-xs font-semibold">{node.tool || "Choose a tool…"}</div>
             {node.tool && toolInfo?.[node.tool]?.description && <div className="line-clamp-2 text-[11px] text-muted">{toolInfo[node.tool].description}</div>}
-            <div className="text-[10px] text-accent">click to change</div>
+            <div className="text-[10px] text-accent-text">click to change</div>
           </button></div>
         {lbl("Arguments (JSON)", <JsonField id="node-args" value={node.args} onChange={v => onChange({ args: v as FlowNode["args"] })} />,
-          'Values: "slots.x" (collected), "parsed.mobile", "=text" (literal)')}
+          'Values: "slots.x" (collected), "parsed.mobile", "=text" (literal), "{{ var }}" (template)')}
+        {lbl("Outputs (JSON)", <JsonField id="node-outputs" rows={3} value={node.outputs ?? {}} onChange={v => onChange({ outputs: v as FlowNode["outputs"] })} />,
+          '{"patient_count": "result.count"} — values from the tool\'s result saved as variables on success')}
       </>}
-      {node.type === "set" && lbl("Values (JSON)", <JsonField id="node-set" rows={5} value={node.set} onChange={v => onChange({ set: v as FlowNode["set"] })} />,
+      {node.type === "set" && lbl("Values (JSON) · \"=text\" literal, \"slots.x\" a value, \"{{ … }}\" a template", <JsonField id="node-set" rows={5} value={node.set} onChange={v => onChange({ set: v as FlowNode["set"] })} />,
         '{"tries": "=1", "old_value": null}  — null forgets a value')}
       {node.type === "transfer" && lbl("Reason (logged)", <input id="node-reason" className="w-full" value={node.reason ?? ""} onChange={e => onChange({ reason: e.target.value })} />)}
       {node.type === "end" && <>
@@ -551,7 +554,7 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
   );
 }
 
-const MODES = ["always", "llm", "filled", "empty", "equals", "stage", "json"] as const;
+const MODES = ["always", "llm", "replied", "filled", "empty", "equals", "stage", "json"] as const;
 
 function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
   edge: FlowEdge; order: number; fromTool: boolean; targets: string[]; onChange: (e: FlowEdge) => void; onDelete: () => void;
@@ -571,12 +574,16 @@ function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
         <option value="always">always (keep it last)</option>
         {fromTool && <option value="result">the tool succeeded / failed</option>}
         <option value="llm">the caller's words mean …</option>
+        <option value="replied">the caller has replied (to this step)</option>
         <option value="filled">these values are known</option>
         <option value="empty">these values are missing</option>
         <option value="equals">a value equals …</option>
         <option value="stage">caller-verification stage is …</option>
         <option value="json">advanced (JSON)</option>
       </select>, "A node's transitions are tried top to bottom, then the ones from Anywhere; the first that holds wins.")}
+      {mode === "replied" && w.replied !== true && <Button onClick={() => set({ replied: true })}>Use this condition</Button>}
+      {mode === "replied" && w.replied === true && <p className="text-xs text-muted">Moves on once the caller has said something
+        since the flow reached this step (Hamsa's “after user reply”).</p>}
       {mode === "result" && <select id="edge-on" className="w-full" value={edge.on ?? "success"} onChange={e => set(edge.when, e.target.value)}>
         <option value="success">On success</option><option value="failure">On failure</option></select>}
       {mode === "llm" && lbl("Question", <input id="edge-llm" className="w-full" value={String(w.llm ?? "")} onChange={e => set({ llm: e.target.value })} />,
@@ -587,7 +594,7 @@ function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
       {mode === "stage" && <select id="edge-stage" className="w-full" value={String(w.stage ?? "")} onChange={e => set({ stage: e.target.value })}>
         {["awaiting_mobile", "awaiting_dob_and_name", "send_otp", "awaiting_otp", "verified"].map(s => <option key={s}>{s}</option>)}</select>}
       {mode === "json" && lbl("Condition (JSON)", <JsonField id="edge-json" value={edge.when} onChange={v => set(v as Record<string, unknown>, edge.on)} rows={6} />,
-        "all / any / filled / empty / not_all_filled / equals / stage / llm — can be combined with On success / failure")}
+        "all / any / filled / empty / not_all_filled / equals / stage / llm / replied — can be combined with On success / failure")}
       <Button kind="danger" onClick={onDelete}>Delete transition</Button>
     </div>
   );

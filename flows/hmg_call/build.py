@@ -36,11 +36,14 @@ nodes = [
          "The caller has been greeted. Find out what they need. If they only greeted or it isn't clear yet, ask "
          "exactly: English \"How can I help you today?\" / Arabic \"كيف أقدر أخدمك؟\". Don't ask for the mobile "
          "number here and don't answer the request yourself.")},
-    {"id": "other_service", "type": "transfer", "position": P(300, 420),
-     "reason": "caller asked for a service that isn't available by phone yet"},
+    # other requests are verified first too, so the colleague who takes the call gets a verified caller
+    {"id": "other_service", "type": "transfer", "position": P(2400, 420),
+     "reason": "verified caller asked for a service that isn't available by phone yet"},
     {"id": "ask_mobile", "type": "conversation", "position": P(300, 200), "tools": ["mssql_get_patient_info"],
-     "instructions": ("The caller wants to book. Acknowledge it in a few words and ask for their registered "
-                      "mobile number to verify them — e.g. \"أبشر، عشان أحجز لك أحتاج رقم جوالك المسجل\".\n"
+     "instructions": ("Acknowledge the caller's request in a few words and ask for their registered mobile number "
+                      "to verify them — to book e.g. \"أبشر، عشان أحجز لك أحتاج رقم جوالك المسجل\"; for anything "
+                      "else e.g. \"أبشر، عشان أخدمك أحتاج رقم جوالك المسجل\" / \"Sure, to help you I need your "
+                      "registered mobile number\". Don't answer or promise anything about the request itself yet.\n"
                       + mobile_text())},
     {"id": "lookup_patient", "type": "tool", "position": P(600, 200), "tool": "mssql_get_patient_info",
      "args": {"mobileNo": "parsed.mobile"}},
@@ -62,7 +65,8 @@ nodes = [
      "reason": "verification code attempts exhausted"},
     {"id": "confirm_identity", "type": "conversation", "position": P(2100, 200),
      "instructions": ("The caller is verified. The system asks \"Am I speaking to <name>?\" and handles the answer "
-                      "(a clear no transfers the call). Once they confirm, the booking starts.")},
+                      "(a clear no transfers the call). Once they confirm, their request is handled: a booking "
+                      "starts; anything else goes to a colleague.")},
     {"id": "hospital", "type": "conversation", "position": P(2400, 200),
      "tools": HOSPITAL_TOOLS + book["hospital"]["tools"], "auto_call": book["hospital"]["auto_call"],
      "instructions": book["hospital"]["instructions"]},
@@ -100,7 +104,9 @@ edges = [
     W(**{"from": "greeting_intent", "to": "hospital", "when": {"all": [{"equals": {"intent": "book"}},
                                                                         {"equals": {"identity_confirmed": True}}]}}),
     W(**{"from": "greeting_intent", "to": "ask_mobile", "when": {"equals": {"intent": "book"}}}),
-    W(**{"from": "greeting_intent", "to": "other_service", "when": {"equals": {"intent": "other"}}}),
+    W(**{"from": "greeting_intent", "to": "other_service", "when": {"all": [{"equals": {"intent": "other"}},
+                                                                             {"equals": {"identity_confirmed": True}}]}}),
+    W(**{"from": "greeting_intent", "to": "ask_mobile", "when": {"equals": {"intent": "other"}}}),
     # verification
     W(**{"from": "ask_mobile", "to": "lookup_patient", "when": {"equals": {"mobile_heard": True}}}),
     W(**{"from": "ask_mobile", "to": "no_file", "when": {"equals": {"files_found": 0}}}),         # the model looked it up
@@ -120,6 +126,8 @@ edges = [
     W(**{"from": "verify_otp", "to": "confirm_identity", "result": "success"}),
     W(**{"from": "verify_otp", "to": "verification_failed", "result": "failure", "when": {"equals": {"otp_exhausted": True}}}),
     W(**{"from": "verify_otp", "to": "ask_otp", "result": "failure"}),
+    W(**{"from": "confirm_identity", "to": "other_service", "when": {"all": [{"equals": {"identity_confirmed": True}},
+                                                                              {"equals": {"intent": "other"}}]}}),
     W(**{"from": "confirm_identity", "to": "hospital", "when": {"equals": {"identity_confirmed": True}}}),
     # booking
     W(**{"from": "hospital", "to": "symptoms_and_clinic", "when": {"filled": ["project_id"]}}),

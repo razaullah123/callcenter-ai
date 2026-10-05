@@ -47,13 +47,23 @@ class Case:
         return self.caller.get("language", "ar")
 
 
+def case_from_spec(case_id: str, raw: dict[str, Any], suite: str = "general") -> Case:
+    """A case from its YAML / database form (an agent's test cases are stored as these specs, Phase 12.7)."""
+    return Case(id=case_id, suite=raw.get("suite") or suite, title=raw.get("title") or case_id,
+                caller=raw["caller"], expect=raw.get("expect") or {}, max_turns=raw.get("max_turns", 18),
+                tags=raw.get("tags") or [], judge_note=raw.get("judge_note", ""))
+
+
+def case_spec(case: Case) -> dict[str, Any]:
+    return {"suite": case.suite, "title": case.title, "caller": case.caller, "expect": case.expect,
+            "max_turns": case.max_turns, "tags": case.tags, "judge_note": case.judge_note}
+
+
 def load_cases(suite: str | None = None, ids: list[str] | None = None) -> list[Case]:
     cases = []
     for path in sorted(CASES_DIR.glob("*.yaml")):
         for raw in yaml.safe_load(path.read_text(encoding="utf-8")) or []:
-            c = Case(id=raw["id"], suite=raw.get("suite", path.stem), title=raw.get("title", raw["id"]),
-                     caller=raw["caller"], expect=raw.get("expect", {}), max_turns=raw.get("max_turns", 18),
-                     tags=raw.get("tags", []), judge_note=raw.get("judge_note", ""))
+            c = case_from_spec(raw["id"], raw, path.stem)
             if (suite is None or c.suite == suite) and (not ids or c.id in ids):
                 cases.append(c)
     return cases
@@ -266,8 +276,9 @@ async def store_run(run: dict[str, Any]) -> None:
     pool = await get_pool()
     async with pool.acquire() as c:
         await c.execute(
-            """INSERT INTO eval_runs (id, started_at, finished_at, model, mode, summary, results)
-               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) ON CONFLICT (id) DO NOTHING""",
+            """INSERT INTO eval_runs (id, started_at, finished_at, model, mode, summary, results, agent_id, target)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb) ON CONFLICT (id) DO NOTHING""",
             run["id"], datetime.fromisoformat(run["started_at"]), datetime.fromisoformat(run["finished_at"]),
             run["model"], run["mode"], json.dumps(run["summary"], default=str),
-            json.dumps(run["results"], ensure_ascii=False, default=str))
+            json.dumps(run["results"], ensure_ascii=False, default=str), run.get("agent_id"),
+            json.dumps(run["target"], default=str) if run.get("target") else None)

@@ -7,11 +7,34 @@ tests and by offline tools that run without a database.
 import asyncio
 import copy
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-WORKSPACE = "hmg"
+WORKSPACE = "hmg"                   # the default project (HMG); others are created from the console
+
+# The project a console request / an agent build works in (projects = workspaces table). Set per console request
+# from the X-Project header (control/api.py) and by the loader while it builds an agent of another project.
+_PROJECT: ContextVar[str] = ContextVar("project", default=WORKSPACE)
+
+
+def current_project() -> str:
+    return _PROJECT.get()
+
+
+@contextmanager
+def in_project(ws: str):
+    token = _PROJECT.set(ws or WORKSPACE)
+    try:
+        yield
+    finally:
+        _PROJECT.reset(token)
+
+
+def set_project(ws: str) -> None:
+    """For a request handler: the rest of this request works in `ws`."""
+    _PROJECT.set(ws)
 
 
 def _now() -> datetime:
@@ -31,6 +54,8 @@ class MemoryStore:
         self._routes: dict[tuple[str, str], dict] = {}
         self._meta: dict[str, Any] = {}
         self._secrets: dict[tuple[str, str], dict] = {}
+        self._eval_cases: dict[tuple[str, str], dict] = {}
+        self._audit: list[dict] = []
 
     @asynccontextmanager
     async def advisory_lock(self, key: str):
@@ -44,6 +69,15 @@ class MemoryStore:
             return False
         self.workspaces[ws] = {"id": ws, "name": name, "created_at": _now()}
         return True
+
+    async def list_workspaces(self) -> list[dict]:
+        return sorted((copy.deepcopy(w) for w in self.workspaces.values()), key=lambda w: w["created_at"])
+
+    async def rename_workspace(self, ws: str, name: str) -> None:
+        self.workspaces[ws]["name"] = name
+
+    async def all_routes(self) -> list[dict]:
+        return [copy.deepcopy(r) for r in self._routes.values()]
 
     # ---- providers
     async def providers(self, ws: str = WORKSPACE) -> list[dict]:
@@ -138,17 +172,22 @@ class MemoryStore:
 
     async def put_agent(self, row: dict) -> None:
         old = self._agents.get(row["id"], {})
-        self._agents[row["id"]] = {"description": "", "published_release_id": None, **old, **copy.deepcopy(row),
-                                   "updated_at": _now()}
+        self._agents[row["id"]] = {"description": "", "published_release_id": None, "created_at": _now(), **old,
+                                   **copy.deepcopy(row), "updated_at": _now()}
 
     async def set_draft(self, agent_id: str, bundle: dict | None, by: str | None = None) -> None:
         a = self._agents[agent_id]
         a["draft"], a["draft_updated_by"], a["draft_updated_at"] = copy.deepcopy(bundle), by, _now() if bundle else None
 
+    async def set_gate(self, agent_id: str, gate: dict | None) -> None:
+        self._agents[agent_id]["gate"] = copy.deepcopy(gate)
+
     async def delete_agent(self, agent_id: str) -> None:
         self._agents.pop(agent_id, None)
         for rid in [r for r, rel in self._releases.items() if rel["agent_id"] == agent_id]:
             self._releases.pop(rid)
+        for key in [k for k in self._eval_cases if k[0] == agent_id]:
+            self._eval_cases.pop(key)
 
     async def delete_route(self, ws: str, pattern: str) -> None:
         self._routes.pop((ws, pattern), None)
@@ -158,13 +197,14 @@ class MemoryStore:
 
     async def releases(self, agent_id: str, limit: int = 30) -> list[dict]:
         rows = sorted((r for r in self._releases.values() if r["agent_id"] == agent_id), key=lambda r: -r["version"])
-        return [{k: r[k] for k in ("id", "version", "author", "note", "created_at")} for r in rows[:limit]]
+        return [{k: r.get(k) for k in ("id", "version", "author", "note", "created_at", "gate")} for r in rows[:limit]]
 
-    async def add_release(self, agent_id: str, bundle: dict, author: str, note: str, *, publish: bool = True) -> dict:
+    async def add_release(self, agent_id: str, bundle: dict, author: str, note: str, *, publish: bool = True,
+                          gate: dict | None = None) -> dict:
         version = 1 + max((r["version"] for r in self._releases.values() if r["agent_id"] == agent_id), default=0)
         rid = 1 + max(self._releases, default=0)
         self._releases[rid] = {"id": rid, "agent_id": agent_id, "version": version, "bundle": copy.deepcopy(bundle),
-                               "author": author, "note": note, "created_at": _now()}
+                               "author": author, "note": note, "created_at": _now(), "gate": copy.deepcopy(gate)}
         if publish:
             await self.publish(agent_id, rid)
         return {"id": rid, "version": version}
@@ -182,6 +222,96 @@ class MemoryStore:
         self._routes[(ws, pattern)] = {"workspace_id": ws, "pattern": pattern, "agent_id": agent_id,
                                        "priority": priority}
 
+    # ---- users, sessions, members, invitations (console sign-in)
+    def _acc(self) -> dict:
+        return self.__dict__.setdefault("_accounts", {"users": {}, "sessions": {}, "members": {}, "invites": {}})
+
+    async def count_users(self) -> int:
+        return len(self._acc()["users"])
+
+    async def create_user(self, row: dict) -> None:
+        self._acc()["users"][row["id"]] = {"default_project": None, "last_login_at": None, "created_at": _now(),
+                                           **copy.deepcopy(row)}
+
+    async def user(self, user_id: str) -> dict | None:
+        return copy.deepcopy(self._acc()["users"].get(user_id))
+
+    async def user_by_email(self, email: str) -> dict | None:
+        return copy.deepcopy(next((u for u in self._acc()["users"].values() if u["email"] == email.lower()), None))
+
+    async def update_user(self, user_id: str, **fields) -> None:
+        self._acc()["users"][user_id].update(fields)
+
+    async def create_session(self, token_hash: str, user_id: str, expires_at) -> None:
+        self._acc()["sessions"][token_hash] = {"user_id": user_id, "expires_at": expires_at}
+
+    async def session_user(self, token_hash: str) -> dict | None:
+        s = self._acc()["sessions"].get(token_hash)
+        if s is None or s["expires_at"] < _now():
+            return None
+        return await self.user(s["user_id"])
+
+    async def delete_session(self, token_hash: str) -> None:
+        self._acc()["sessions"].pop(token_hash, None)
+
+    async def add_member(self, ws: str, user_id: str, role: str) -> None:
+        old = self._acc()["members"].get((ws, user_id), {})
+        self._acc()["members"][(ws, user_id)] = {"workspace_id": ws, "user_id": user_id, "role": role,
+                                                 "label": old.get("label"), "joined_at": old.get("joined_at", _now())}
+
+    async def members(self, ws: str) -> list[dict]:
+        users = self._acc()["users"]
+        return [{**copy.deepcopy(m), "email": users[m["user_id"]]["email"], "name": users[m["user_id"]]["name"]}
+                for (w, _), m in self._acc()["members"].items() if w == ws and m["user_id"] in users]
+
+    async def memberships(self, user_id: str) -> list[dict]:
+        return [copy.deepcopy(m) for (_, u), m in self._acc()["members"].items() if u == user_id]
+
+    async def remove_member(self, ws: str, user_id: str) -> None:
+        self._acc()["members"].pop((ws, user_id), None)
+
+    async def set_member_label(self, ws: str, user_id: str, label: str | None) -> None:
+        self._acc()["members"][(ws, user_id)]["label"] = label
+
+    async def create_invitation(self, row: dict) -> None:
+        self._acc()["invites"][row["id"]] = {"accepted_at": None, "created_at": _now(), **copy.deepcopy(row)}
+
+    async def invitations(self, ws: str) -> list[dict]:
+        return [copy.deepcopy(i) for i in self._acc()["invites"].values() if i["workspace_id"] == ws]
+
+    async def invitation_by_token(self, token_hash: str) -> dict | None:
+        return copy.deepcopy(next((i for i in self._acc()["invites"].values() if i["token_hash"] == token_hash), None))
+
+    async def update_invitation(self, inv_id: str, **fields) -> None:
+        self._acc()["invites"][inv_id].update(fields)
+
+    async def delete_invitation(self, inv_id: str) -> None:
+        self._acc()["invites"].pop(inv_id, None)
+
+    # ---- test cases + audit (publish gate, 12.7)
+    async def eval_cases(self, agent_id: str) -> list[dict]:
+        rows = [r for (a, _), r in self._eval_cases.items() if a == agent_id]
+        return sorted(copy.deepcopy(rows), key=lambda r: (r["spec"].get("suite", ""), r["id"]))
+
+    async def put_eval_case(self, agent_id: str, case_id: str, spec: dict, gate: bool, by: str | None = None) -> None:
+        self._eval_cases[(agent_id, case_id)] = {"agent_id": agent_id, "id": case_id, "spec": copy.deepcopy(spec),
+                                                 "gate": gate, "updated_by": by, "updated_at": _now()}
+
+    async def delete_eval_case(self, agent_id: str, case_id: str) -> None:
+        self._eval_cases.pop((agent_id, case_id), None)
+
+    async def audit(self, agent_id: str, action: str, actor: str | None, detail: dict | None = None,
+                    ws: str | None = None) -> None:
+        self._audit.append({"id": len(self._audit) + 1, "ts": _now(), "agent_id": agent_id, "action": action,
+                            "actor": actor, "detail": copy.deepcopy(detail or {}),
+                            "workspace_id": ws or current_project()})
+
+    async def audit_log(self, agent_id: str, limit: int = 100) -> list[dict]:
+        return copy.deepcopy([r for r in reversed(self._audit) if r["agent_id"] == agent_id][:limit])
+
+    async def project_audit_log(self, ws: str, limit: int = 200) -> list[dict]:
+        return copy.deepcopy([r for r in reversed(self._audit) if r.get("workspace_id") == ws][:limit])
+
     async def meta_get(self, key: str) -> Any:
         return copy.deepcopy(self._meta.get(key))
 
@@ -189,8 +319,62 @@ class MemoryStore:
         self._meta[key] = copy.deepcopy(value)
 
 
+    # ---- knowledge base (12.9)
+    async def kb_items(self, ws: str) -> list[dict]:
+        items = self.__dict__.setdefault("_kb", {})
+        return sorted((copy.deepcopy({k: v for k, v in i.items() if k != "content"}) for i in items.values()
+                       if i["workspace_id"] == ws), key=lambda i: i["created_at"], reverse=True)
+
+    async def kb_item(self, item_id: str) -> dict | None:
+        return copy.deepcopy(self.__dict__.setdefault("_kb", {}).get(item_id))
+
+    async def put_kb_item(self, row: dict) -> None:
+        items = self.__dict__.setdefault("_kb", {})
+        old = items.get(row["id"], {"created_at": _now(), "words": 0, "chunks": 0, "size_bytes": 0, "error": None,
+                                    "status": "processing", "content": None, "extension": None})
+        items[row["id"]] = {**old, **copy.deepcopy(row), "updated_at": _now()}
+
+    async def delete_kb_item(self, item_id: str) -> None:
+        self.__dict__.setdefault("_kb", {}).pop(item_id, None)
+        self.__dict__["_kb_chunks"] = [c for c in self.__dict__.get("_kb_chunks", []) if c["item_id"] != item_id]
+
+    async def set_kb_chunks(self, item_id: str, ws: str, chunks: list[tuple[int, str, list[float] | None]]) -> None:
+        rest = [c for c in self.__dict__.get("_kb_chunks", []) if c["item_id"] != item_id]
+        self.__dict__["_kb_chunks"] = rest + [{"item_id": item_id, "workspace_id": ws, "seq": s, "text": t,
+                                               "embedding": e} for s, t, e in chunks]
+
+    async def kb_search(self, ws: str, item_ids: list[str], query: str, vector: list[float] | None,
+                        k: int = 4) -> list[dict]:
+        """Vector + keyword ranks fused (RRF), like the PostgreSQL version."""
+        import math
+        names = {i["id"]: i["name"] for i in self.__dict__.get("_kb", {}).values()}
+        pool = [c for c in self.__dict__.get("_kb_chunks", []) if c["workspace_id"] == ws and c["item_id"] in item_ids]
+        words = {w for w in query.lower().split() if len(w) > 1}
+        ranks: dict[int, float] = {}
+        if vector:
+            def cos(a, b):
+                return sum(x * y for x, y in zip(a, b)) / ((math.sqrt(sum(x * x for x in a)) or 1) * (math.sqrt(sum(y * y for y in b)) or 1))
+            scored = sorted(((cos(c["embedding"], vector), i) for i, c in enumerate(pool) if c["embedding"]), reverse=True)
+            for r, (_, i) in enumerate(scored[:8]):
+                ranks[i] = ranks.get(i, 0) + 1 / (60 + r)
+        kw = sorted(((sum(w in c["text"].lower() for w in words), i) for i, c in enumerate(pool)), reverse=True)
+        for r, (score, i) in enumerate([x for x in kw if x[0] > 0][:8]):
+            ranks[i] = ranks.get(i, 0) + 1 / (60 + r)
+        best = sorted(ranks, key=lambda i: -ranks[i])[:k]
+        return [{"item_id": pool[i]["item_id"], "name": names.get(pool[i]["item_id"], ""), "seq": pool[i]["seq"],
+                 "text": pool[i]["text"], "score": round(ranks[i], 5)} for i in best]
+
+    async def kb_usage(self, ws: str) -> int:
+        return sum(i["size_bytes"] for i in self.__dict__.get("_kb", {}).values() if i["workspace_id"] == ws)
+
+
 def _j(v: Any) -> Any:
     return v if not isinstance(v, str) else json.loads(v)
+
+
+def _agent_row(r: dict) -> dict:
+    return {**r, "draft": _j(r["draft"]) if r.get("draft") is not None else None,
+            "gate": _j(r["gate"]) if r.get("gate") is not None else None}
 
 
 class PgStore:
@@ -231,6 +415,15 @@ class PgStore:
     async def ensure_workspace(self, ws: str, name: str) -> bool:
         r = await self._exec("INSERT INTO workspaces (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING", ws, name)
         return r.endswith("1")
+
+    async def list_workspaces(self) -> list[dict]:
+        return await self._fetch("SELECT id, name, created_at FROM workspaces ORDER BY created_at, id")
+
+    async def rename_workspace(self, ws: str, name: str) -> None:
+        await self._exec("UPDATE workspaces SET name = $2 WHERE id = $1", ws, name)
+
+    async def all_routes(self) -> list[dict]:
+        return await self._fetch("SELECT * FROM phone_routes ORDER BY priority DESC")
 
     # ---- providers
     @staticmethod
@@ -354,13 +547,15 @@ class PgStore:
     # ---- agents + releases
     async def agents(self, ws: str = WORKSPACE) -> list[dict]:
         rows = await self._fetch("SELECT * FROM agents WHERE workspace_id = $1 ORDER BY name", ws)
-        return [{**r, "draft": _j(r["draft"]) if r.get("draft") is not None else None} for r in rows]
+        return [_agent_row(r) for r in rows]
 
     async def agent(self, agent_id: str) -> dict | None:
         r = await self._row("SELECT * FROM agents WHERE id = $1", agent_id)
-        if r and r.get("draft") is not None:
-            r["draft"] = _j(r["draft"])
-        return r
+        return _agent_row(r) if r else None
+
+    async def set_gate(self, agent_id: str, gate: dict | None) -> None:
+        await self._exec("UPDATE agents SET gate = $2::jsonb WHERE id = $1", agent_id,
+                         json.dumps(gate, default=str) if gate is not None else None)
 
     async def put_agent(self, row: dict) -> None:
         await self._exec(
@@ -377,6 +572,7 @@ class PgStore:
     async def delete_agent(self, agent_id: str) -> None:
         async with (await self._p()).acquire() as c, c.transaction():
             await c.execute("DELETE FROM agent_releases WHERE agent_id = $1", agent_id)
+            await c.execute("DELETE FROM agent_eval_cases WHERE agent_id = $1", agent_id)
             await c.execute("DELETE FROM agents WHERE id = $1", agent_id)
 
     async def delete_route(self, ws: str, pattern: str) -> None:
@@ -384,20 +580,23 @@ class PgStore:
 
     async def release(self, release_id: int) -> dict | None:
         r = await self._row("SELECT * FROM agent_releases WHERE id = $1", release_id)
-        return {**r, "bundle": _j(r["bundle"])} if r else None
+        return {**r, "bundle": _j(r["bundle"]), "gate": _j(r.get("gate"))} if r else None
 
     async def releases(self, agent_id: str, limit: int = 30) -> list[dict]:
-        return await self._fetch("SELECT id, version, author, note, created_at FROM agent_releases "
+        rows = await self._fetch("SELECT id, version, author, note, created_at, gate FROM agent_releases "
                                  "WHERE agent_id = $1 ORDER BY version DESC LIMIT $2", agent_id, limit)
+        return [{**r, "gate": _j(r["gate"])} for r in rows]
 
-    async def add_release(self, agent_id: str, bundle: dict, author: str, note: str, *, publish: bool = True) -> dict:
+    async def add_release(self, agent_id: str, bundle: dict, author: str, note: str, *, publish: bool = True,
+                          gate: dict | None = None) -> dict:
         async with (await self._p()).acquire() as c, c.transaction():
             await c.execute("SELECT 1 FROM agents WHERE id = $1 FOR UPDATE", agent_id)
             version = 1 + await c.fetchval("SELECT coalesce(max(version), 0) FROM agent_releases WHERE agent_id = $1",
                                            agent_id)
-            rid = await c.fetchval("INSERT INTO agent_releases (agent_id, version, bundle, author, note) "
-                                   "VALUES ($1, $2, $3::jsonb, $4, $5) RETURNING id",
-                                   agent_id, version, json.dumps(bundle, default=str), author, note)
+            rid = await c.fetchval("INSERT INTO agent_releases (agent_id, version, bundle, author, note, gate) "
+                                   "VALUES ($1, $2, $3::jsonb, $4, $5, $6::jsonb) RETURNING id",
+                                   agent_id, version, json.dumps(bundle, default=str), author, note,
+                                   json.dumps(gate, default=str) if gate is not None else None)
             if publish:
                 await c.execute("UPDATE agents SET published_release_id = $2, updated_at = now() WHERE id = $1",
                                 agent_id, rid)
@@ -416,6 +615,106 @@ class PgStore:
                          "ON CONFLICT (workspace_id, pattern) DO UPDATE SET agent_id = EXCLUDED.agent_id, "
                          "priority = EXCLUDED.priority", ws, pattern, agent_id, priority)
 
+    # ---- users, sessions, members, invitations (console sign-in)
+    async def count_users(self) -> int:
+        r = await self._row("SELECT count(*) AS n FROM console_users")
+        return r["n"]
+
+    async def create_user(self, row: dict) -> None:
+        await self._exec("INSERT INTO console_users (id, email, name, password_hash) VALUES ($1, $2, $3, $4)",
+                         row["id"], row["email"].lower(), row.get("name", ""), row["password_hash"])
+
+    async def user(self, user_id: str) -> dict | None:
+        return await self._row("SELECT * FROM console_users WHERE id = $1", user_id)
+
+    async def user_by_email(self, email: str) -> dict | None:
+        return await self._row("SELECT * FROM console_users WHERE email = $1", email.lower())
+
+    async def update_user(self, user_id: str, **fields) -> None:
+        allowed = {k: v for k, v in fields.items() if k in ("name", "password_hash", "default_project", "last_login_at")}
+        sets = ", ".join(f"{k} = ${i}" for i, k in enumerate(allowed, 2))
+        await self._exec(f"UPDATE console_users SET {sets} WHERE id = $1", user_id, *allowed.values())
+
+    async def create_session(self, token_hash: str, user_id: str, expires_at) -> None:
+        await self._exec("INSERT INTO console_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
+                         token_hash, user_id, expires_at)
+
+    async def session_user(self, token_hash: str) -> dict | None:
+        return await self._row("SELECT u.* FROM console_sessions s JOIN console_users u ON u.id = s.user_id "
+                               "WHERE s.token_hash = $1 AND s.expires_at > now()", token_hash)
+
+    async def delete_session(self, token_hash: str) -> None:
+        await self._exec("DELETE FROM console_sessions WHERE token_hash = $1", token_hash)
+
+    async def add_member(self, ws: str, user_id: str, role: str) -> None:
+        await self._exec("INSERT INTO project_members (workspace_id, user_id, role) VALUES ($1, $2, $3) "
+                         "ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role", ws, user_id, role)
+
+    async def members(self, ws: str) -> list[dict]:
+        return await self._fetch("SELECT m.*, u.email, u.name FROM project_members m JOIN console_users u "
+                                 "ON u.id = m.user_id WHERE m.workspace_id = $1 ORDER BY m.joined_at", ws)
+
+    async def memberships(self, user_id: str) -> list[dict]:
+        return await self._fetch("SELECT * FROM project_members WHERE user_id = $1", user_id)
+
+    async def remove_member(self, ws: str, user_id: str) -> None:
+        await self._exec("DELETE FROM project_members WHERE workspace_id = $1 AND user_id = $2", ws, user_id)
+
+    async def set_member_label(self, ws: str, user_id: str, label: str | None) -> None:
+        await self._exec("UPDATE project_members SET label = $3 WHERE workspace_id = $1 AND user_id = $2",
+                         ws, user_id, label)
+
+    async def create_invitation(self, row: dict) -> None:
+        await self._exec("INSERT INTO project_invitations (id, workspace_id, email, role, token_hash, invited_by, "
+                         "expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)", row["id"], row["workspace_id"],
+                         row["email"].lower(), row.get("role", "admin"), row["token_hash"], row.get("invited_by"),
+                         row["expires_at"])
+
+    async def invitations(self, ws: str) -> list[dict]:
+        return await self._fetch("SELECT * FROM project_invitations WHERE workspace_id = $1 ORDER BY created_at", ws)
+
+    async def invitation_by_token(self, token_hash: str) -> dict | None:
+        return await self._row("SELECT * FROM project_invitations WHERE token_hash = $1", token_hash)
+
+    async def update_invitation(self, inv_id: str, **fields) -> None:
+        allowed = {k: v for k, v in fields.items() if k in ("token_hash", "expires_at", "accepted_at", "role")}
+        sets = ", ".join(f"{k} = ${i}" for i, k in enumerate(allowed, 2))
+        await self._exec(f"UPDATE project_invitations SET {sets} WHERE id = $1", inv_id, *allowed.values())
+
+    async def delete_invitation(self, inv_id: str) -> None:
+        await self._exec("DELETE FROM project_invitations WHERE id = $1", inv_id)
+
+    # ---- test cases + audit (publish gate, 12.7)
+    async def eval_cases(self, agent_id: str) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM agent_eval_cases WHERE agent_id = $1", agent_id)
+        rows = [{**r, "spec": _j(r["spec"])} for r in rows]
+        return sorted(rows, key=lambda r: (r["spec"].get("suite", ""), r["id"]))
+
+    async def put_eval_case(self, agent_id: str, case_id: str, spec: dict, gate: bool, by: str | None = None) -> None:
+        await self._exec("INSERT INTO agent_eval_cases (agent_id, id, spec, gate, updated_by) "
+                         "VALUES ($1, $2, $3::jsonb, $4, $5) ON CONFLICT (agent_id, id) DO UPDATE SET "
+                         "spec = EXCLUDED.spec, gate = EXCLUDED.gate, updated_by = EXCLUDED.updated_by, "
+                         "updated_at = now()", agent_id, case_id, json.dumps(spec, ensure_ascii=False), gate, by)
+
+    async def delete_eval_case(self, agent_id: str, case_id: str) -> None:
+        await self._exec("DELETE FROM agent_eval_cases WHERE agent_id = $1 AND id = $2", agent_id, case_id)
+
+    async def audit(self, agent_id: str, action: str, actor: str | None, detail: dict | None = None,
+                    ws: str | None = None) -> None:
+        await self._exec("INSERT INTO agent_audit (agent_id, action, actor, detail, workspace_id) "
+                         "VALUES ($1, $2, $3, $4::jsonb, $5)", agent_id, action, actor,
+                         json.dumps(detail or {}, ensure_ascii=False, default=str), ws or current_project())
+
+    async def audit_log(self, agent_id: str, limit: int = 100) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM agent_audit WHERE agent_id = $1 ORDER BY ts DESC, id DESC LIMIT $2",
+                                 agent_id, limit)
+        return [{**r, "detail": _j(r["detail"])} for r in rows]
+
+    async def project_audit_log(self, ws: str, limit: int = 200) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM agent_audit WHERE workspace_id = $1 ORDER BY ts DESC, id DESC "
+                                 "LIMIT $2", ws, limit)
+        return [{**r, "detail": _j(r["detail"])} for r in rows]
+
     async def meta_get(self, key: str) -> Any:
         r = await self._row("SELECT value FROM platform_meta WHERE key = $1", key)
         return _j(r["value"]) if r else None
@@ -423,3 +722,59 @@ class PgStore:
     async def meta_set(self, key: str, value: Any) -> None:
         await self._exec("INSERT INTO platform_meta (key, value) VALUES ($1, $2::jsonb) "
                          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, json.dumps(value, default=str))
+
+    # ---- knowledge base (12.9)
+    async def kb_items(self, ws: str) -> list[dict]:
+        return await self._fetch("SELECT id, workspace_id, name, type, extension, size_bytes, words, chunks, status, "
+                                 "error, created_by, created_at, updated_at FROM kb_items WHERE workspace_id = $1 "
+                                 "ORDER BY created_at DESC", ws)
+
+    async def kb_item(self, item_id: str) -> dict | None:
+        return await self._row("SELECT * FROM kb_items WHERE id = $1", item_id)
+
+    async def put_kb_item(self, row: dict) -> None:
+        cols = [c for c in ("workspace_id", "name", "type", "extension", "size_bytes", "words", "chunks", "status",
+                            "error", "content", "created_by") if c in row]
+        args = [row["id"], *(row[c] for c in cols)]
+        if "workspace_id" not in row:                  # a status / counts update of an existing item
+            sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+            await self._exec(f"UPDATE kb_items SET {sets}, updated_at = now() WHERE id = $1", *args)
+            return
+        sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
+        await self._exec(f"INSERT INTO kb_items (id, {', '.join(cols)}) VALUES "
+                         f"({', '.join(f'${i + 1}' for i in range(len(args)))}) "
+                         f"ON CONFLICT (id) DO UPDATE SET {sets}, updated_at = now()", *args)
+
+    async def delete_kb_item(self, item_id: str) -> None:
+        await self._exec("DELETE FROM kb_items WHERE id = $1", item_id)
+
+    async def set_kb_chunks(self, item_id: str, ws: str, chunks: list[tuple[int, str, list[float] | None]]) -> None:
+        async with (await self._p()).acquire() as c, c.transaction():
+            await c.execute("DELETE FROM kb_chunks WHERE item_id = $1", item_id)
+            await c.executemany(
+                "INSERT INTO kb_chunks (item_id, workspace_id, seq, text, embedding) VALUES ($1, $2, $3, $4, $5::vector)",
+                [(item_id, ws, s, t, json.dumps(e) if e else None) for s, t, e in chunks])
+
+    async def kb_search(self, ws: str, item_ids: list[str], query: str, vector: list[float] | None,
+                        k: int = 4) -> list[dict]:
+        """The best chunks of these items: vector similarity and keyword match, fused by reciprocal rank."""
+        vec_sql = ("SELECT id, row_number() OVER (ORDER BY embedding <=> $3::vector) AS r FROM kb_chunks "
+                   "WHERE workspace_id = $1 AND item_id = ANY($2::text[]) AND embedding IS NOT NULL "
+                   "ORDER BY embedding <=> $3::vector LIMIT 8") if vector else \
+                  "SELECT NULL::bigint AS id, NULL::bigint AS r WHERE $3::text IS NULL AND false"
+        sql = f"""
+            WITH v AS ({vec_sql}),
+                 t AS (SELECT id, row_number() OVER (ORDER BY ts_rank(to_tsvector('simple', text), q) DESC) AS r
+                       FROM kb_chunks, plainto_tsquery('simple', $4) q
+                       WHERE workspace_id = $1 AND item_id = ANY($2::text[]) AND to_tsvector('simple', text) @@ q
+                       ORDER BY ts_rank(to_tsvector('simple', text), q) DESC LIMIT 8),
+                 f AS (SELECT id, sum(1.0 / (60 + r)) AS score FROM (SELECT * FROM v UNION ALL SELECT * FROM t) x
+                       GROUP BY id)
+            SELECT c.item_id, i.name, c.seq, c.text, round(f.score::numeric, 5)::float AS score
+            FROM f JOIN kb_chunks c ON c.id = f.id JOIN kb_items i ON i.id = c.item_id
+            ORDER BY f.score DESC LIMIT {int(k)}"""
+        return await self._fetch(sql, ws, list(item_ids), json.dumps(vector) if vector else None, query)
+
+    async def kb_usage(self, ws: str) -> int:
+        r = await self._row("SELECT coalesce(sum(size_bytes), 0)::bigint AS n FROM kb_items WHERE workspace_id = $1", ws)
+        return int(r["n"]) if r else 0

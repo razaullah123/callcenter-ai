@@ -1,9 +1,13 @@
-"""Create the voice agent database and copy `projects` + `locations` from the source database.
+"""Create the voice agent database and import what it needs from the source database
+(ai_agent_patient_appointment): hospitals (`projects`), places (`locations`) and the IVR access tables
+(`blacklisted_tokens`, `white_listed_numbers`). The voice agent itself only ever reads its own database.
 
+    python scripts/clone_reference_data.py                       # source = SOURCE_DATABASE_URL in .env
     python scripts/clone_reference_data.py --source postgresql://user:pass@127.0.0.1:5432/ai_agent_patient_appointment
 
 Target = DATABASE_URL from .env (created if missing). Schema = db/schema.sql.
-Re-running refreshes the data (upsert by id); rows are never deleted.
+Re-running refreshes the data (upsert by id); rows are never deleted. Restart the server afterwards (hospitals and
+places are loaded into memory at start).
 """
 
 import argparse
@@ -24,6 +28,8 @@ TABLES = {
                  "active", "created_at", "updated_at", "city_name_en", "city_name_ar", "base_extension", "prefix_allow"],
     "locations": ["id", "city_name_en", "city_name_ar", "district_name_en", "district_name_ar", "latitude",
                   "longitude", "aliases", "active", "created_at", "updated_at", "embedding"],
+    "blacklisted_tokens": ["id", "token_jti", "username", "blacklisted_at", "expires_at"],
+    "white_listed_numbers": ["id", "mobile_number", "name", "active", "created_at", "updated_at"],
 }
 CASTS = {"aliases": "jsonb", "embedding": "vector"}
 
@@ -68,6 +74,9 @@ async def main(source: str) -> None:
             for table, cols in TABLES.items():
                 n = await copy_table(src, dst, table, cols)
                 print(f"{table}: {n} rows copied")
+            # ids were copied: move the sequence past them so rows added here don't collide
+            await dst.execute("SELECT setval(pg_get_serial_sequence('blacklisted_tokens', 'id'), "
+                              "GREATEST((SELECT max(id) FROM blacklisted_tokens), 1))")
         for table in TABLES:
             print(f"{table}: {await dst.fetchval(f'SELECT count(*) FROM {table}')} rows in target")
         print("embeddings:", await dst.fetchval("SELECT count(*) FROM locations WHERE embedding IS NOT NULL"),
@@ -79,5 +88,9 @@ async def main(source: str) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", required=True, help="source database URL")
-    asyncio.run(main(ap.parse_args().source))
+    ap.add_argument("--source", help="source database URL (default: SOURCE_DATABASE_URL in .env)")
+    src_url = ap.parse_args().source or (get_settings().source_database_url.get_secret_value()
+                                         if get_settings().source_database_url else None)
+    if not src_url:
+        raise SystemExit("give --source or set SOURCE_DATABASE_URL")
+    asyncio.run(main(src_url))

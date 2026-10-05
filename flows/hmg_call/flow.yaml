@@ -93,9 +93,9 @@ nodes:
 - id: other_service
   type: transfer
   position:
-    x: 300
+    x: 2400
     y: 420
-  reason: caller asked for a service that isn't available by phone yet
+  reason: verified caller asked for a service that isn't available by phone yet
 - id: ask_mobile
   type: conversation
   position:
@@ -103,8 +103,10 @@ nodes:
     y: 200
   tools:
   - mssql_get_patient_info
-  instructions: 'The caller wants to book. Acknowledge it in a few words and ask for their registered mobile number
-    to verify them — e.g. "أبشر، عشان أحجز لك أحتاج رقم جوالك المسجل".
+  instructions: 'Acknowledge the caller''s request in a few words and ask for their registered mobile number to
+    verify them — to book e.g. "أبشر، عشان أحجز لك أحتاج رقم جوالك المسجل"; for anything else e.g. "أبشر، عشان أخدمك
+    أحتاج رقم جوالك المسجل" / "Sure, to help you I need your registered mobile number". Don''t answer or promise
+    anything about the request itself yet.
 
     Ask for the caller''s registered mobile number — don''t explain its format unless what they said was wrong
 
@@ -194,8 +196,9 @@ nodes:
   position:
     x: 2100
     y: 200
-  instructions: The caller is verified. The system asks "Am I speaking to <name>?" and handles the answer (a clear
-    no transfers the call). Once they confirm, the booking starts.
+  instructions: 'The caller is verified. The system asks "Am I speaking to <name>?" and handles the answer (a clear
+    no transfers the call). Once they confirm, their request is handled: a booking starts; anything else goes to
+    a colleague.'
 - id: hospital
   type: conversation
   position:
@@ -395,6 +398,14 @@ edges:
 - from: greeting_intent
   to: other_service
   when:
+    all:
+    - equals:
+        intent: other
+    - equals:
+        identity_confirmed: true
+- from: greeting_intent
+  to: ask_mobile
+  when:
     equals:
       intent: other
 - from: ask_mobile
@@ -476,6 +487,14 @@ edges:
 - from: verify_otp
   to: ask_otp
   result: failure
+- from: confirm_identity
+  to: other_service
+  when:
+    all:
+    - equals:
+        identity_confirmed: true
+    - equals:
+        intent: other
 - from: confirm_identity
   to: hospital
   when:

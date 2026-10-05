@@ -86,6 +86,11 @@ from runtime.control import api as control_api  # noqa: E402 — console API /ap
 from runtime.control import connections as control_connections  # noqa: E402 — /api/connections, /api/secrets
 from runtime.control import tools_api as control_tools  # noqa: E402 — /api/tool-library, /api/mcp-servers
 from runtime.control import agents_api as control_agents  # noqa: E402 — /api/agents, /api/routes (Agent Studio)
+from runtime.control import agent_evals_api as control_agent_evals  # noqa: E402 — test cases + publish gate (12.7)
+from runtime.control import projects_api as control_projects  # noqa: E402 — projects (switcher)
+from runtime.control import accounts_api as control_accounts  # noqa: E402 — sign-in, members, invitations
+from runtime.control import voices_api as control_voices  # noqa: E402 — Voices page
+from runtime.control import knowledge_api as control_knowledge  # noqa: E402 — Knowledge base
 from runtime.server import chat as chat_ws  # noqa: E402 — text test channel /ws/chat (Agent Studio)
 from runtime.server import ivr  # noqa: E402 — IVR endpoint /ws/voice-pipeline
 
@@ -95,6 +100,11 @@ app.include_router(control_api.router)
 app.include_router(control_connections.router)
 app.include_router(control_tools.router)
 app.include_router(control_agents.router)
+app.include_router(control_agent_evals.router)
+app.include_router(control_projects.router)
+app.include_router(control_accounts.router)
+app.include_router(control_voices.router)
+app.include_router(control_knowledge.router)
 
 # Console (React build in console/dist, served at /console with SPA fallback)
 from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
@@ -113,8 +123,10 @@ async def console(path: str):
         return HTMLResponse("Console not built — run: cd console && npm install && npm run build", status_code=503)
     target = (CONSOLE_DIST / path).resolve()
     if path and target.is_file() and CONSOLE_DIST in target.parents:
-        return FileResponse(target)
-    return FileResponse(CONSOLE_DIST / "index.html")
+        # hashed build files never change; everything else is revalidated so a new build shows on a plain reload
+        immutable = path.startswith("assets/")
+        return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable" if immutable else "no-cache"})
+    return FileResponse(CONSOLE_DIST / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/")

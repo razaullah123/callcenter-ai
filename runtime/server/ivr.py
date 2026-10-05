@@ -15,7 +15,7 @@
 phone_number: an outside caller's number, or — with 8 digits or fewer — a PBX extension, resolved to its
 branch through projects.base_extension (leading 4 digits, else 3). A literal "+" sent unencoded arrives as a
 space and is repaired. access_token: HS256 JWT signed with AUTH_SECRET, rejected if expired or its jti is in
-blacklisted_tokens (same tokens as the existing IVR integration).
+blacklisted_tokens (same tokens as the existing IVR integration, imported into the voice agent's database).
 """
 
 import asyncio
@@ -46,19 +46,17 @@ REJECTION = {
     "en": "Sorry, this service is not available for this number at the moment. Thank you for calling.",
 }
 
-_auth_pool: asyncpg.Pool | None = None
-
-
 async def _auth_db(settings: Settings) -> asyncpg.Pool | None:
-    global _auth_pool
-    dsn = settings.auth_database_url or settings.source_database_url
-    if _auth_pool is None and dsn is not None:
-        try:
-            _auth_pool = await asyncpg.create_pool(dsn.get_secret_value(), min_size=1, max_size=4, ssl=False,
-                                                   timeout=5)
-        except Exception as e:
-            log.warning("auth database unavailable: %r", e)
-    return _auth_pool
+    """The voice agent's own database (blacklisted_tokens / white_listed_numbers are imported into it by
+    scripts/clone_reference_data.py) — never the source database."""
+    if settings.database_url is None:
+        return None
+    try:
+        from runtime.data.db import get_pool
+        return await get_pool()
+    except Exception as e:
+        log.warning("database unavailable for IVR access checks: %r", e)
+        return None
 
 
 async def verify_access_token(token: str, settings: Settings) -> dict | None:

@@ -1,3 +1,4 @@
+import AgentPicker from "../AgentPicker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { evalsApi, type EvalResult } from "../api";
@@ -6,7 +7,8 @@ import { Badge, Button, Card, Empty, ErrorBox, cx, fmtMs, fmtTime } from "../ui"
 export default function Evals() {
   const qc = useQueryClient();
   const cases = useQuery({ queryKey: ["eval-cases"], queryFn: evalsApi.cases });
-  const runs = useQuery({ queryKey: ["eval-runs"], queryFn: evalsApi.runs });
+  const [agent, setAgent] = useState("");
+  const runs = useQuery({ queryKey: ["eval-runs", agent], queryFn: () => evalsApi.runs(agent || undefined) });
   const [suite, setSuite] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [judge, setJudge] = useState(false);
@@ -31,7 +33,7 @@ export default function Evals() {
   const start = async () => {
     setError(null);
     try {
-      const body = picked.size ? { cases: [...picked], mode, judge } : { suite: suite || undefined, mode, judge };
+      const body = { ...(picked.size ? { cases: [...picked] } : { suite: suite || undefined }), mode, judge, agent: agent || undefined };
       setJob((await evalsApi.run(body)).job);
     } catch (e) { setError(e); }
   };
@@ -39,7 +41,11 @@ export default function Evals() {
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div>
-        <h1 className="text-xl font-semibold">Evals</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-xl font-semibold">Evals</h1>
+          <AgentPicker value={agent} onChange={setAgent} allLabel={null} id="evals-agent" />
+          <span className="text-xs text-muted">runs on the agent's published release · each agent's own test cases are in its Tests tab</span>
+        </div>
         <p className="text-sm text-muted">Simulated callers (Najdi / English, male / female) run full conversations against the active provider
           config and skills, with a fixture hospital system — no patient data, no real bookings. Checks cover verification, tool order,
           booking outcome, language, gender agreement, one question per reply and no medical advice.</p>

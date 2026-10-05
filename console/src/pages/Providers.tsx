@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import AgentPicker from "../AgentPicker";
 import { api, type AgentConfig, type ProviderSpec } from "../api";
 import SchemaForm from "../SchemaForm";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
@@ -13,21 +14,24 @@ const KINDS: [string, string, string][] = [
 
 export default function Providers() {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const [agent, setAgentState] = useState("");
+  const q = useQuery({ queryKey: ["providers", agent], queryFn: () => api.providers(agent || undefined) });
   const [draft, setDraft] = useState<AgentConfig | null>(null);
   const [note, setNote] = useState("");
   const [tests, setTests] = useState<Record<string, Record<string, unknown> | "running">>({});
   useEffect(() => { if (q.data && !draft) setDraft(structuredClone(q.data.config)); }, [q.data, draft]);
 
   const save = useMutation({
-    mutationFn: () => api.saveProviders(draft!, note),
+    mutationFn: () => api.saveProviders(draft!, note, agent || undefined),
     onSuccess: () => { setNote(""); setDraft(null); qc.invalidateQueries({ queryKey: ["providers"] }); },
   });
   const activate = useMutation({
-    mutationFn: (v: number) => api.activate(v),
+    mutationFn: (v: number) => api.activate(v, agent || undefined),
     onSuccess: () => { setDraft(null); qc.invalidateQueries({ queryKey: ["providers"] }); },
   });
-  if (!q.data || !draft) return <ErrorBox error={q.error} />;
+  const setAgent = (a: string) => { setAgentState(a); setDraft(null); setTests({}); };
+  if (!q.data || !draft) return <div className="mx-auto max-w-5xl space-y-3">
+    <AgentPicker value={agent} onChange={setAgent} allLabel={null} id="models-agent" /><ErrorBox error={q.error} /></div>;
   const dirty = JSON.stringify(draft) !== JSON.stringify(q.data.config);
 
   const spec = (kind: string) => (draft[kind] ?? { provider: "groq", settings: {} }) as ProviderSpec;
@@ -38,7 +42,7 @@ export default function Providers() {
     setTests(t => ({ ...t, [kind]: "running" }));
     try {
       const s = spec(kind);
-      const r = await api.testProvider(kind, s.provider, s.settings);
+      const r = await api.testProvider(kind, s.provider, s.settings, agent || undefined);
       setTests(t => ({ ...t, [kind]: r }));
     } catch (e) {
       setTests(t => ({ ...t, [kind]: { ok: false, error: String(e) } }));
@@ -49,7 +53,8 @@ export default function Providers() {
     <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Providers</h1>
+          <h1 className="text-xl font-semibold">Agent models</h1>
+          <div className="my-1"><AgentPicker value={agent || q.data.agent?.id || ""} onChange={setAgent} allLabel={null} id="models-agent" /></div>
           <p className="text-sm text-muted">{q.data.agent?.name ?? "Agent"} · release <b>v{q.data.active_version}</b>. Saving publishes a new release; calls already in progress keep the one they started with. Keys and URLs live on the shared <a className="underline" href="/console/connections">connections</a>.</p>
         </div>
         <div className="flex items-center gap-2">

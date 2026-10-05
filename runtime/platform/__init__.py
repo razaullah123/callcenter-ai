@@ -10,6 +10,7 @@ _EXPORTS = {
     "DEFAULT_AGENT": "bundle", "KNOBS": "bundle", "agent_settings": "bundle", "repo_bundle": "bundle",
     "AgentLoader": "loader", "LoadedAgent": "loader", "agent_of": "loader", "mcp_config": "loader",
     "WORKSPACE": "store", "MemoryStore": "store", "PgStore": "store",
+    "current_project": "store", "in_project": "store", "set_project": "store",
 }
 
 

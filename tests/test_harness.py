@@ -428,7 +428,7 @@ async def test_patient_data_access_is_audited(rig, monkeypatch):
 def test_production_safety_checks():
     from runtime.config import Settings
     from runtime.control.maintenance import production_problems
-    base = dict(auth_database_url=None, source_database_url=None)
+    base = dict(source_database_url=None)
     assert production_problems(Settings(tools_mode="hybrid", console_token=None, auth_secret=None, **base)) == []
     probs = production_problems(Settings(tools_mode="live", console_token=None, auth_secret=None, **base))
     assert any("CONSOLE_TOKEN" in p for p in probs) and any("AUTH_SECRET" in p for p in probs)
@@ -728,6 +728,26 @@ async def test_model_cannot_answer_its_own_question(rig):
     llm.then("تبي أحجزه لك؟", ("record_answer", {"question": "booking_confirmation", "answer": "yes"}))
     await agent.handle("همم")
     assert mock.calls == [] and agent.s.pending_action is not None
+
+
+async def test_model_cannot_confirm_in_the_turn_that_parked_the_booking(rig):
+    # live 2026-10-04: "Please book for 8 am" → booking parked → the model recorded "yes" itself in the same turn
+    # and the harness booked with no read-back
+    agent, llm, mock, out, _ = rig
+    verify(agent)
+    agent.s.language.update("hello there")
+    mock.on("api_book_Appointment", {"success": True, "appointment_data": {"AppointmentNo": "1"}})
+    agent.s.memory["offered_slots"] = {5018: {"2026-10-01": {"10:00"}}}
+    args = {"ProjectID": 12, "ClinicID": 5, "DoctorID": 5018, "StartTime": "10:00", "StrAppointmentDate": "2026-10-01"}
+    llm.then(("api_book_Appointment", args)) \
+       .then(("record_answer", {"question": "booking_confirmation", "answer": "yes"})) \
+       .then("I'll book you with Dr. Rubeena Quadri on Thursday at 10 AM. Shall I go ahead?")
+    await agent.handle("Please book for 10 am")
+    assert mock.calls == [] and agent.s.pending_action is not None and not agent.s.slots.get("booked")
+    assert out.said[-1].endswith("Shall I go ahead?")
+    llm.then("Your appointment is booked.")
+    await agent.handle("yes")                                          # the real answer, next turn
+    assert [n for n, _ in mock.calls] == ["api_book_Appointment"] and agent.s.slots.get("booked")
 
 
 async def test_chosen_hospital_named_in_the_call_language(rig):

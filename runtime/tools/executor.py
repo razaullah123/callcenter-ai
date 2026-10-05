@@ -38,6 +38,7 @@ class ToolExecutor:
     def __init__(self, catalog: Catalog, mcp: MCPBackend) -> None:
         self.catalog = catalog
         self.mcp = mcp
+        self.knowledge: dict[str, Any] | None = None     # the agent's knowledge base (search_knowledge_base)
         self.pre_hooks: list[PreHook] = []     # may return replacement args; raise ToolError to block
         self.post_hooks: list[PostHook] = []   # may rewrite result.content / update session
         self._cache: dict[str, tuple[float, Any]] = {}
@@ -221,9 +222,13 @@ class ToolExecutor:
 
     async def _dispatch(self, tool: ToolDef, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, Any]:
         if tool.source == "local":
+            if self.knowledge is not None:
+                ctx.extra.setdefault("knowledge", self.knowledge)
             return True, await call_local(tool.name, args, ctx)
         if tool.source == "http":
-            from .http_tool import call_http
+            from .http_tool import call_http, simulated
+            if (fake := simulated(tool.kind)) is not None:      # TOOLS_MODE: nothing real happens while testing
+                return fake
             return await call_http(tool.http or {}, args, tool.timeout_s or 10)
         return await self.mcp.call(tool.name, args, tool.timeout_s or 10)
 
