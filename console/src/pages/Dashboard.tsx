@@ -1,14 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useEffect, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import AgentPicker from "../AgentPicker";
 import { PRESETS, RangePicker, addDays, midnight, presetLabel, rangeOf, ymd, type Preset } from "../DateRange";
-import { api, type Count, type DashboardData } from "../api";
+import { api, type ActiveCall, type Count, type DashboardData } from "../api";
 import { useLive } from "../live";
 import { ErrorBox, cx, fmtMs } from "../ui";
+import { asrBand, errorBand, escalationBand, fcrBand, latencyBand, llmBand, shortCallsBand, ttsBand, wordsBand, type Band } from "../thresholds";
+import LiveDrawer, { CHANNEL, LANG, channelOf } from "./LiveDrawer";
 
 const TABS = [["overview", "Overview"], ["performance", "Performance"], ["outcome", "Satisfaction & Outcome"],
   ["live", "Live calls"]] as const;
@@ -24,8 +26,6 @@ function fmtDur(s: number | null | undefined) {
 }
 const pct = (n: number, d: number) => (d ? `${Math.round((100 * n) / d)}%` : "0%");
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-const LANG: Record<string, string> = { ar: "Arabic", en: "English", unknown: "Unknown" };
-const CHANNEL: Record<string, string> = { web: "Web call", ivr: "Telephone", chat: "Chat" };
 
 // ------------------------------------------------------------------ icons (lucide-style strokes)
 
@@ -63,9 +63,10 @@ function Section({ icon, title, children, aside }: { icon: ReactNode; title: str
   );
 }
 
-function Metric({ label, value, hint, icon, tone }: {
-  label: string; value: ReactNode; hint?: ReactNode; icon?: ReactNode; tone?: "good" | "warn" | "bad";
+function Metric({ label, value, hint, icon, band }: {
+  label: string; value: ReactNode; hint?: ReactNode; icon?: ReactNode; band?: Band;
 }) {
+  const tone = band?.tone;
   return (
     <div className="rounded-xl border border-line bg-panel p-5 transition-shadow hover:shadow-sm">
       <div className="flex items-start justify-between gap-3">
@@ -75,11 +76,13 @@ function Metric({ label, value, hint, icon, tone }: {
       <div className={cx("mt-2 text-2xl font-bold tabular-nums", tone === "good" && "text-good", tone === "warn" && "text-warn",
         tone === "bad" && "text-bad")}>{value}</div>
       {hint && <div className="mt-1 text-xs text-muted">{hint}</div>}
+      {band?.note && <div className={cx("mt-1 text-xs font-medium", tone === "good" && "text-good", tone === "warn" && "text-warn",
+        tone === "bad" && "text-bad", !tone && "text-muted")}>{band.note}</div>}
     </div>
   );
 }
 
-function ListCard({ icon, title, rows }: { icon: ReactNode; title: string; rows: [ReactNode, ReactNode][] }) {
+function ListCard({ icon, title, rows, band }: { icon: ReactNode; title: string; rows: [ReactNode, ReactNode][]; band?: Band }) {
   return (
     <div className="rounded-xl border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-3">
@@ -93,6 +96,8 @@ function ListCard({ icon, title, rows }: { icon: ReactNode; title: string; rows:
           </div>
         ))}
       </div>
+      {band?.note && <div className={cx("mt-3 text-xs font-medium", band.tone === "good" && "text-good", band.tone === "warn" && "text-warn",
+        band.tone === "bad" && "text-bad", !band.tone && "text-muted")}>{band.note}</div>}
     </div>
   );
 }
@@ -178,11 +183,14 @@ function Overview({ d, start, end }: { d: DashboardData; start: Date; end: Date 
       <Section icon={I.hash} title="Additional Metrics">
         <div className="grid gap-4 md:grid-cols-3">
           <ListCard icon={I.bars} title="Calls by Duration Bucket"
-            rows={[["Less than 30s", t.lt30], ["30-120s", t.s30_120], ["More than 120s", t.gt120]]} />
+            rows={[["Less than 30s", t.lt30], ["30-120s", t.s30_120], ["More than 120s", t.gt120]]}
+            band={shortCallsBand(t.calls ? (100 * t.lt30) / t.calls : null)} />
           <ListCard icon={I.doc} title="Avg Words per AI Response"
-            rows={[["Per response", Math.round(t.avg_words_per_reply ?? 0)], ["Turns per call", (t.avg_turns ?? 0).toFixed(1)]]} />
+            rows={[["Per response", Math.round(t.avg_words_per_reply ?? 0)], ["Turns per call", (t.avg_turns ?? 0).toFixed(1)]]}
+            band={wordsBand(t.avg_words_per_reply)} />
           <ListCard icon={I.userCheck} title="Forwarded to Human Agent"
-            rows={[["of total", pct(t.handoffs, t.calls)], ["Calls", t.handoffs]]} />
+            rows={[["of total", pct(t.handoffs, t.calls)], ["Calls", t.handoffs]]}
+            band={t.calls ? escalationBand((100 * t.handoffs) / t.calls) : undefined} />
         </div>
       </Section>
       <Section icon={I.doc} title="Charts">
@@ -227,13 +235,13 @@ function Performance({ d }: { d: DashboardData }) {
     <div className="space-y-8">
       <Section icon={I.gauge} title="Performance Metrics">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          <Metric label="ASR Processing Time" value={fmtMs(p.stt_ms)} hint="Speech-to-text, average per utterance" />
-          <Metric label="NLU/LLM Response Time" value={fmtMs(p.llm_ms)} hint="Average time to the first token" />
-          <Metric label="TTS Generation Time" value={fmtMs(p.tts_ms)} hint="LLM first token → first audio" />
+          <Metric label="ASR Processing Time" value={fmtMs(p.stt_ms)} hint="Speech-to-text, average per utterance" band={asrBand(p.stt_ms)} />
+          <Metric label="NLU/LLM Response Time" value={fmtMs(p.llm_ms)} hint="Average time to the first token" band={llmBand(p.llm_ms)} />
+          <Metric label="TTS Generation Time" value={fmtMs(p.tts_ms)} hint="LLM first token → first audio" band={ttsBand(p.tts_ms)} />
           <Metric label="Latency" value={fmtMs(p.latency_ms)} hint={<>Turn end → first audio · p50 {fmtMs(p.latency_p50_ms)} · p95 {fmtMs(p.latency_p95_ms)}</>}
-            tone={(p.latency_ms ?? 0) > 2500 ? "warn" : undefined} />
+            band={latencyBand(p.latency_ms)} />
           <Metric label="Error Rate" value={pct(t.errors, t.calls)} hint={`Sessions with errors (${t.errors})`}
-            tone={t.calls && t.errors / t.calls > 0.05 ? "bad" : undefined} />
+            band={t.calls ? errorBand((100 * t.errors) / t.calls) : undefined} />
         </div>
       </Section>
       <Section icon={I.bars} title="Performance Charts">
@@ -289,11 +297,12 @@ function Outcome({ d }: { d: DashboardData }) {
     <div className="space-y-8">
       <Section icon={I.heart} title="Outcome Metrics">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          <Metric label="Booking Rate" value={pct(t.booked, t.calls)} hint={`${plural(t.booked, "appointment", "appointments")} booked`} tone={t.booked ? "good" : undefined} />
+          <Metric label="Booking Rate" value={pct(t.booked, t.calls)} hint={`${plural(t.booked, "appointment", "appointments")} booked`} band={t.booked ? { tone: "good" } : undefined} />
           <Metric label="Verification Rate" value={pct(t.verified, t.calls)} hint={`${plural(t.verified, "caller", "callers")} verified`} />
-          <Metric label="First-Call Resolution (FCR)" value={pct(t.calls - t.handoffs, t.calls)} hint="Resolved without hand-off" />
+          <Metric label="First-Call Resolution (FCR)" value={pct(t.calls - t.handoffs, t.calls)} hint="Resolved without hand-off"
+            band={t.calls ? fcrBand((100 * (t.calls - t.handoffs)) / t.calls) : undefined} />
           <Metric label="Escalation Rate" value={pct(t.handoffs, t.calls)} hint="Calls escalated to human agents"
-            tone={t.calls && t.handoffs / t.calls > 0.25 ? "warn" : undefined} />
+            band={t.calls ? escalationBand((100 * t.handoffs) / t.calls) : undefined} />
           <div className="rounded-xl border border-line bg-panel p-5">
             <div className="mb-2 text-sm font-medium">Outcome Distribution</div>
             {dist.map(x => (
@@ -328,6 +337,10 @@ function LiveCalls({ agent }: { agent: string }) {
   const agents = useQuery({ queryKey: ["agents"], queryFn: api.agents, staleTime: 30_000 });
   const name = (id: string | null) => agents.data?.find(a => a.id === id)?.name ?? id ?? "—";
   const active = live.active.filter(c => !agent || c.agent_id === agent);
+  // keep a snapshot so the drawer stays open (showing the outcome) after the call leaves the active list
+  const [open, setOpen] = useState<ActiveCall | null>(null);
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
   return (
     <Section icon={I.phone} title="Live Calls">
       <div className="flex justify-end">
@@ -337,28 +350,30 @@ function LiveCalls({ agent }: { agent: string }) {
         </span>
       </div>
       {active.length ? (
-        <div className="overflow-x-auto rounded-xl border border-line bg-panel">
-          <table className="w-full text-sm">
-            <thead><tr className="border-b border-line text-left text-xs text-muted">
-              <th className="px-4 py-2.5 font-medium">Call</th><th className="px-4 py-2.5 font-medium">Agent</th>
-              <th className="px-4 py-2.5 font-medium">Duration</th><th className="px-4 py-2.5 font-medium">Language</th>
-              <th className="px-4 py-2.5 font-medium">Step</th><th className="px-4 py-2.5 font-medium">Caller said</th>
-              <th className="px-4 py-2.5" />
-            </tr></thead>
-            <tbody>
-              {active.map(c => (
-                <tr key={c.call_id} className="border-b border-line last:border-0">
-                  <td className="px-4 py-2.5 font-mono text-xs">{c.call_id}</td>
-                  <td className="px-4 py-2.5">{name(c.agent_id)}</td>
-                  <td className="px-4 py-2.5 tabular-nums">{fmtDur(c.duration_s)}</td>
-                  <td className="px-4 py-2.5">{LANG[c.language ?? ""] ?? c.language ?? "—"}</td>
-                  <td className="px-4 py-2.5 text-xs">{c.step ?? c.skill ?? "—"}{c.verified && <span className="ml-1.5 rounded bg-good/15 px-1 text-good">verified</span>}</td>
-                  <td className="max-w-xs truncate px-4 py-2.5 text-xs text-muted">{c.last_user ?? "—"}</td>
-                  <td className="px-4 py-2.5 text-right"><Link to="/live" className="text-xs font-medium text-accent-text hover:underline">Watch →</Link></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {active.map(c => (
+            <div key={c.call_id} className="rounded-xl border border-line bg-panel p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-semibold">{name(c.agent_id)}</div>
+                  <div className="truncate font-mono text-xs text-muted">{c.call_id}</div>
+                </div>
+                <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-good/15 px-2 py-0.5 text-xs font-medium text-good">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-good" />In Progress</span>
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                <div><dt className="text-xs text-muted">Started</dt><dd>{new Date(c.started * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</dd></div>
+                <div><dt className="text-xs text-muted">Elapsed</dt><dd className="tabular-nums">{fmtDur(Math.max(0, Math.round(Date.now() / 1000 - c.started)))}</dd></div>
+                <div><dt className="text-xs text-muted">Channel</dt><dd>{CHANNEL[channelOf(c.call_id)]}</dd></div>
+                <div><dt className="text-xs text-muted">Language</dt><dd>{LANG[c.language ?? ""] ?? c.language ?? "—"}</dd></div>
+              </dl>
+              {c.last_user && <div className="mt-3 truncate text-xs text-muted" dir="auto">👤 {c.last_user}</div>}
+              <div className="mt-4 flex items-center justify-between">
+                <span className="text-xs text-muted">{c.step ?? c.skill ?? ""}{c.verified && <span className="ml-1.5 rounded bg-good/15 px-1 text-good">verified</span>}</span>
+                <button onClick={() => setOpen(c)} className="rounded-lg border border-line px-3 py-1 text-sm font-medium hover:bg-soft">View</button>
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
         <div className="grid place-items-center py-16 text-center">
@@ -367,6 +382,7 @@ function LiveCalls({ agent }: { agent: string }) {
           <div className="mt-1 text-sm text-muted">There are currently no live calls. New calls will appear here in live time.</div>
         </div>
       )}
+      {open && <LiveDrawer call={live.active.find(c => c.call_id === open.call_id) ?? open} agentName={name(open.agent_id)} onClose={() => setOpen(null)} />}
     </Section>
   );
 }
