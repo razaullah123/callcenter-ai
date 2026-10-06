@@ -39,7 +39,10 @@ Working conventions with this user:
 
 **Call path.** `runtime/server/app.py` (FastAPI) hosts the browser call WS, the IVR WS (`server/ivr.py`, protocol in
 `docs/ivr_protocol.md`), the text test channel `/ws/chat` (`server/chat.py`), the control API and the built console.
-`runtime/voice/` does VAD → STT → harness → TTS player with barge-in. `runtime/app.py` is the shared Runtime
+`runtime/voice/` does VAD → STT → harness → TTS player with barge-in; `voice/call.py::_watch_limits` applies the
+per-agent call limits (inactivity "are you still there?", max call duration → closing line + hang-up). Per-agent
+knobs are `platform/bundle.py::KNOBS` overlaid on `config.Settings` (a new knob: add it to both, plus a label/control
+in the console's `studio/GlobalSettings.tsx` `KNOB_LABELS`). `runtime/app.py` is the shared Runtime
 (pools, loader, providers, schema apply from `db/schema.sql` on start — schema changes are idempotent
 `CREATE/ALTER ... IF NOT EXISTS` appended there).
 
@@ -81,7 +84,12 @@ Their `http.auth` (bearer / basic / api_key, parts may be `{"secret": NAME}`) be
 library, connections/providers/secrets, evals, live events). The console (`console/`, React 19 + React Query +
 Tailwind 4 + `@xyflow/react`) — Agent Studio is `pages/Studio.tsx` with `studio/FlowCanvas.tsx` (canvas, node
 inspector), `studio/TestPanel.tsx` + `useTestCall.ts` (browser call / chat tests with live logs, follow canvas) and
-`studio/TestsTab.tsx` (test cases, publish dialog, audit). API types/calls are all in `console/src/api.ts`.
+`studio/TestsTab.tsx` (test cases, publish dialog, audit) and `studio/GlobalSettings.tsx` (the right-hand panel
+shown by default, like Hamsa's: prompts, voice, LLM, noise, knowledge base, call settings → draft). API types/calls are
+all in `console/src/api.ts`; shared table pieces in `table.tsx`, date ranges in `DateRange.tsx`. Look: theme tokens in
+`index.css` (accent = Cloud Solutions red #e63a40, light/dark via `data-theme` on <html>), logo in `Brand.tsx`
+(`public/cloud_solutions_logo.png`). Knowledge base: `platform/knowledge.py` + `control/knowledge_api.py` (pgvector
+hybrid search; agents get the local tool `search_knowledge_base` when `bundle.knowledge.items` is set).
 Import Agent: `runtime/platform/hamsa_import.py` converts a Hamsa agent's JSON (what Hamsa's flow builder loads) into a
 new agent (`POST /api/agents/import`); Hamsa's `.hamsa` export files are encrypted with Hamsa's key and can't be read.
 

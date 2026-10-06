@@ -78,7 +78,7 @@ Groq for STT / LLM / TTS · custom agent harness + skills · MCP tools + local d
 - [x] 4.12 Prefetch — [prefetch.py](runtime/harness/prefetch.py): clinics when a hospital is matched / nearby list returned; nearest slots when the agent names a clinic; executor joins in-flight prefetches (no duplicate 2 s calls) — 148 tests passing
 - [x] 4.13 Text chat — [scripts/chat.py](scripts/chat.py): real Groq LLM, **patient/auth/write tools always mocked** (test mobile 0500000001, OTP 1234), live HIS only for non-patient lookups; scripted flows in [scripts/flows/](scripts/flows/)
 
-## Phase 5 — Skills ✅ (booking + auth complete; 6 skills drafted pending specs)
+## Phase 5 — Skills ✅ (booking + auth complete; 6 skills drafted pending specs — see **Remaining work A**)
 - [x] 5.1 Skill format + loader — [runtime/skills/loader.py](runtime/skills/loader.py): `skills/<name>/SKILL.md` (front matter: description, keywords, hidden/extra tools, status; `## ar` / `## en` sections) + optional `flow.yaml`; **progressive disclosure** (router sees descriptions, only the active skill + current step enter the prompt); validated against the tool catalog at load
 - [x] 5.2 Step machine — steps can declare `auto_call` (lookups the harness runs itself on step entry, e.g. the clinic list once a hospital is chosen); — [runtime/skills/flow.py](runtime/skills/flow.py): current step **derived** from state (auth stage / slots); slots **inferred from the tools the LLM calls** (no extra round trips); dependent slots reset when a choice changes; **only the current step's tools are exposed**
 - [x] 5.3 [_persona](skills/_persona/SKILL.md) (Najdi + English) · pre-recorded-ready greeting · [home](skills/home/SKILL.md) router · **keyword routing of the caller's first request right after verification** (saves a switch_skill hop) · handoff via control tool
@@ -186,20 +186,54 @@ Stages:
 - [x] **12.5 Flow graph runtime** (2026-09-29 — see progress log) — node executor, variables + typed extraction, transitions, global behaviours, sub-flows; `flow.yaml` → graph converter; HMG auth + booking run as a graph with the same evals
 - [x] **12.6 Console: Agent Studio** (2026-09-29 — see progress log) — agents list; canvas (React Flow) with node inspector, variables panel, global settings; providers, secrets, tools, skills, phone routes pages; "Test" call from the canvas on the draft; versions (diff, publish, rollback)
 - [x] **12.7 Publish gate + evals per agent** (2026-10-01 — see progress log) — eval suites belong to an agent; publish runs them on the draft; override needs a reason (audited)
-- [ ] **12.8 Import / export** — agent export / import as JSON; importer for Hamsa's flow export (user to provide the file)
-- [ ] **12.9 Then** — knowledge base, post-call outcome + webhook, roles / SSO, batch (outbound) calls
+- [x] **12.8 Import / export** (2026-10-04) — agent export (`GET /api/agents/{id}/export`); Import Agent from a Hamsa agent's JSON (`.hamsa` export files are encrypted by Hamsa and can't be read) — re-importing our own export as a new agent is still open (see Remaining work)
+- [~] **12.9 Then** — ~~knowledge base~~ ✅ (2026-10-05); post-call outcome + webhook, roles / SSO, batch (outbound) calls still open (see Remaining work)
 
 **Acceptance test:** a second agent for a different use case, with a different LLM / TTS voice and its own tools, is
 created, tested and published entirely from the console — no code change, no restart. And HMG's remaining modules
 (manage appointments, send info, insurance, reports, post-visit, complaints) are built in the builder, not in Python.
 
-## Implementation order (next)
+## Remaining work (as of 2026-10-06)
+
+**A. HMG modules — build each as a flow in the Agent Studio (not in Python); skills 5.6–5.11 are only drafts.** The HIS
+tools already exist in the tool library (collection = module); write / send ones need read-back + "yes" (policy) and
+run simulated in TOOLS_MODE=hybrid unless HYBRID_LIVE_BOOKING.
+1. **Appointment management** (5.6, Q7) — list upcoming (`mssql_get_upcoming_appointment`), confirm
+   (`mssql_confirm_appointment`), cancel (`mssql_cancel_appointment`), reschedule (`mssql_reschudule_getNearestDoctorSlot`
+   → `api_Rescheduling_book_appointment`). Needs the use-case spec (which appointment when several, cancel reasons).
+2. **Sending reports** (5.9) — lab / radiology / out- & in-patient / discharge / sick leave / vaccines / dental plan
+   (`api_get_*` reads), request a new report (`api_new_medical_report`), send by email (`api_send_medical_report_email`).
+   Never read results aloud; only send.
+3. **Send info** (5.7) — appointment details or hospital location by SMS / WhatsApp (`api_send_Appointment{Sms,Whatsapp}`,
+   `api_send_ProjectLocation{Sms,Whatsapp}`); location send needs the `AppointmentNo` (Q7).
+4. **Post-visit requests** (5.10) — appointment history, prescriptions, ask the doctor / call-back / medicine / result /
+   other requests (`api_ask_to_doctor`, `api_get_askingto_returncall`, `api_get_askingfor_medicine`, `api_get_askingfor_result`,
+   `api_get_asking_others`).
+5. **Insurance** (5.8) — insurance details, update history, approvals (reads only).
+6. **Complaints** (5.11) — create a complaint / suggestion, complaint history.
+7. For each: test cases in the agent's Tests tab (publish gate), an eval, a live test in hybrid mode.
+
+**B. Platform (Hamsa parity)**
+1. **Outcome** — post-call analysis: summary, satisfaction, sentiment and a user-defined outcome schema per agent (Hamsa:
+   "Outcome Data Structure"); shown in Call history and the dashboard's Satisfaction tab.
+2. **Call webhook** — send call events / the conversation / the outcome to a URL per agent (auth: none / bearer / secret).
+3. **Batch (outbound) calls** — call lists, schedule, per-number results (sidebar item "Soon").
+4. **API keys** — per-project keys for the public API (sidebar item "Soon"); then lock the browser call / chat
+   WebSockets behind sign-in or a key.
+5. **Web Tool** — tools executed in the caller's browser / app (needs a web SDK).
+6. **Voice extras** — expressiveness, pronunciation dictionaries, wait-for-user-to-speak-first, ambient sound,
+   speaker identification, prompt enhancer (Hamsa Global Settings items we don't have).
+7. **Import our own export** as a new agent; roles / SSO; Arabic console UI (Hamsa's language switch).
+
+**C. Open with the client** — Q7, Q14, Q18, Q20, Q21, Q22 (see Open questions).
+
+## Implementation order (first build, done)
 1. 12.1 data model + agent loader (HMG migrated as agent #1, evals stay 17/17) with 12.2 providers & secrets
 2. 12.3 multi-process sync
 3. 12.4 tool library, then 12.5 flow graph runtime
 4. 12.6 Agent Studio console (canvas) — can start in parallel once the 12.1 API exists
 5. 12.7 publish gate, 12.8 import / export
-6. HMG remaining modules in the builder as flow specs arrive; 12.9 afterwards
+6. HMG remaining modules in the builder as flow specs arrive; 12.9 afterwards → now tracked in **Remaining work** above
 
 ## Decisions (2026-09-27)
 - **Q11 — Embeddings:** in-house service `EMBEDDING_URL` (1024 dims).
