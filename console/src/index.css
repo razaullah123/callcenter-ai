@@ -15,9 +15,9 @@
   --color-ink: #151b24;
   --color-muted: #667085;
   --color-nav: #000000;              /* sidebar labels: pure black like Hamsa's */
-  --color-accent: #97de00;           /* Hamsa lime: fills, borders, focus, bars */
-  --color-accent-fg: #0b0f06;        /* text / icons on a lime fill */
-  --color-accent-text: #4d7c0f;      /* lime-toned text on light backgrounds (links, labels) */
+  --color-accent: #e63a40;           /* Cloud Solutions red (from the logo): fills, borders, focus, bars */
+  --color-accent-fg: #ffffff;        /* text / icons on a red fill */
+  --color-accent-text: #b4232a;      /* red-toned text on light backgrounds (links, labels) */
   --color-brand: var(--color-accent);   /* kept for the log panel / canvas classes */
   --color-good: #12805c;
   --color-warn: #b25e09;
@@ -35,9 +35,9 @@
     --color-ink: #e6ebf1;
     --color-muted: #8b96a5;
     --color-nav: #f1f4f8;
-    --color-accent: #97de00;
-    --color-accent-fg: #0b0f06;
-    --color-accent-text: #b5f23d;
+    --color-accent: #e63a40;
+    --color-accent-fg: #ffffff;
+    --color-accent-text: #ff8a8e;
     --color-good: #3ecf8e;
     --color-warn: #f0a13a;
     --color-bad: #f07167;
@@ -53,9 +53,9 @@
   --color-ink: #e6ebf1;
   --color-muted: #8b96a5;
   --color-nav: #f1f4f8;
-  --color-accent: #97de00;
-  --color-accent-fg: #0b0f06;
-  --color-accent-text: #b5f23d;
+  --color-accent: #e63a40;
+  --color-accent-fg: #ffffff;
+  --color-accent-text: #ff8a8e;
   --color-good: #3ecf8e;
   --color-warn: #f0a13a;
   --color-bad: #f07167;

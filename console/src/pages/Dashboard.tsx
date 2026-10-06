@@ -280,7 +280,7 @@ function Breakdown({ title, rows, label }: { title: string; rows: Count[]; label
 function Outcome({ d }: { d: DashboardData }) {
   const t = d.totals;
   const dist = [
-    { name: "Booked", value: t.booked, color: "#97de00" },
+    { name: "Booked", value: t.booked, color: "#e63a40" },
     { name: "Verified only", value: t.verified_only, color: "#2563eb" },
     { name: "Handed to human", value: t.handoffs, color: "#f59e0b" },
     { name: "Not resolved", value: t.unresolved, color: "#a3a3a3" },

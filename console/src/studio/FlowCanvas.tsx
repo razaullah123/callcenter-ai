@@ -113,7 +113,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
         <>
           <div className="line-clamp-3 rounded-md bg-soft/60 px-2 py-1 text-[11px] text-muted" dir="auto">{n.instructions || "No instructions yet"}</div>
           {(n.extract?.length ?? 0) > 0 && <div className="mt-1 flex flex-wrap items-center gap-1"><span className="text-[10px] text-muted">Collecting:</span>
-            {n.extract!.map(v => <span key={v} className="rounded bg-lime-100 px-1 text-[10px] text-lime-800">{v}</span>)}</div>}
+            {n.extract!.map(v => <span key={v} className="rounded bg-red-50 px-1 text-[10px] text-red-800">{v}</span>)}</div>}
           {(n.tools?.length ?? 0) > 0 && <div className="mt-1 text-[10px] text-muted">🛠 {n.tools!.length} tools</div>}
         </>);
     }
@@ -122,7 +122,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
   return (
     <div className={cx("w-64 rounded-xl border bg-panel text-left shadow-sm",
       selected ? "border-accent ring-2 ring-accent/30" : "border-line",
-      data.active && "!border-brand shadow-[0_0_0_4px_rgba(151,222,0,0.35)]")}>
+      data.active && "!border-brand shadow-[0_0_0_4px_rgba(230,58,64,0.3)]")}>
       {!anywhere && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-400" />}
       <div className="flex items-center gap-2 border-b border-line px-2 py-1.5">
         <span className={cx("flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] text-white", t.color)}>{t.icon}</span>
@@ -139,7 +139,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
           </div>}
         </div>}
       </div>
-      {data.active && <div className="bg-lime-50 px-2 py-0.5 text-[10px] font-semibold text-lime-800">● active in the test call</div>}
+      {data.active && <div className="bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-800">● active in the test call</div>}
       <div className="space-y-1 px-2 py-1.5">{body}</div>
       {!(n.type === "end" || n.type === "transfer") && (
         <div className="border-t border-line px-2 py-1.5">

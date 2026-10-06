@@ -9,7 +9,7 @@ import { Button, Card, cx, fmtTime } from "./ui";
 // projects" (someone invited you; the owner is shown, ✎ gives it your own label), then Project settings, Create
 // project, Rename label / Rename project, Copy project ID. Project settings: Team members (invite, remove), Audit log.
 
-const COLORS = ["bg-violet-600", "bg-lime-600", "bg-sky-600", "bg-amber-600", "bg-rose-600", "bg-teal-600", "bg-indigo-600"];
+const COLORS = ["bg-violet-600", "bg-red-600", "bg-sky-600", "bg-amber-600", "bg-rose-600", "bg-teal-600", "bg-indigo-600"];
 const colorOf = (id: string) => COLORS[[...id].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length];
 
 export function Avatar({ p, size = "h-6 w-6 text-[11px]" }: { p: { id: string; name: string }; size?: string }) {
