@@ -122,6 +122,12 @@ class VoiceCall:
                     self._last_activity, pinged = now, False
                 if self.max_call_s and now - started >= self.max_call_s:
                     self.ev.emit(EventType.POLICY_BLOCK, reason="max_call_duration", minutes=self.max_call_s / 60)
+                    # time is up even mid-answer: stop what the agent is saying / preparing, then say goodbye
+                    if self.player.active:
+                        self.agent.on_interrupted(await self.player.interrupt())
+                    if self._agent_task and not self._agent_task.done():
+                        self._agent_task.cancel()
+                        await asyncio.gather(self._agent_task, return_exceptions=True)
                     await self._say_line("CALL_TIME_LIMIT")
                     self._forced_reason = "max_duration"
                     await self._send_event({"event": "hangup"})
