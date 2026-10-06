@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     voice_barge_in_confirm: bool = True  # transcribe that speech first: interrupt only for real words, not echo / noise
     voice_level_gate_db: float = 12.0    # ignore speech this far below the caller's own level (background voices); 0 = off
     voice_filler_after_s: float = 0.7
+    voice_interrupt: bool = True         # the caller may interrupt the agent (barge-in); off: the agent always finishes
+    voice_vad_threshold: float = 0.5     # speech probability that counts as speech (higher: less sensitive to noise)
+    voice_inactivity_s: float = 0.0      # caller silent this long after the agent spoke → "are you still there?"; 0 = off
+    call_max_minutes: float = 0.0        # the call ends (with a closing line) after this many minutes; 0 = no limit
     llm_hedge_after_s: float = 2.5
     # Agents (per release knobs): does the caller have to be verified first, and where does the conversation start?
     require_verification: bool = True    # False: e.g. an information line — no mobile / OTP, starts in entry_skill

@@ -75,7 +75,14 @@ class VoiceCall:
         self.agent.agent_ref = {"agent_id": self.loaded.agent_id, "release_id": self.loaded.release_id}
         self.vad_rate = vad_rate_for(in_fmt.sample_rate)
         self._in_resampler = self._make_resampler(in_fmt.sample_rate)
-        self.turns = TurnDetector(TurnConfig(end_silence_ms=s.voice_end_silence_ms), sample_rate=self.vad_rate)
+        vad = min(0.95, max(0.05, s.voice_vad_threshold))
+        self.turns = TurnDetector(TurnConfig(end_silence_ms=s.voice_end_silence_ms, start_threshold=vad,
+                                             end_threshold=min(0.35, vad * 0.7)), sample_rate=self.vad_rate)
+        self.interrupt = s.voice_interrupt
+        self.inactivity_s = s.voice_inactivity_s
+        self.max_call_s = s.call_max_minutes * 60
+        self._watch: asyncio.Task | None = None
+        self._last_activity = time.monotonic()
         self.barge_in_ms = s.voice_barge_in_ms
         self.barge_in_confirm = s.voice_barge_in_confirm
         self._next_barge_ms = self.barge_in_ms
@@ -98,7 +105,45 @@ class VoiceCall:
 
     async def start(self) -> None:
         await self._record_mobile()                        # the IVR calling number, if any
+        if self.inactivity_s > 0 or self.max_call_s > 0:
+            self._watch = asyncio.create_task(self._watch_limits())
         await self.agent.start()
+
+    async def _watch_limits(self) -> None:
+        """The agent's call limits: ask "are you still there?" after `voice_inactivity_s` of caller silence (once per
+        silence), and end the call with a closing line after `call_max_minutes`."""
+        started, pinged = time.monotonic(), False
+        try:
+            while not self._stopped and not self.session.ended and not self.session.handoff:
+                await asyncio.sleep(0.5)
+                now = time.monotonic()
+                busy = self.player.active or self.turns.in_speech or (self._agent_task and not self._agent_task.done())
+                if busy:
+                    self._last_activity, pinged = now, False
+                if self.max_call_s and now - started >= self.max_call_s:
+                    self.ev.emit(EventType.POLICY_BLOCK, reason="max_call_duration", minutes=self.max_call_s / 60)
+                    await self._say_line("CALL_TIME_LIMIT")
+                    self._forced_reason = "max_duration"
+                    await self._send_event({"event": "hangup"})
+                    if self.close_transport:
+                        await self.close_transport()
+                    return
+                if self.inactivity_s and not busy and not pinged and now - self._last_activity >= self.inactivity_s:
+                    pinged = True
+                    self.ev.emit(EventType.POLICY_BLOCK, reason="caller_inactive", seconds=self.inactivity_s)
+                    await self._say_line("STILL_THERE")
+                    self._last_activity = time.monotonic()
+        except asyncio.CancelledError:
+            pass
+
+    async def _say_line(self, name: str) -> None:
+        """One of the agent's fixed lines, in the call's language, also kept in the conversation history."""
+        lang = self.session.language.language
+        text = getattr(self.agent.ph, name)[lang]
+        await self.agent._say(text)
+        self.session.history.append({"role": "assistant", "content": text})
+        while self.player.active and not self._stopped:       # let it finish before anything else happens
+            await asyncio.sleep(0.1)
 
     async def _record_mobile(self) -> None:
         """Keep the call row's mobile current: the number the caller gave (looked up in the HIS) wins over the
@@ -122,7 +167,7 @@ class VoiceCall:
                                                   "agent_ended" if self.session.ended else reason)
         # everything still running for this call — incl. the early STT started at a pause and the barge-in check,
         # which otherwise kept sending audio to the STT provider after the caller hung up
-        for t in [self._agent_task, self._speculative, self._barge_check, *self._stt_tasks]:
+        for t in [self._agent_task, self._speculative, self._barge_check, getattr(self, "_watch", None), *self._stt_tasks]:
             if t and not t.done():
                 t.cancel()
         await self.player.close()
@@ -253,6 +298,8 @@ class VoiceCall:
     def _barge_in_allowed(self) -> bool:
         """Telephony echo guards: no barge-in right after the agent starts talking (echo onset), and not when
         the echo canceller says the 'speech' is mostly our own voice coming back."""
+        if not getattr(self, "interrupt", True):     # this agent always finishes what it says
+            return False
         since = self.player.speaking_since
         if self.barge_in_grace_ms and since and (time.perf_counter() - since) * 1000 < self.barge_in_grace_ms:
             return False

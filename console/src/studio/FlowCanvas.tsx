@@ -203,7 +203,9 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
   onDirty, onViewLogs, onInspect }: CanvasProps) {
   const [g, setG] = useState(() => ({ nodes: graph.nodes, edges: graph.edges, start: graph.start, variables: graph.variables ?? {} }));
   const [sel, setSel] = useState<{ kind: "node"; id: string } | { kind: "edge"; gi: number } | null>(null);
-  const [panel, setPanel] = useState<Panel>("inspector");
+  // like Hamsa: Global Settings is the panel you see; clicking a node / transition shows its inspector, closing it goes back
+  const home: Panel = globalPanel ? "global" : "inspector";
+  const [panel, setPanel] = useState<Panel>(home);
   const [dirty, setDirty] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
@@ -338,11 +340,12 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
 
   const node = sel?.kind === "node" ? g.nodes.find(n => n.id === sel.id) : undefined;
   const edge = sel?.kind === "edge" ? g.edges[sel.gi] : undefined;
-  const side = aside ?? (panel === "global" && globalPanel ? globalPanel : (
+  const showGlobal = !!globalPanel && (panel === "global" || (panel === "inspector" && !sel));   // nothing selected → global
+  const side = aside ?? (showGlobal ? globalPanel : (
     <div className="h-full overflow-y-auto p-3">
       <div className="mb-3 flex items-center justify-between">
         <div className="text-sm font-semibold">{panel === "variables" ? "Variables" : node ? "Node inspector" : edge ? "Transition" : "Inspector"}</div>
-        {(panel !== "inspector" || sel) && <button className="text-muted hover:text-ink" onClick={() => { setSel(null); setPanel("inspector"); }}>✕</button>}
+        {(panel !== "inspector" || sel) && <button className="text-muted hover:text-ink" onClick={() => { setSel(null); setPanel(home); }}>✕</button>}
       </div>
       {panel === "variables" ? <Variables vars={g.variables} infer={graph.infer} onChange={v => { setG(x => ({ ...x, variables: v })); touch(); }} />
         : node ? <NodeInspector key={node.id} node={node} isStart={node.id === g.start} tools={tools} skills={skills}
@@ -368,23 +371,23 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
     <div className="space-y-2">
       {converted && <div className="rounded-lg bg-soft px-3 py-2 text-xs text-muted">This flow was written as steps. The canvas shows it as a graph
         (each step is reached from “Anywhere” when its conditions hold); saving keeps the same behaviour.</div>}
-      <div className={cx("grid gap-3", aside ? "lg:grid-cols-[1fr_26rem]" : "lg:grid-cols-[1fr_24rem]")}>
+      <div className={cx("grid gap-3", aside ? "lg:grid-cols-[1fr_26rem]" : showGlobal ? "lg:grid-cols-[1fr_30rem]" : "lg:grid-cols-[1fr_24rem]")}>
         <div ref={boxRef} className="relative h-[70vh] overflow-hidden rounded-xl border border-line bg-panel">
           <Actions.Provider value={actions}>
             <ReactFlow nodes={rfNodes} edges={rfEdges} nodeTypes={nodeTypes} fitView minZoom={0.1}
               onNodesChange={c => { onNodesChange(c); if (c.some(x => x.type === "position" && !x.dragging)) touch(); }}
               onConnect={onConnect} onEdgeClick={(_, e) => actions.selectEdge(Number(e.id.slice(1)))}
               onNodeClick={(_, n) => { if (n.id !== ANY) actions.open(n.id); }}
-              onPaneClick={() => { setSel(null); setAddOpen(false); setLayoutOpen(false); }} deleteKeyCode={null}>
+              onPaneClick={() => { setSel(null); setPanel(p => (p === "inspector" ? home : p)); setAddOpen(false); setLayoutOpen(false); }} deleteKeyCode={null}>
               <Background gap={20} /><MiniMap pannable zoomable /><Controls />
             </ReactFlow>
           </Actions.Provider>
           {/* floating toolbar, like Hamsa: add node · variables · auto-layout · global settings */}
           <div className="absolute left-3 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-2">
             <ToolButton label="Add node" active={addOpen} accent onClick={() => { setAddOpen(o => !o); setLayoutOpen(false); }}>＋</ToolButton>
-            <ToolButton label="Variables" active={panel === "variables" && !aside} onClick={() => { setPanel(p => (p === "variables" ? "inspector" : "variables")); setSel(null); }}>(x)</ToolButton>
+            <ToolButton label="Variables" active={panel === "variables" && !aside} onClick={() => { setPanel(p => (p === "variables" ? home : "variables")); setSel(null); }}>(x)</ToolButton>
             <ToolButton label="Auto layout" active={layoutOpen} onClick={() => { setLayoutOpen(o => !o); setAddOpen(false); }}>⊞</ToolButton>
-            <ToolButton label="Global settings" active={panel === "global" && !aside} onClick={() => setPanel(p => (p === "global" ? "inspector" : "global"))}>⚙</ToolButton>
+            <ToolButton label="Global settings" active={showGlobal && !aside} onClick={() => { setSel(null); setPanel("global"); }}>⚙</ToolButton>
           </div>
           {addOpen && (
             <div className="absolute left-16 top-1/2 z-20 w-72 -translate-y-1/2 rounded-xl border border-line bg-panel p-2 shadow-xl">

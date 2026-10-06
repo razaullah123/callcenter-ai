@@ -257,3 +257,44 @@ async def test_end_call_from_console():
     assert call.player.interrupted and sent == [{"event": "hangup"}] and closed == [True]
     await call.stop()                                  # the transport's cleanup then stops the call
     assert call.end_reason == "ended_from_console"
+
+
+async def test_agent_call_limits(monkeypatch):
+    """Per-agent call settings: no interruptions, the inactivity check-in, and the maximum call length."""
+    from runtime.harness.prompts import Phrases
+    from runtime.harness.session import Session
+    from runtime.platform.bundle import knob_errors
+    from runtime.voice.call import VoiceCall
+    assert not knob_errors({"voice_interrupt": False, "voice_vad_threshold": 0.6, "voice_inactivity_s": 15,
+                            "call_max_minutes": 10})
+    call = VoiceCall.__new__(VoiceCall)
+    call.interrupt, call.barge_in_grace_ms, call.aec = False, 0, None
+    call.player = type("P", (), {"speaking_since": None})()
+    assert call._barge_in_allowed() is False                       # this agent always finishes what it says
+
+    said, sent, closed = [], [], []
+
+    async def say(text):
+        said.append(text)
+
+    async def send_event(msg):
+        sent.append(msg)
+
+    async def close_transport():
+        closed.append(True)
+
+    call = VoiceCall.__new__(VoiceCall)
+    call.session, call.ev = Session(call_id="c"), _Ev()
+    call.player = type("P", (), {"active": False})()
+    call.turns = type("T", (), {"in_speech": False})()
+    call.agent = type("A", (), {"ph": Phrases(), "_say": staticmethod(say)})()
+    call._stopped, call._forced_reason, call._agent_task = False, None, None
+    call._send_event, call.close_transport = send_event, close_transport
+    call.inactivity_s, call.max_call_s = 0.6, 2.5
+    import time
+    call._last_activity = time.monotonic()
+    await asyncio.wait_for(call._watch_limits(), 5)
+    en = Phrases()
+    assert said[0] == en.STILL_THERE["ar"] and said[-1] == en.CALL_TIME_LIMIT["ar"]
+    assert said.count(en.STILL_THERE["ar"]) == 1                   # once per silence, not every half second
+    assert sent == [{"event": "hangup"}] and closed == [True] and call._forced_reason == "max_duration"

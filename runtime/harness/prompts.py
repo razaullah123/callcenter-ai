@@ -83,6 +83,10 @@ SLOW_TOOL_FILLER = {
                              "en": "I'm sending a verification code to your WhatsApp now, it can take a few seconds."},
 }
 STILL_WORKING = {"ar": "ثواني بس، قربنا.", "en": "Just a few more seconds."}
+# The caller has been silent for the agent's inactivity timeout / the call reached its maximum length.
+STILL_THERE = {"ar": "معي على الخط؟", "en": "Are you still there?"}
+CALL_TIME_LIMIT = {"ar": "نعتذر، وصلنا للحد الأقصى لمدة المكالمة. شكراً لاتصالك.",
+                   "en": "We've reached the maximum length for this call. Thank you for calling."}
 
 FILLER = {
     "ar": ["لحظة أشيك لك.", "ثواني بس.", "خلني أتأكد لك."],
@@ -136,7 +140,8 @@ NOT_REGISTERED = {
 PHRASE_NAMES = ("GREETING", "PERSONA", "READBACK_REASK", "READBACK_UNCLEAR_NOTE", "REPLY_IN_ENGLISH", "AUTH_STEPS",
                 "GREETING_NOTE", "RED_FLAG_NOTE", "SLOW_TOOL_FILLER", "STILL_WORKING", "FILLER", "FALLBACK",
                 "OTP_CODE_QUESTION", "BOOKED_LINE", "IDENTITY_CONFIRMED_NOTE", "IDENTITY_QUESTION", "IDENTITY_STEP",
-                "TRANSLITERATE", "NOT_THE_PATIENT", "HANDOFF_SHORT", "HANDOFF", "NOT_REGISTERED")
+                "TRANSLITERATE", "NOT_THE_PATIENT", "HANDOFF_SHORT", "HANDOFF", "NOT_REGISTERED", "STILL_THERE",
+                "CALL_TIME_LIMIT")
 
 
 class Phrases:

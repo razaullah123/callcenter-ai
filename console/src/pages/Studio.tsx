@@ -5,6 +5,7 @@ import { api, type AgentDetail, type Bundle, type FlowGraph } from "../api";
 import SchemaForm from "../SchemaForm";
 import FlowCanvas from "../studio/FlowCanvas";
 import TestPanel, { Icon, ICONS, loadFollow, saveFollow, type LiveEvent } from "../studio/TestPanel";
+import GlobalSettings, { KNOB_LABELS } from "../studio/GlobalSettings";
 import TestsTab, { AuditCard, gateBadge, PublishDialog } from "../studio/TestsTab";
 import { useTestCall, type TestMode } from "../studio/useTestCall";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
@@ -128,10 +129,10 @@ export default function Studio() {
   );
 }
 
-function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLogs, onOpenSettings, onInspect }: {
+function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLogs, onInspect }: {
   d: AgentDetail; onSaved: () => void; onDirty: (dirty: boolean) => void; active: string | null; follow: boolean;
   locate: { step: string; n: number } | null; aside: React.ReactNode; onViewLogs: (node: string) => void;
-  onOpenSettings: () => void; onInspect: () => void;
+  onOpenSettings?: () => void; onInspect: () => void;
 }) {
   const lib = useQuery({ queryKey: ["tool-library"], queryFn: api.toolLibrary });
   const toolInfo = Object.fromEntries((lib.data?.tools ?? []).map(t => [t.name, {
@@ -163,51 +164,7 @@ function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLog
         skills={Object.keys(d.skills).filter(k => k !== "_persona")} saving={save.isPending} onSave={g => save.mutate(g)}
         onDirty={onDirty} aside={aside} activeNode={activeSkill === skill ? activeNode : null} follow={follow} locate={locateHere}
         toolInfo={toolInfo} onViewLogs={onViewLogs} onInspect={onInspect}
-        globalPanel={<GlobalPanel d={d} skill={skill} onSaved={onSaved} onOpenSettings={onOpenSettings} />} />}
-    </div>
-  );
-}
-
-function GlobalPanel({ d, skill, onSaved, onOpenSettings }: {
-  d: AgentDetail; skill: string; onSaved: () => void; onOpenSettings: () => void;
-}) {
-  // Rules for the whole call: the agent's persona (every skill) and this skill's own text (every step of its flow)
-  const persona = d.skills._persona?.files["SKILL.md"] ?? "";
-  const flowText = d.skills[skill]?.files["SKILL.md"] ?? "";
-  const [p, setP] = useState(persona);
-  const [f, setF] = useState(flowText);
-  const save = useMutation({
-    mutationFn: async () => {
-      if (p !== persona) await api.putDraftSkill(d.agent.id, "_persona", { files: { "SKILL.md": p }, note: "persona (global settings)" });
-      if (f !== flowText) await api.putDraftSkill(d.agent.id, skill, { files: { ...d.skills[skill].files, "SKILL.md": f }, note: "skill prompt (global settings)" });
-    },
-    onSuccess: onSaved,
-  });
-  const llm = d.bundle.models.llm?.settings ?? {}, tts = d.bundle.models.tts?.settings ?? {}, stt = d.bundle.models.stt?.settings ?? {};
-  const k = d.bundle.knobs;
-  return (
-    <div className="h-full space-y-4 overflow-y-auto p-3">
-      <div className="text-sm font-semibold">Global settings</div>
-      <label className="block"><div className="mb-1 text-xs font-medium">System prompt · persona <span className="font-normal text-muted">(the whole agent)</span></div>
-        <textarea id="global-persona" rows={9} dir="auto" className="w-full font-mono text-[11px]" value={p} onChange={e => setP(e.target.value)} />
-        <div className="text-[11px] text-muted">How the agent speaks: tone, language rules, what it never does. Sections ## ar / ## en per language.</div></label>
-      <label className="block"><div className="mb-1 text-xs font-medium">Flow prompt · {skill} <span className="font-normal text-muted">(every step of this flow)</span></div>
-        <textarea id="global-flow" rows={7} dir="auto" className="w-full font-mono text-[11px]" value={f} onChange={e => setF(e.target.value)} />
-        <div className="text-[11px] text-muted">Shared rules for every node, so they aren't repeated in each node's prompt.</div></label>
-      <ErrorBox error={save.error} />
-      <Button kind="primary" onClick={() => save.mutate()} disabled={(p === persona && f === flowText) || save.isPending}>
-        {save.isPending ? "Saving…" : "Save to draft"}</Button>
-      <div className="space-y-1 rounded-lg border border-line p-2 text-[11px]">
-        {[["Language model", String(llm.model ?? d.bundle.models.llm?.provider ?? "—")],
-          ["Speech-to-text", String(stt.model ?? "—")],
-          ["Voice", `${tts.voice_ar ?? "—"} (ar) · ${tts.voice_en ?? "—"} (en)`],
-          ["Languages", (d.bundle.agent?.languages ?? []).join(", ")],
-          ["Caller verification", k.require_verification === false ? "off" : "on"],
-          ["Interruptions (barge-in)", k.voice_barge_in_confirm === false ? "immediate" : "confirmed by words"],
-          ["Red-flag symptoms", String(k.red_flag_mode ?? "—")]].map(([a, b]) => (
-          <div key={a} className="flex justify-between gap-2"><span className="text-muted">{a}</span><span className="text-right">{b}</span></div>))}
-        <Button kind="ghost" onClick={onOpenSettings}>Models, voice and behaviour →</Button>
-      </div>
+        globalPanel={<GlobalSettings key={`${skill}:${JSON.stringify(d.bundle).length}`} d={d} skill={skill} onSaved={onSaved} />} />}
     </div>
   );
 }
@@ -303,7 +260,7 @@ function SettingsTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
       <Card title="Behaviour">
         <div className="grid gap-3 sm:grid-cols-2">
           {Object.entries(d.choices.knobs).map(([k, t]) => (
-            <label key={k} className="block"><div className="mb-1 text-xs font-medium">{k}</div>
+            <label key={k} className="block" title={k}><div className="mb-1 text-xs font-medium">{KNOB_LABELS[k]?.[0] ?? k}</div>
               {t === "bool" ? (
                 <select id={`knob-${k}`} className="w-full" value={String(b.knobs[k] ?? "")} onChange={e => setKnob(k, e.target.value === "true")}>
                   <option value="true">true</option><option value="false">false</option></select>

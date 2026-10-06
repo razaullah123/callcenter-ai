@@ -32,6 +32,7 @@ CONNECTION_FIELDS = {"api_key", "base_url", "url", "headers", "timeout_s", "toke
 KNOBS: dict[str, type] = {
     "red_flag_mode": str, "voice_end_silence_ms": int, "voice_barge_in_ms": int, "voice_barge_in_confirm": bool,
     "voice_level_gate_db": float, "voice_filler_after_s": float, "llm_hedge_after_s": float,
+    "voice_interrupt": bool, "voice_vad_threshold": float, "voice_inactivity_s": float, "call_max_minutes": float,
     "ivr_barge_in_grace_ms": int, "ivr_chunk_ms": int, "ivr_transfer_destination": str,
     "require_verification": bool, "entry_skill": str, "main_flow": str,
 }
