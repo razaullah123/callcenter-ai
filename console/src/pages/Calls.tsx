@@ -215,7 +215,7 @@ export default function Calls() {
 
   const cell = "px-4 py-3";
   return (
-    <div className="mx-auto max-w-6xl space-y-5 pb-10">
+    <div className={cx("mx-auto max-w-6xl space-y-5 pb-10", openId && "md:mr-[22.5rem] md:max-w-none")}>      {/* the open call docks on the right: the list makes room */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Call History</h1>
         <p className="mt-1 text-sm text-muted">Every call and chat of this project: what was said, how it ended and how fast the agent answered.</p>

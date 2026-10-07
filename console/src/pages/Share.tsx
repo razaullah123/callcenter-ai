@@ -200,6 +200,9 @@ export default function Share() {
             <div>
               <div className="mb-1 flex items-center justify-between text-xs font-medium">Snippet {snippet && <CopyButton text={snippet} label="Copy snippet" />}</div>
               <pre className="overflow-x-auto rounded-lg border border-line bg-soft p-3 text-[11px]">{snippet || "Publish the link to get the snippet."}</pre>
+              <p className="mt-1.5 text-[11px] text-muted">Does your agent use <b>web tools</b> (Tools → Web Tool)? Your site registers the functions with
+                <span className="font-mono"> VoiceAgent.registerTools({"{ tool_name: async (args) => … }"})</span> — they only work through this widget, never on phone calls.
+                See <span className="font-mono">docs/web_tools.md</span>.</p>
               <p className="mt-1 text-[11px] text-muted">Paste it before &lt;/body&gt;. To open the agent from your own button, give it the attribute <code>data-agent-trigger</code>.
                 Options can also be set on the tag: <code>data-position</code>, <code>data-size</code>, <code>data-color</code>, <code>data-label</code>, <code>data-auto-start</code>, <code>data-launcher</code>.</p>
             </div>

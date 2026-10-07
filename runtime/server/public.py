@@ -118,6 +118,7 @@ async def public_call(ws: WebSocket, token: str) -> None:
 
     call: VoiceCall | None = None
     handle: int | None = None
+    starter: asyncio.Task | None = None
     try:
         try:
             first = json.loads(await asyncio.wait_for(ws.receive_text(), 15))
@@ -147,6 +148,9 @@ async def public_call(ws: WebSocket, token: str) -> None:
             return await refuse(str(e))
         cap = settings.limits.max_minutes * 60                    # a visitor's call never outlasts the link's limit
         call.max_call_s = min(call.max_call_s, cap) if call.max_call_s else cap
+        from runtime.tools.web import clean_names
+        if names := clean_names(first.get("web_tools")):       # tools the embedding page registered (the dashboard defines them)
+            call.attach_web_tools(names)
         handle = LIMITER.join(token, call)
         rt.calls[call_id] = call
 
@@ -158,12 +162,26 @@ async def public_call(ws: WebSocket, token: str) -> None:
         call.close_transport = close_transport
         rt.bus.bind(call_id=call_id).emit(EventType.SLOT_SET, field="public_page", agent=row["agent_id"])
         await send_event({"event": "ready", "call_id": call_id})
-        await call.start()
+        # The opening turn may already call a web tool, whose answer arrives on this socket: keep reading while the call starts.
+        # The visitor's audio waits until the opening is done (as it did before), at most ~4 s of it.
+        starter = asyncio.create_task(call.start(), name=f"start-{call_id}")
+        held: list[bytes] = []
         while True:
             msg = json.loads(await ws.receive_text())
             kind = msg.get("event")
             if kind == "media":
-                await call.on_audio(base64.b64decode(msg["payload"]))
+                data = base64.b64decode(msg["payload"])
+                if not starter.done():
+                    if len(held) < 200:
+                        held.append(data)
+                    continue
+                if starter.exception():
+                    raise starter.exception()
+                while held:
+                    await call.on_audio(held.pop(0))
+                await call.on_audio(data)
+            elif kind == "web_tool_result" and call.web_bridge is not None:
+                call.web_bridge.resolve(msg.get("id"), msg.get("result"), msg.get("error"))
             elif kind == "stop":
                 break
     except WebSocketDisconnect:
@@ -171,6 +189,8 @@ async def public_call(ws: WebSocket, token: str) -> None:
     except Exception as e:                                        # noqa: BLE001
         log.exception("public call failed: %r", e)
     finally:
+        if starter is not None and not starter.done():
+            starter.cancel()
         if handle is not None:
             LIMITER.leave(token, handle)
         if call:

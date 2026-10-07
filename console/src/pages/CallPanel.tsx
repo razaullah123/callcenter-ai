@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type CallAnalysis, type CallDetail, type EventRow } from "../api";
 import { ErrorBox, cx, fmtMs } from "../ui";
@@ -49,8 +49,8 @@ const show = (v: unknown) => (v == null ? "—" : typeof v === "object" ? JSON.s
 
 function Tile({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-line p-3">
-      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-soft text-muted">{icon}</span>
+    <div className="flex items-start gap-2.5">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-accent/10 text-accent">{icon}</span>
       <div className="min-w-0">
         <div className="text-xs text-muted">{label}</div>
         <div className="mt-0.5 break-words text-sm font-medium">{children}</div>
@@ -68,7 +68,7 @@ function Overview({ d, agentName }: { d: CallDetail; agentName: string }) {
   const tools = turns.flatMap(t => t.tools).filter(t => !t.cached);
   return (
     <div className="space-y-6">
-      <div className="grid gap-2.5 sm:grid-cols-2">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-4">
         <Tile icon={T.bot} label="Agent">{agentName}{a?.version ? <span className="ml-1 text-xs font-normal text-muted">v{a.version}</span> : null}</Tile>
         <Tile icon={T.user} label="User Number"><span className="font-mono">{c.mobile ?? "—"}</span></Tile>
         <Tile icon={T.radio} label="Channel"><ChannelBadge channel={c.channel} />{c.extension_call ? <span className="ml-1 text-xs text-muted">extension</span> : null}</Tile>
@@ -84,7 +84,7 @@ function Overview({ d, agentName }: { d: CallDetail; agentName: string }) {
       </div>
       <section>
         <h3 className="mb-2.5 font-semibold">Performance Metrics</h3>
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2.5">
           {([["ASR Processing", stt], ["LLM Response", llm], ["TTS Generation", tts], ["Total Processing", total]] as const).map(([k, v]) => (
             <div key={k} className="rounded-lg border border-line p-3">
               <div className="text-xs text-muted">{k}</div>
@@ -144,6 +144,77 @@ function Conversation({ d }: { d: CallDetail }) {
   );
 }
 
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+/** The call's recording, shaped like Hamsa's "Play Recording" bar: play, time, progress, volume and a ⋮ menu (download, delete).
+ *  The audio is fetched when play is pressed (each play is logged in the agent's audit log), not when the panel opens. */
+function Recording({ d }: { d: CallDetail }) {
+  const qc = useQueryClient();
+  const r = d.recording;
+  const id = d.call.call_id;
+  const audio = useRef<HTMLAudioElement | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [pos, setPos] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const total = r?.duration_s ?? 0;
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  const load = useMutation({ mutationFn: () => api.recordingAudio(id), onSuccess: b => setUrl(URL.createObjectURL(b)) });
+  const save = useMutation({ mutationFn: () => api.recordingAudio(id, true), onSuccess: b => {
+    const u = URL.createObjectURL(b), a = document.createElement("a");
+    a.href = u; a.download = `call-${id}.wav`; a.click(); setTimeout(() => URL.revokeObjectURL(u), 1000);
+  } });
+  const del = useMutation({ mutationFn: () => api.deleteRecording(id), onSuccess: () => { setUrl(null); setPlaying(false); qc.invalidateQueries({ queryKey: ["call", id] }); } });
+  if (!r) return null;
+  const left = r.expires_at ? Math.max(0, Math.ceil((new Date(r.expires_at).getTime() - Date.now()) / 86400000)) : null;
+  const toggle = () => {
+    if (!url) { load.mutate(); return; }
+    const a = audio.current;
+    if (a) { if (a.paused) void a.play(); else a.pause(); }
+  };
+  return (
+    <section>
+      <h3 className="mb-3 text-base font-semibold">Play Recording</h3>
+      {r.status !== "ok" ? (
+        <p className="rounded-xl bg-soft/60 p-3 text-sm text-muted">
+          {r.status === "expired" ? "The recording was deleted when its retention period ended." : r.status === "deleted" ? "The recording was deleted."
+            : `The recording could not be saved${r.error ? ` (${r.error})` : ""}.`}</p>
+      ) : (
+        <div className="relative">
+          <div className="flex items-center gap-2.5 rounded-xl bg-soft/70 px-3 py-2">
+            <button id="recording-play" onClick={toggle} disabled={load.isPending} aria-label={playing ? "Pause" : "Play recording"}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent/15 text-accent hover:bg-accent/25 disabled:opacity-50">
+              {load.isPending ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                : playing ? <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="5" height="16" rx="1" /><rect x="14" y="4" width="5" height="16" rx="1" /></svg>
+                : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.8l-12-7.5A1 1 0 0 0 7 4.5z" /></svg>}
+            </button>
+            <span className="shrink-0 text-xs tabular-nums text-muted">{clock(pos)} / {clock(total)}</span>
+            <input type="range" aria-label="Seek" min={0} max={total || 1} step={0.1} value={Math.min(pos, total || 1)} disabled={!url}
+              onChange={e => { const t = Number(e.target.value); setPos(t); if (audio.current) audio.current.currentTime = t; }}
+              className="min-w-0 flex-1 accent-[var(--color-accent)]" />
+            <button onClick={() => setMuted(m => !m)} aria-label={muted ? "Unmute" : "Mute"} className="shrink-0 text-muted hover:text-ink">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 5 6 9H3v6h3l5 4V5z" />{muted ? <path d="m16 9 5 6m0-6-5 6" /> : <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />}</svg></button>
+            <button onClick={() => setMenu(m => !m)} aria-label="More" aria-expanded={menu} className="shrink-0 px-1 text-lg leading-none text-muted hover:text-ink">⋮</button>
+          </div>
+          {url && <audio ref={audio} src={url} muted={muted} autoPlay className="hidden"
+            onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => { setPlaying(false); setPos(0); }}
+            onTimeUpdate={e => setPos(e.currentTarget.currentTime)} />}
+          {menu && (
+            <div className="absolute right-0 z-10 mt-1 w-56 rounded-lg border border-line bg-panel p-1 text-sm shadow-lg">
+              <button className="block w-full rounded px-3 py-1.5 text-left hover:bg-soft" disabled={save.isPending} onClick={() => { setMenu(false); save.mutate(); }}>Download</button>
+              <button className="block w-full rounded px-3 py-1.5 text-left text-bad hover:bg-bad/10" disabled={del.isPending}
+                onClick={() => { setMenu(false); if (window.confirm("Delete this recording now? This can't be undone.")) del.mutate(); }}>Delete recording</button>
+              {left != null && <div className="px-3 py-1.5 text-[11px] text-muted">Deleted automatically in {left} day{left === 1 ? "" : "s"}</div>}
+            </div>)}
+          <div className="mt-2"><ErrorBox error={load.error ?? save.error ?? del.error} /></div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 const SENTIMENT_TONE = { positive: "bg-amber-500/15 text-amber-700 dark:text-amber-300", neutral: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
   negative: "bg-soft text-muted" } as const;
 
@@ -183,7 +254,7 @@ function Analysis({ d }: { d: CallDetail }) {
               {a.nps != null && <span className="rounded-full bg-soft px-2.5 py-0.5">NPS <b>{a.nps}</b> / 10</span>}
               {a.resolved != null && <span className="rounded-full bg-soft px-2.5 py-0.5">{a.resolved ? "Resolved by the agent" : "Not resolved"}</span>}
             </div>
-            {fields.length > 0 && <div className="grid gap-2.5 sm:grid-cols-2">{fields.map(([k, v]) => (
+            {fields.length > 0 && <div className="grid gap-2.5 ">{fields.map(([k, v]) => (
               <div key={k} className="group rounded-lg border border-line p-3"><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted">{humanize(k)}</span>
                 <span className="opacity-0 group-hover:opacity-100"><CopyButton text={v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)} label={`Copy ${humanize(k)}`} /></span></div>
                 <div dir="auto" className="mt-0.5 break-words text-sm font-medium">{v == null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</div></div>))}</div>}
@@ -231,11 +302,11 @@ function Outcome({ d }: { d: CallDetail }) {
       <Analysis d={d} />
       <section>
         <h3 className="mb-2.5 font-semibold">Outcome Details</h3>
-        <div className="grid gap-2.5 sm:grid-cols-2">{facts.map(([k, v]) => <Card key={k} k={k} v={v} />)}</div>
+        <div className="grid gap-2.5 ">{facts.map(([k, v]) => <Card key={k} k={k} v={v} />)}</div>
       </section>
       <section>
         <h3 className="mb-2.5 font-semibold">Collected during the call</h3>
-        {collected.length ? <div className="grid gap-2.5 sm:grid-cols-2">{collected.map(([k, v]) => <Card key={k} k={humanize(k)} v={v} />)}</div>
+        {collected.length ? <div className="grid gap-2.5 ">{collected.map(([k, v]) => <Card key={k} k={humanize(k)} v={v} />)}</div>
           : <p className="text-sm text-muted">The agent collected no variables on this call.</p>}
         <p className="mt-2 text-xs text-muted">Values as logged (personal data is masked in logs).</p>
       </section>
@@ -275,13 +346,12 @@ export default function CallPanel({ id, onClose, agentName }: { id: string; onCl
   const name = d?.agent?.name ?? agentName(d?.call.agent_id);
   return (
     <aside role="dialog" aria-label="Call information"
-      className="fixed top-0 right-0 z-40 flex h-full w-full max-w-[44rem] flex-col border-l border-line bg-panel shadow-2xl xl:w-[45vw]"
-      style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}>
+      className="fixed top-14 right-0 bottom-0 z-30 flex w-full flex-col border-l border-line bg-panel shadow-2xl md:w-[22rem] md:shadow-none">
       <header className="flex items-start gap-3 border-b border-line px-5 py-4">
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-lg font-semibold">Call Information{d ? ` - ${name}` : ""}</h2>
+          <h2 className="truncate text-base font-semibold">Call Information{d ? ` - ${name}` : ""}</h2>
           <div className="mt-0.5 flex items-center gap-1 text-xs text-muted">
-            <span>Call ID</span><span className="truncate font-mono text-ink">{id}</span><CopyButton text={id} label="Copy call ID" />
+            <span className="shrink-0 whitespace-nowrap">Call ID:</span><span className="truncate text-ink">{id}</span><CopyButton text={id} label="Copy call ID" />
           </div>
         </div>
         {d?.call.agent_id && (
@@ -289,6 +359,7 @@ export default function CallPanel({ id, onClose, agentName }: { id: string; onCl
         )}
         <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-muted hover:bg-soft hover:text-ink">{T.x}</button>
       </header>
+      {d?.recording && <div className="border-b border-line px-5 py-4"><Recording d={d} /></div>}
       <nav className="grid grid-cols-4 border-b border-line px-5" role="tablist">
         {TABS.map(([k, label]) => (
           <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
@@ -304,7 +375,7 @@ export default function CallPanel({ id, onClose, agentName }: { id: string; onCl
           : <Timeline events={d.events} />}
       </div>
       <footer className="border-t border-line px-5 py-2 text-[11px] text-muted">
-        <span className="inline-flex items-center gap-1">{T.tag}No recording — call audio isn't stored; the transcript and logs are.</span>
+        <span className="inline-flex items-center gap-1">{T.tag}{d?.recording ? "Recordings are stored encrypted; every play is logged." : "This call was not recorded — the transcript and logs are kept."}</span>
       </footer>
     </aside>
   );

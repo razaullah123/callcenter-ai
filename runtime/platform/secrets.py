@@ -44,6 +44,19 @@ class Cipher:
             raise SecretsUnavailable("MASTER_KEY is not set — secrets can't be stored (see .env.example)")
         return self._f.encrypt(value.encode()).decode()
 
+    def encrypt_bytes(self, data: bytes) -> bytes:
+        if self._f is None:
+            raise SecretsUnavailable("MASTER_KEY is not set — nothing can be encrypted")
+        return self._f.encrypt(data)
+
+    def decrypt_bytes(self, token: bytes) -> bytes:
+        if self._f is None:
+            raise SecretsUnavailable("MASTER_KEY is not set — stored data can't be read")
+        try:
+            return self._f.decrypt(token)
+        except InvalidToken:
+            raise SecretsUnavailable("a stored file can't be decrypted — MASTER_KEY changed?") from None
+
     def decrypt(self, token: str) -> str:
         if self._f is None:
             raise SecretsUnavailable("MASTER_KEY is not set — stored secrets can't be read")

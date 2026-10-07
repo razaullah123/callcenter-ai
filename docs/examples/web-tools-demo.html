@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  A site that lets the voice agent act on its page ("web tools").
+
+  1. In the console: Tools → Add New Tool → Web Tool. Name it exactly like a function below (navigate_to_page, show_message),
+     describe when the agent should use it, and define its parameters. Give the agent the tool (its collection / a flow's tool node).
+  2. Share → publish the link; paste the link's token below and open this page from a site that is allowed to embed it.
+  3. Talk to the agent: "show me the pricing page" → the agent calls navigate_to_page and your function runs in THIS page.
+
+  Web tools work on web calls only (embed widget / public link), never on phone calls. Replace YOUR_HOST and YOUR_SHARE_TOKEN.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Web tools demo</title></head>
+<body>
+  <h1>Web tools demo</h1>
+  <p id="status">Waiting for the agent…</p>
+  <ul id="cart"><li>Blue shirt — 120</li><li>Black shoes — 340</li></ul>
+
+  <script src="https://YOUR_HOST/embed.js" data-token="YOUR_SHARE_TOKEN" async></script>
+  <script>
+    // Each function gets ONE object with the arguments the agent chose (named like the tool's parameters) and may answer with a
+    // string or a JSON object (up to 20,000 characters) — that is what the agent sees as the tool's result. Throwing = failure.
+    VoiceAgent.registerTools({
+      navigate_to_page: async function (args) {
+        if (!/^\/[a-z0-9\-\/]*$/i.test(args.path)) throw new Error("not a page of this site");   // never trust the arguments blindly
+        document.getElementById("status").textContent = "Agent opened " + args.path;
+        return { opened: args.path };
+      },
+      show_message: function (args) {
+        document.getElementById("status").textContent = String(args.text).slice(0, 200);
+        return "shown";
+      },
+      get_cart_total: function () {
+        const total = [...document.querySelectorAll("#cart li")].reduce((n, li) => n + Number(li.textContent.split("—")[1]), 0);
+        return { total };                                    // the agent can read this: "your cart is 460"
+      },
+    });
+  </script>
+</body>
+</html>

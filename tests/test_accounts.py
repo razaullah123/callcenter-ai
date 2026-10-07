@@ -67,11 +67,11 @@ def test_invite_accept_and_invited_projects(client):
     assert c.post(f"/api/invitations/{token}/accept", json={"password": "sara-pass-1"}).status_code == 410
     mine = c.get("/api/projects", headers=_h(sara)).json()
     assert [(p["id"], p["role"], p["mine"], p["owner"]) for p in mine] == [("hmg", "admin", False, "Raza")]
-    # a project Sara creates is hers, and Raza doesn't see it
+    # a project Sara creates is hers; Raza, the platform owner, sees it too (but it is not "his")
     c.post("/api/projects", json={"name": "Sara Lab", "copy_setup": False}, headers=_h(sara))
     assert {p["id"]: p["mine"] for p in c.get("/api/projects", headers=_h(sara)).json()} == {"hmg": False, "sara-lab": True}
-    assert [p["id"] for p in c.get("/api/projects", headers=_h(owner)).json()] == ["hmg"]
-    assert c.get("/api/agents", headers=_h(owner, "sara-lab")).status_code == 404
+    assert {p["id"]: (p["mine"], p["access"]) for p in c.get("/api/projects", headers=_h(owner)).json()} == {"hmg": (True, "member"), "sara-lab": (False, "platform")}
+    assert c.get("/api/agents", headers=_h(owner, "sara-lab")).status_code == 200
     # her own label for HMG; only the owner renames the project for everyone
     c.put("/api/projects/hmg/label", json={"label": "Hospital"}, headers=_h(sara))
     assert next(p for p in c.get("/api/projects", headers=_h(sara)).json() if p["id"] == "hmg")["label"] == "Hospital"
@@ -130,3 +130,33 @@ def test_passwords_are_hashed():
     from runtime.control.accounts import check_password, hash_password
     h = hash_password("correct horse")
     assert "correct horse" not in h and check_password("correct horse", h) and not check_password("wrong", h)
+
+
+def test_the_platform_owner_sees_every_project_and_others_do_not(client):
+    c, rt, store, loop = client
+    owner = _setup(c)                                                        # owner of the default project = platform owner
+    link = c.post("/api/projects/hmg/invitations", json={"email": "sara@example.com"}, headers=_h(owner)).json()["link"]
+    sara = c.post(f"/api/invitations/{link.rsplit('/', 1)[1]}/accept", json={"name": "Sara", "password": "sara-pass-1"}).json()["token"]
+    c.post("/api/projects", json={"name": "Sara Lab", "copy_setup": False}, headers=_h(sara))
+    c.post("/api/projects", json={"name": "Clinic", "copy_setup": False}, headers=_h(owner))
+    assert c.get("/api/me", headers=_h(owner)).json()["platform_owner"] is True
+    assert c.get("/api/me", headers=_h(sara)).json()["platform_owner"] is False
+    assert {p["id"] for p in c.get("/api/projects", headers=_h(owner)).json()} == {"hmg", "sara-lab", "clinic"}
+    assert {p["id"] for p in c.get("/api/projects", headers=_h(sara)).json()} == {"hmg", "sara-lab"}      # Sara never sees "clinic"
+    assert c.get("/api/agents", headers=_h(sara, "clinic")).status_code == 404
+    assert c.get("/api/projects/sara-lab/members", headers=_h(owner)).json()["can_manage"] is True       # manages it as the owner
+    assert c.put("/api/projects/sara-lab", json={"name": "Sara's lab"}, headers=_h(owner)).status_code == 200
+    assert c.get("/api/projects/clinic/members", headers=_h(sara)).status_code == 404
+
+
+def test_platform_owner_emails_override_the_default(client):
+    c, rt, store, loop = client
+    owner = _setup(c)
+    link = c.post("/api/projects/hmg/invitations", json={"email": "sara@example.com"}, headers=_h(owner)).json()["link"]
+    sara = c.post(f"/api/invitations/{link.rsplit('/', 1)[1]}/accept", json={"name": "Sara", "password": "sara-pass-1"}).json()["token"]
+    c.post("/api/projects", json={"name": "Sara Lab", "copy_setup": False}, headers=_h(sara))
+    rt.settings = rt.settings.model_copy(update={"platform_owner_emails": " SARA@example.com , other@example.com"})
+    assert c.get("/api/me", headers=_h(sara)).json()["platform_owner"] is True
+    assert c.get("/api/me", headers=_h(owner)).json()["platform_owner"] is False                          # named list: only those
+    assert {p["id"] for p in c.get("/api/projects", headers=_h(sara)).json()} == {"hmg", "sara-lab"}
+    assert {p["id"] for p in c.get("/api/projects", headers=_h(owner)).json()} == {"hmg"}

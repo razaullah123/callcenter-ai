@@ -15,9 +15,11 @@ import { Badge, Button, Empty, ErrorBox, cx } from "../ui";
 
 const kindTone = (k: string) => (k === "write" ? "warn" : k === "send" ? "info" : "neutral") as "warn" | "info" | "neutral";
 const json = (v: unknown) => (v == null ? "" : JSON.stringify(v, null, 2));
-const SOURCE: Record<string, string> = { http: "API Request", mcp: "MCP Server", local: "Built-in" };
+const SOURCE: Record<string, string> = { http: "API Request", mcp: "MCP Server", local: "Built-in", web: "Web Tool" };
 const NEW_HTTP: ToolPolicy = { kind: "read", source: "http", description: "", input_schema: { type: "object", properties: {}, required: [] },
                                http: { method: "POST", url: "", headers: { "Content-Type": "application/json" } } };
+/** A web tool runs in the visitor's browser: no URL or authentication, only what the agent may call it with. */
+const NEW_WEB: ToolPolicy = { kind: "read", source: "web", description: "", input_schema: { type: "object", properties: {}, required: [] }, timeout_s: 10 };
 const NAME_MAX = 64, DESC_MAX = 1000;
 
 const tico = (d: ReactNode, cls = "h-4 w-4") => (
@@ -60,7 +62,7 @@ const AUTH_HELP: Record<string, string> = {
   api_key: "Sends the key in a header of your choice (e.g. X-API-Key).",
 };
 const AUTH_LABEL: Record<string, string> = { none: "No Authentication", bearer: "Bearer Token", token: "Token", basic: "Basic Authentication", api_key: "API Key" };
-const icon = (source: string) => (source === "http" ? TI.code : source === "mcp" ? TI.bolt : TI.cube);
+const icon = (source: string) => (source === "http" ? TI.code : source === "mcp" ? TI.bolt : source === "web" ? TI.globe : TI.cube);
 const label = (cls = "") => cx("mb-1 block text-sm font-medium", cls);
 
 // ---------------------------------------------------------------- JSON schema helpers
@@ -201,7 +203,7 @@ function Dialog({ title, sub, onClose, children, footer, wide }: {
   );
 }
 
-function AddMenu({ onApi, onMcp }: { onApi: () => void; onMcp: () => void }) {
+function AddMenu({ onApi, onMcp, onWeb }: { onApi: () => void; onMcp: () => void; onWeb: () => void }) {
   const { open, setOpen, ref } = usePopover();
   const item = (ic: ReactNode, title: string, sub: string, onClick?: () => void) => (
     <button disabled={!onClick} onClick={() => { setOpen(false); onClick?.(); }} title={onClick ? undefined : sub}
@@ -220,7 +222,7 @@ function AddMenu({ onApi, onMcp }: { onApi: () => void; onMcp: () => void }) {
         <div className="absolute right-0 z-30 mt-1 w-64 rounded-lg border border-line bg-panel p-1 shadow-lg">
           {item(TI.code, "API Request", "Call an HTTP endpoint", onApi)}
           {item(TI.bolt, "MCP Server", "Connect a server; add its tools", onMcp)}
-          {item(TI.globe, "Web Tool", "Runs in the caller's browser or app — needs our web SDK, not built yet")}
+          {item(TI.globe, "Web Tool", "Runs in the visitor's browser — your website registers the function", onWeb)}
         </div>
       )}
     </div>
@@ -266,7 +268,7 @@ function DraftCard({ d, active, onClick }: { d: Draft; active: boolean; onClick:
           <div className={cx("truncate text-sm", d.name ? "font-medium" : "italic text-muted")}>{d.name || "Enter tool name…"}</div>
           <div className={cx("line-clamp-2 text-xs", !d.policy.description && "italic", "text-muted")}>{d.policy.description || "Enter tool description…"}</div>
           <div className="mt-1.5 flex gap-1">
-            <span className="rounded border border-line bg-soft px-1.5 py-0.5 text-[10px]">API Request</span>
+            <span className="rounded border border-line bg-soft px-1.5 py-0.5 text-[10px]">{SOURCE[d.policy.source ?? "http"]}</span>
             <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] text-warn">Draft</span>
           </div>
         </div>
@@ -294,6 +296,28 @@ function authOf(p: ToolPolicy) {
 }
 
 // ---------------------------------------------------------------- test dialog
+
+/** How the website that embeds the agent supplies the function (the dashboard only defines the tool). */
+function WebRegistration({ name, props }: { name: string; props: string[] }) {
+  const args = props.length ? `{ ${props.join(", ")} }` : "args";
+  const code = `<script src="${window.location.origin}/embed.js" data-token="YOUR_SHARE_TOKEN"></script>
+<script>
+  VoiceAgent.registerTools({
+    ${name}: async function (${args}) {
+      // do the work in the page, then tell the agent what happened
+      return { ok: true };   // a string or a JSON object goes back to the agent
+    }
+  });
+</script>`;
+  return (
+    <Section icon={TI.globe} title="Register it on your website" actions={<CopyButton text={code} label="Copy snippet" />}>
+      <p className="mb-2 text-sm text-muted">The agent can call this tool only on a web call whose page registered a function with this exact name. The page gets the arguments the agent
+        chose as one object, and may answer with text or JSON (up to 20,000 characters, within the timeout). On a phone call, or if the page didn't register it, the agent never
+        sees the tool and a flow's tool node takes its failure path. Use the embed widget from the Share page — <span className="font-mono">YOUR_SHARE_TOKEN</span> is its token.</p>
+      <pre className="overflow-x-auto rounded-lg bg-soft p-3 font-mono text-[11px] leading-relaxed">{code}</pre>
+    </Section>
+  );
+}
 
 function TestDialog({ t, onClose }: { t: LibraryTool; onClose: () => void }) {
   const p = t.policy;
@@ -637,8 +661,9 @@ function ToolDetail({ t, lib, startRemoving, onEdit, onChanged }: {
       <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-panel p-5">
         <div><h3 className="font-semibold">Test Tool</h3>
           <p className="text-sm text-muted">Test this tool with sample parameters and review the response
-            {p.kind !== "read" && " — only read tools run here; this one changes or sends something"}</p></div>
-        <Button onClick={() => setTesting(true)}>Open Test Tool</Button>
+            {p.kind !== "read" && " — only read tools run here; this one changes or sends something"}
+            {t.source === "web" && " — a web tool runs in the visitor's browser, so it can't run from here: open your site (or the Share page) and talk to the agent"}</p></div>
+        <Button onClick={() => setTesting(true)} disabled={t.source === "web"} title={t.source === "web" ? "Runs in the visitor's browser" : undefined}>Open Test Tool</Button>
       </section>
       {testing && <TestDialog t={t} onClose={() => setTesting(false)} />}
 
@@ -661,7 +686,8 @@ function ToolDetail({ t, lib, startRemoving, onEdit, onChanged }: {
               <Fact icon={TI.key} label="Authentication"><span className="text-accent-text">{authOf(p)}</span></Fact>
             </> : t.source === "mcp" ? (
               <Fact icon={TI.server} label="MCP server">{t.server ?? "—"} {!t.available && <Badge tone="bad">not connected</Badge>}</Fact>
-            ) : <Fact icon={TI.cube} label="Runs">inside the platform (Python)</Fact>}
+            ) : t.source === "web" ? <Fact icon={TI.globe} label="Runs">in the visitor's browser — web calls only, never on a phone call</Fact>
+              : <Fact icon={TI.cube} label="Runs">inside the platform (Python)</Fact>}
             <Fact icon={TI.clock} label="Timeout"><span className="text-accent-text">{p.timeout_s != null ? `${p.timeout_s} seconds` : "default (10 seconds)"}</span></Fact>
             {p.cache_ttl ? <Fact icon={TI.clock} label="Cache">{p.cache_ttl} seconds</Fact> : null}
           </div>
@@ -681,6 +707,8 @@ function ToolDetail({ t, lib, startRemoving, onEdit, onChanged }: {
           ) : <p className="text-sm text-muted">No headers.</p>}
         </Section>
       )}
+
+      {t.source === "web" && <WebRegistration name={t.name} props={props.map(([k]) => k)} />}
 
       <Section icon={TI.code} title="Parameters" actions={props.length ? <CopyButton text={json(schema)} label="Copy schema" /> : undefined}>
         {props.length ? (
@@ -794,8 +822,8 @@ export default function Tools() {
   const show = (name: string, remove = false) => { setPane({ kind: "tool", name, remove }); setParams({ tool: name }, { replace: true }); };
   const discovered = lib.discovered.filter(d => !filter || `${d.name} ${d.description}`.toLowerCase().includes(filter.toLowerCase()));
   const secrets = secretsQ.data?.secrets ?? [];
-  const newDraft = () => {
-    const d: Draft = { id: `draft-${Date.now()}`, name: "", group: collection || groups[0] || "home", policy: structuredClone(NEW_HTTP) };
+  const newDraft = (source: "http" | "web" = "http") => {
+    const d: Draft = { id: `draft-${Date.now()}`, name: "", group: collection || groups[0] || "home", policy: structuredClone(source === "web" ? NEW_WEB : NEW_HTTP) };
     saveDrafts([d, ...drafts]);
     setPane({ kind: "edit", name: "", group: d.group, policy: d.policy, isNew: true, draft: d.id });
   };
@@ -817,7 +845,7 @@ export default function Tools() {
         </div>
         <select id="tool-status" aria-label="Status" className="!py-2 text-sm" value={status} onChange={e => setStatus(e.target.value as typeof status)}>
           <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
-        <AddMenu onApi={newDraft} onMcp={() => setPane({ kind: "servers", add: true })} />
+        <AddMenu onApi={() => newDraft()} onWeb={() => newDraft("web")} onMcp={() => setPane({ kind: "servers", add: true })} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
@@ -933,6 +961,8 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
   onDraft?: (name: string, group: string, policy: ToolPolicy) => void; onDone: (name: string) => void; onCancel: () => void;
 }) {
   const http = init.policy.source === "http";
+  const web = init.policy.source === "web";
+  const own = http || web;                        // defines its own description and parameter schema
   const [name, setName] = useState(init.name);
   const [group, setGroup] = useState(init.group);
   const [p, setP] = useState<ToolPolicy>(init.policy);
@@ -948,6 +978,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
 
   const build = (): ToolPolicy => {
     const out: ToolPolicy = { ...p };
+    if (own) out.input_schema = schema;
     if (http) {
       out.input_schema = schema;
       out.http = { ...p.http, headers: Object.fromEntries(headers.filter(h => h.k.trim()).map(h => [h.k.trim(), h.v])) };
@@ -964,7 +995,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
       try { policy = { ...policy, args: rawArgs.trim() ? JSON.parse(rawArgs) : undefined }; }
       catch (e) { throw new Error(`Role arguments: invalid JSON (${(e as Error).message})`); }
       if (policy.timeout_s != null && !(policy.timeout_s >= 1 && policy.timeout_s <= 60)) throw new Error("Timeout: 1 to 60 seconds");
-      if (http && schemaProblem(policy.input_schema)) throw new Error(`Parameters: ${schemaProblem(policy.input_schema)}`);
+      if (own && schemaProblem(policy.input_schema)) throw new Error(`Parameters: ${schemaProblem(policy.input_schema)}`);
       policy = await materialize(policy);
       await api.putTool(name, { group, policy, agents });
       return name;
@@ -973,21 +1004,21 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
   });
   const c = lib.choices;
   const confirm = p.confirm ?? (p.kind === "read" ? "none" : "affirm");
-  const count = propCount(http ? schema : serverSchema);
-  const invalid = http ? schemaProblem(schema) : null;
-  const title = init.isNew ? (http ? "Add New API Request" : `Add ${name} to the library`) : "Edit Tool";
-  const canSave = !!name && !!group && (!http || (!!p.description && !!p.http?.url));
+  const count = propCount(own ? schema : serverSchema);
+  const invalid = own ? schemaProblem(schema) : null;
+  const title = init.isNew ? (web ? "Add New Web Tool" : http ? "Add New API Request" : `Add ${name} to the library`) : "Edit Tool";
+  const canSave = !!name && !!group && (!own || !!p.description) && (!http || !!p.http?.url);
   return (
     <section className="space-y-6 rounded-xl border border-line bg-panel p-6">
       <h2 className="text-lg font-semibold">{title}</h2>
 
       <div className="space-y-4">
         <label className="block"><span className={label()}>Tool Name</span>
-          <input id="tool-name" className="w-full font-mono" maxLength={NAME_MAX} value={name} disabled={!init.isNew || !http} placeholder="e.g. get_branch_hours"
+          <input id="tool-name" className="w-full font-mono" maxLength={NAME_MAX} value={name} disabled={!init.isNew || !own} placeholder={web ? "e.g. navigate_to_page" : "e.g. get_branch_hours"}
             onChange={e => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} />
-          <span className="mt-1 flex justify-between text-[11px] text-muted"><span>{init.isNew && http ? "Letters, digits, _ and - — the model calls the tool by this name" : "The name can't change (agents call it by name)"}</span>{name.length}/{NAME_MAX}</span></label>
+          <span className="mt-1 flex justify-between text-[11px] text-muted"><span>{init.isNew && own ? (web ? "Letters, digits, _ and - — the model calls the tool by this name, and your website registers a function with the same name" : "Letters, digits, _ and - — the model calls the tool by this name") : "The name can't change (agents call it by name)"}</span>{name.length}/{NAME_MAX}</span></label>
         <label className="block"><span className={label()}>Description</span>
-          {http ? <>
+          {own ? <>
             <textarea id="tool-desc" rows={4} maxLength={DESC_MAX} className="w-full" placeholder="What it does and when the agent should call it (the model reads this)"
               value={p.description ?? ""} onChange={e => set("description", e.target.value)} />
             <span className="mt-1 block text-right text-[11px] text-muted">{(p.description ?? "").length}/{DESC_MAX}</span>
@@ -1079,7 +1110,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
               ))}
             </div>
           </div>
-          {p.kind === "read" && <label className="block sm:w-1/2"><span className={label()}>Cache <span className="text-xs font-normal text-muted">(seconds, read tools)</span></span>
+          {p.kind === "read" && !web && <label className="block sm:w-1/2"><span className={label()}>Cache <span className="text-xs font-normal text-muted">(seconds, read tools)</span></span>
             <input id="tool-cache" type="number" min={0} className="w-full" value={p.cache_ttl ?? ""} onChange={e => set("cache_ttl", e.target.value === "" ? undefined : Number(e.target.value))} /></label>}
         </div>
       </div>
@@ -1089,12 +1120,12 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
         <div className="rounded-xl border border-line bg-soft/40 p-4">
           <div className="flex items-start gap-3">
             <span className="grid h-9 w-9 place-items-center rounded-lg bg-accent/15 text-accent-text">{TI.gear}</span>
-            <div><div className="font-medium">Parameters</div><div className="text-sm text-muted">{http ? "Define the JSON schema for function parameters" : "Defined by the server — the agent fills these in"}</div></div>
+            <div><div className="font-medium">Parameters</div><div className="text-sm text-muted">{own ? "Define the JSON schema for function parameters" : "Defined by the server — the agent fills these in"}</div></div>
           </div>
-          {http && <div className="mt-3 flex justify-center"><button id="configure-schema" onClick={() => setEditingSchema(true)}
+          {own && <div className="mt-3 flex justify-center"><button id="configure-schema" onClick={() => setEditingSchema(true)}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90">{TI.spark}Configure Schema →</button></div>}
           <div className="mt-3 flex items-center justify-between text-xs">
-            {http ? <span className={cx("flex items-center gap-1.5", invalid ? "text-bad" : "text-muted")}><span className={cx("h-2 w-2 rounded-full", invalid ? "bg-bad" : "bg-good")} />{invalid ? `Schema invalid: ${invalid}` : "Schema valid"}</span> : <span />}
+            {own ? <span className={cx("flex items-center gap-1.5", invalid ? "text-bad" : "text-muted")}><span className={cx("h-2 w-2 rounded-full", invalid ? "bg-bad" : "bg-good")} />{invalid ? `Schema invalid: ${invalid}` : "Schema valid"}</span> : <span />}
             <span className="text-muted">{count} propert{count === 1 ? "y" : "ies"} configured</span>
           </div>
         </div>
@@ -1165,7 +1196,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
       <ErrorBox error={save.error} />
       <div className="flex flex-wrap items-center justify-end gap-3 border-t border-line pt-4">
         <span className="mr-auto text-xs text-muted">Saving publishes a new release of the agents that have this tool.</span>
-        <Button onClick={onCancel}>{init.isNew && http ? "Discard" : "Cancel"}</Button>
+        <Button onClick={onCancel}>{init.isNew && own ? "Discard" : "Cancel"}</Button>
         <Button kind="primary" disabled={!canSave || save.isPending}
           onClick={() => { setProblem(canSave ? null : "Name, description and URL are required"); save.mutate(); }}>
           {save.isPending ? "Saving…" : init.isNew ? "Create" : "Update"}</Button>

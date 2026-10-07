@@ -153,7 +153,8 @@ export default function ProjectSwitcher() {
     if (accounts) { await api.setDefaultProjectOnServer(p.id); qc.invalidateQueries({ queryKey: ["projects"] }); }
     else { setDefaultProject(p.id); setLocalDef(p.id); }
   };
-  const mine = (q.data ?? []).filter(p => p.mine), invited = (q.data ?? []).filter(p => !p.mine);
+  const all = q.data ?? [];
+  const mine = all.filter(p => p.mine), invited = all.filter(p => !p.mine && p.access !== "platform"), others = all.filter(p => !p.mine && p.access === "platform");   // others: seen as the platform owner
   const item = "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm hover:bg-soft disabled:opacity-50";
   const row = (p: Project) => (
     <div key={p.id} className={cx("group flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-soft", p.id === current?.id && "bg-soft/60")}>
@@ -163,7 +164,7 @@ export default function ProjectSwitcher() {
         <span className="min-w-0"><span className="block truncate text-sm font-medium">{shownName(p)}</span>
           {!p.mine && p.owner && <span className="block truncate text-[10px] text-muted">{p.owner}</span>}</span>
       </button>
-      {!p.mine && <button title="Rename label" aria-label="Rename label" onClick={() => { setLabelFor(p); setDialog("label"); setOpen(false); }}
+      {!p.mine && p.access !== "platform" && <button title="Rename label" aria-label="Rename label" onClick={() => { setLabelFor(p); setDialog("label"); setOpen(false); }}
         className="text-xs text-muted opacity-0 hover:text-ink group-hover:opacity-100">✎</button>}
       {p.mine && <button title={isDefault(p) ? "Default project (opens first)" : "Make default"} aria-label="Default project"
         onClick={() => makeDefault(p)}
@@ -189,11 +190,16 @@ export default function ProjectSwitcher() {
             <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-muted">Invited projects</div>
             {invited.map(row)}
           </>}
+          {others.length > 0 && <>
+            <div className="my-1 border-t border-line" />
+            <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-muted" title="You see these as the platform owner">All other projects</div>
+            {others.map(row)}
+          </>}
           <div className="my-1 border-t border-line" />
           <button role="menuitem" className={item} onClick={() => { setOpen(false); navigate("/project"); }}><span className="w-4 text-center">👥</span>Project settings</button>
           <button role="menuitem" className={item} onClick={() => { setOpen(false); setDialog("create"); }}><span className="w-4 text-center">＋</span>Create project</button>
           <div className="my-1 border-t border-line" />
-          {current && !current.mine
+          {current && !current.mine && current.access !== "platform"
             ? <button role="menuitem" className={item} onClick={() => { setOpen(false); setLabelFor(current); setDialog("label"); }}><span className="w-4 text-center">✎</span>Rename label</button>
             : <button role="menuitem" className={item} disabled={!current} onClick={() => { setOpen(false); setDialog("rename"); }}><span className="w-4 text-center">✎</span>Rename project</button>}
           <button role="menuitem" className={item} disabled={!current}
@@ -411,7 +417,7 @@ export function ProjectSettings() {
       {tab === "team" && <TeamMembers project={current.id} inviting={inviting} onInvited={() => setInviting(false)} />}
       {tab === "audit" && <AuditLog project={current.id} />}
       {tab === "overview" && <>
-      <Card title="Project" actions={current.mine ? <Button onClick={() => setRenaming(true)}>✎ Rename</Button> : undefined}>
+      <Card title="Project" actions={current.mine || current.access === "platform" ? <Button onClick={() => setRenaming(true)}>✎ Rename</Button> : undefined}>
         <div className="flex items-center gap-3">
           <Avatar p={current} size="h-10 w-10 text-base" />
           <div className="min-w-0">

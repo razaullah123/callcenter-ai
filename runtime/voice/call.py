@@ -8,6 +8,7 @@ still complete), and the agent's history is corrected to what the caller actuall
 import asyncio
 import os
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 from runtime.app import Runtime
@@ -23,6 +24,7 @@ from runtime.platform.bundle import DEFAULT_STT_HINT
 from runtime.platform.loader import LoadedAgent, agent_of
 
 from .phrases import PhraseCache
+from .recorder import CallRecorder, store_for
 from .player import AudioFormat, SendAudio, SendEvent, SpeechPlayer
 from .stt_quality import LevelGate, noise_reason, speech_level_db, speech_stats
 from runtime.harness.nlu.numbers import normalize_mobile
@@ -43,6 +45,8 @@ def vad_rate_for(line_rate: int) -> int:
 
 class VoiceCall:
     stt_hint: dict[str, str] = DEFAULT_STT_HINT     # replaced by the call's agent's own vocabulary hint
+    recorder = None                                  # a CallRecorder when this call is recorded
+    web_bridge = None                                # set by the transport when the visitor's page can run web tools
     _listeners: set = frozenset()                    # replaced per call by a set of listener queues (nobody listens by default)
 
     def __init__(self, rt: Runtime, *, call_id: str, in_fmt: AudioFormat, out_fmt: AudioFormat,
@@ -101,10 +105,37 @@ class VoiceCall:
         self._dtmf = ""
         self._dtmf_timer: asyncio.Task | None = None     # ends a keypad capture after a pause
         self._stopped = False
+        self.recorder = self._start_recorder(s)
         self._listeners: set[asyncio.Queue] = set()      # console users listening in (listen-only)
         self.end_reason = "in_progress"
+        self._started_at = datetime.now(timezone.utc)
         self._forced_reason: str | None = None
         self.close_transport = None      # set by the transport: closes the connection from the server side
+
+    def _start_recorder(self, s) -> CallRecorder | None:
+        """A recorder when the agent records its calls and recordings can be stored (platform database + MASTER_KEY)."""
+        if not getattr(s, "record_calls", False):
+            return None
+        store = store_for(self.rt)
+        if store is None or not store.available:
+            self.ev.emit(EventType.ERROR, level=Level.WARNING, during="recording",
+                         error="call recording is on but nothing can be stored (platform database and MASTER_KEY are needed)")
+            return None
+        return CallRecorder()
+
+    async def _save_recording(self) -> None:
+        rec, self.recorder = self.recorder, None
+        if rec is None or not rec.has_audio():
+            return
+        store, s, a = store_for(self.rt), self.loaded.settings, self.loaded
+        try:
+            agent = await self.rt.platform.agent(a.agent_id) if a.agent_id else None
+            workspace = (agent or {}).get("workspace_id") or "hmg"
+            wav = await asyncio.get_running_loop().run_in_executor(None, rec.wav)
+            await store.save(call_id=self.session.call_id, workspace=workspace, agent_id=a.agent_id, wav=wav,
+                             duration_s=rec.duration_s, retention_days=s.recording_retention_days, started_at=self._started_at)
+        except Exception as e:                                                  # noqa: BLE001
+            self.ev.emit(EventType.ERROR, level=Level.WARNING, during="recording", error=repr(e)[:160])
 
     def _make_agent(self) -> Agent:
         s = self.loaded.settings
@@ -114,6 +145,7 @@ class VoiceCall:
         agent.agent_ref = {"agent_id": self.loaded.agent_id, "release_id": self.loaded.release_id}
         agent.on_settings = self._on_settings
         agent.transfer_agent = self.switch_agent
+        agent.web_bridge = self.web_bridge
         return agent
 
     def _apply_call_settings(self, s) -> None:
@@ -168,6 +200,8 @@ class VoiceCall:
         await self._record_mobile()                        # the IVR calling number, if any
         if self.inactivity_s > 0 or self.max_call_s > 0:
             self._watch = asyncio.create_task(self._watch_limits())
+        if self.recorder is not None:
+            await self._say_line("RECORDING_NOTICE")           # the caller is told before anything else is said
         await self.agent.start()
 
     async def _watch_limits(self) -> None:
@@ -230,6 +264,8 @@ class VoiceCall:
         if self._stopped:
             return
         self._stopped = True
+        if self.web_bridge is not None:
+            self.web_bridge.close()                       # a tool waiting for the page ends with the call
         if self._listeners:
             self._listeners.clear()
         self.end_reason = self._forced_reason or ("transferred" if self.session.handoff else
@@ -241,6 +277,7 @@ class VoiceCall:
             if t and not t.done():
                 t.cancel()
         await self.player.close()
+        await self._save_recording()
         if self.aec:
             await self.aec.close()
         if not self.session.ended:
@@ -271,6 +308,13 @@ class VoiceCall:
             except asyncio.QueueFull:
                 pass
 
+    def attach_web_tools(self, names: set[str]) -> None:
+        """The visitor's page says it can run these web tools (public link / embed widget): the agent may now offer them."""
+        from runtime.tools.web import WebToolBridge
+        self.session.web_tools = set(names)
+        self.web_bridge = WebToolBridge(self._send_event)
+        self.agent.web_bridge = self.web_bridge
+
     def add_supervisor_note(self, text: str) -> None:
         """A live instruction from the console: the agent's next reply follows it (kept for the rest of the call)."""
         text = " ".join(text.split())[:500]
@@ -295,8 +339,11 @@ class VoiceCall:
     async def _send_and_reference(self, data: bytes) -> None:
         """Send agent audio and give the echo canceller the same audio as its far-end reference."""
         await self._raw_send_audio(data)
-        if self.aec or self._listeners:
+        rec = getattr(self, "recorder", None)
+        if self.aec or self._listeners or rec:
             pcm = mulaw_to_pcm16(data) if self._out_fmt.encoding == "mulaw" else data
+            if rec:
+                rec.add(1, pcm, self._out_fmt.sample_rate)
             if self._listeners:
                 self._tap(1, pcm, self._out_fmt.sample_rate)
             if self.aec:
@@ -333,6 +380,11 @@ class VoiceCall:
         if self._stopped or self.session.handoff or self.session.ended:
             return
         pcm = mulaw_to_pcm16(data) if self.in_fmt.encoding == "mulaw" else data
+        rec = getattr(self, "recorder", None)
+        if rec is not None:
+            a = self.session.auth
+            rec.paused = a.otp_sent and not a.verified          # nobody's one-time code is kept on disk
+            rec.add(0, pcm, self.in_fmt.sample_rate)
         if self._listeners:
             self._tap(0, pcm, self.in_fmt.sample_rate)             # what the caller said, before echo cancellation
         if self.aec:

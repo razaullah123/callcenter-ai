@@ -164,7 +164,7 @@ Reviewed Hamsa's two Publishing pages and its live Publish screen, agreed scope 
 Tests: new `tests/test_public.py` (34): settings validation, normalisation, public config, limiter (concurrent / per visitor / rolling hour), console API (publish, update keeps the token, unpublish makes a new one, validation, no release, ends calls, agent delete), public page + CSP, embed script, config + CORS, refused unknown link / foreign site / bad start, a call over the socket (published agent only, params filtered, call cap, cleanup), limits over the socket. Full suite 498 passed. Console build clean.
 Checked in Chrome on a throw-away agent (created and deleted again; the real agent was never published): Share screen and live preview follow the settings; publish gave a link and snippet; the public page loaded; the injected embed snippet showed the "Talk to us" pill and the overlay with the page; a scripted socket got `ready` (`pub-…`), the agent's own greeting and ~100 audio frames even though it asked for another agent and the draft; unpublish made the page, config and socket refuse.
 Not checked: speaking to the page with a real microphone (the browser's microphone prompt can't be driven here), the page on a phone, and the widget on an external website. Two orphan skill-version rows from the throw-away agent may remain in the database.
-Not built: web tools, a logo, "test with microphone" in the preview, a contrast checker, per-link analytics.
+Not built: a logo, "test with microphone" in the preview, a contrast checker, per-link analytics.
 
 
 ## 2026-10-06 — Tools (3): async, Active / Inactive, start / done messages, Token auth
@@ -180,7 +180,7 @@ Reviewed Hamsa's four Tools pages against the tool library (see docs/hamsa_parit
 | Console | Active and Async switches, "Request start / Request complete" fields, Token option, status filter | `console/src/pages/Tools.tsx`, `api.ts` |
 
 Tests: new `tests/test_tool_options.py` (12): token auth, field validation, catalog build, inactive hidden + refused, async answers at once and finishes in the background, async failure does not reach the agent, reads ignore async, start / done lines (English, Arabic, template, no done line on failure, start replaces the filler). Full suite 510 passed; console build clean.
-Not built: web tools (client-side JS via the SDK / embed widget); not checked in Chrome yet.
+Web tools were built later (see the Web tools entry).
 
 ## 2026-10-07 — Knowledge Base (4): URL items, rename, delete protection
 
@@ -364,3 +364,33 @@ The sidebar item said "soon"; without keys nothing outside the console could use
 
 Tests: new `tests/test_api_keys.py` (11): shown once / hash only, creation rules and the 20-key limit, resolving (valid, revoked, expired, unknown never open, last-use throttle), the three header forms, revoke and expiry, read-only scope, the forbidden management paths, project binding, audit under the key's name, per-key rate limit, no listening. Full suite 608 passed (+1 existing test skipped: needs a database); console builds.
 Checked in Chrome on a throw-away server: the API keys page (list with status badges and last-used times), the create dialog, the key shown once with `curl` examples, revoke with confirmation. A read-only key made there, used with `curl`: `whoami` ok; GET agents / routes 200; changing a route 403 "read-only"; making a key 403; another project 403; a made-up key 401; the Token, Bearer and X-API-Key forms all 200; after revoking, 401 at once. (A revoked key stays in the list as "Revoked" — there is no delete.)
+
+## Web tools (Tools → Web Tool)
+
+Hamsa defines web tools in the dashboard and implements them on the site through its SDK. Same here; MCP servers and API tools are unchanged.
+
+| Component | Change | Files |
+|---|---|---|
+| Definition | new tool source `web` (name, description, schema, timeout, async, messages; validation) | `runtime/tools/types.py`, `catalog.py`, `runtime/platform/toollib.py` |
+| Bridge | `WebToolBridge` per call: `web_tool` event out, `web_tool_result` in; limits and timeout | `runtime/tools/web.py`, `executor.py`, `runtime/voice/call.py` |
+| Offering | a web tool is offered only if the page registered it (`Session.web_tools`, carried across handoffs) | `runtime/harness/engine.py`, `session.py`, `handoff.py` |
+| Socket | `start.web_tools`, results handled while the opening runs (starter task, caller audio held) | `runtime/server/public.py` |
+| Page / widget | `VoiceAgent.registerTools`, `window.VoiceAgentTools`, postMessage with origin and source checks | `runtime/server/public_page.py` |
+| Console | Add New Web Tool form, detail page "Register it on your website", Test disabled with a reason, hint on Share | `console/src/pages/Tools.tsx`, `Share.tsx`, `api.ts`, `runtime/control/tools_api.py` |
+| Docs | guide and demo page | `docs/web_tools.md`, `docs/examples/web-tools-demo.html` |
+
+Tests: new `tests/test_web_tools.py` (18) plus a Node harness `tests/js/embed_harness.js` for the widget script. Full suite 626 passed, 1 skipped (`test_write_in_flight_survives_barge_in` is timing-flaky under load, passes alone). Console build clean.
+Checked in Chrome: Tools → Add New Tool → Web Tool opens the "Add New Web Tool" form. I did not save a tool (it would publish releases on the shared database).
+Not verified: a real microphone call from a real site (try the demo page).
+
+## Call recordings
+
+| Component | Change | Files |
+|---|---|---|
+| Settings | knobs `record_calls`, `recording_retention_days`, setting `RECORDINGS_DIR`, phrase `RECORDING_NOTICE` | `runtime/config.py`, `platform/bundle.py`, `harness/prompts.py`, `voice/phrases.py` |
+| Capture | `CallRecorder` (both sides on one clock, paused during OTP), saved when the call ends | `runtime/voice/recorder.py`, `voice/call.py` |
+| Storage | encrypted file per call + `call_recordings` table (both stores), hourly purge | `recorder.py` (`RecordingStore`), `platform/store.py`, `platform/secrets.py`, `db/schema.sql`, `server/app.py` |
+| API | `GET / DELETE /api/calls/{id}/recording` (audited), `recording` in the call detail | `runtime/control/api.py` |
+| Console | Recording card in the call panel (play, download, delete), Record calls setting | `pages/CallPanel.tsx`, `api.ts`, `studio/GlobalSettings.tsx` |
+
+Tests: new `tests/test_recording.py` (12). Console build clean. Not verified: a real call with a real microphone.

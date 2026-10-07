@@ -41,6 +41,8 @@ export const KNOB_LABELS: Record<string, [string, string]> = {
   voice_vad_threshold: ["VAD activation threshold", "Speech probability that counts as speech — higher is less sensitive to noise"],
   voice_filler_after_s: ["Thinking voice after (s)", "Say a short filler (“one moment…”) when the answer takes longer than this"],
   voice_inactivity_s: ["User inactivity timeout (s)", "Ask “are you still there?” after this much silence; 0 = off"],
+  record_calls: ["Record calls", "Keep the audio of each call (stereo, encrypted). The agent says a notice first"],
+  recording_retention_days: ["Keep recordings (days)", "A recording is deleted automatically after this many days"],
   call_max_minutes: ["Max call duration (min)", "End the call with a closing line after this long; 0 = no limit"],
   llm_hedge_after_s: ["Backup LLM request after (s)", "No first token by then → race an identical request; 0 = off"],
   require_verification: ["Caller verification", "Verify the caller (mobile + code) before anything else"],
@@ -472,6 +474,16 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
               <span className="flex items-center gap-1.5"><input id="gs-max-call" type="number" min={0} max={120} className="w-20 text-right"
                 value={knob("call_max_minutes", 0)} onChange={e => setKnob("call_max_minutes", Number(e.target.value))} /><span className="text-sm text-muted">min</span></span></div>
             <div className="text-[11px] text-muted">{KNOB_LABELS.call_max_minutes[1]}</div>
+          </div>
+          <div className="rounded-lg border border-line p-3">
+            <div className="flex items-center justify-between gap-3"><label htmlFor="gs-record" className="text-sm font-medium">{KNOB_LABELS.record_calls[0]}</label>
+              <Switch id="gs-record" on={knob("record_calls", false)} onChange={v => setKnob("record_calls", v)} /></div>
+            <div className="text-[11px] text-muted">{KNOB_LABELS.record_calls[1]} (edit the line in Phrases → RECORDING_NOTICE). The caller's code is never recorded.
+              Anyone with access to the agent can play recordings; each play is logged. Needs MASTER_KEY on the server.</div>
+            {knob("record_calls", false) && (
+              <div className="mt-2 flex items-center justify-between gap-3"><label htmlFor="gs-record-days" className="text-sm">{KNOB_LABELS.recording_retention_days[0]}</label>
+                <input id="gs-record-days" type="number" min={1} max={365} className="w-20 text-right" value={knob("recording_retention_days", 30)}
+                  onChange={e => setKnob("recording_retention_days", Math.min(365, Math.max(1, Number(e.target.value) || 30)))} /></div>)}
           </div>
           <Slider id="gs-min-interrupt" title="Minimum Interruption Duration" help={KNOB_LABELS.voice_barge_in_ms[1]}
             value={knob("voice_barge_in_ms", 300) / 1000} min={0.1} max={2} step={0.05} unit="s" fmt={v => v.toFixed(2)} onChange={v => setKnob("voice_barge_in_ms", Math.round(v * 1000))} />

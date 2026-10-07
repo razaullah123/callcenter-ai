@@ -120,7 +120,7 @@ async def logout(request: Request) -> dict:
 @router.get("/me", dependencies=auth)
 async def me() -> dict:
     who = principal()
-    return {"kind": who.kind, "user": acc.public_user(who.user) if who.is_user else None}
+    return {"kind": who.kind, "user": acc.public_user(who.user) if who.is_user else None, "platform_owner": who.platform}
 
 
 class MeBody(BaseModel):

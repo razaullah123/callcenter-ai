@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 SESSION_DAYS = 14
 INVITE_DAYS = 7
 ROLES = ("owner", "admin")
+DEFAULT_PROJECT = "hmg"
 
 
 @dataclass
@@ -34,6 +35,7 @@ class Principal:
     user: dict[str, Any] | None = None
     memberships: dict[str, dict] = field(default_factory=dict)   # project → membership row
     key: dict[str, Any] | None = None          # kind "key": the API key row (it belongs to one project)
+    platform: bool = False                     # kind "user": the platform owner — owner of every project, members or not
 
     @property
     def is_user(self) -> bool:
@@ -49,7 +51,7 @@ class Principal:
         """owner / admin of `ws`; the token and the open console act as owner everywhere."""
         if self.kind == "key":                  # an API key acts as an admin of its own project only
             return "admin" if ws == (self.key or {}).get("workspace_id") else None
-        if not self.is_user:
+        if not self.is_user or self.platform:
             return "owner"
         m = self.memberships.get(ws)
         return m["role"] if m else None
@@ -136,6 +138,15 @@ async def resolve_key(store, bearer: str) -> Principal | None:
     return Principal("key", key=row)
 
 
+def is_platform_owner(user: dict, memberships: dict[str, dict], settings) -> bool:
+    """The platform owner sees and manages every project. Named by PLATFORM_OWNER_EMAILS; when that is empty, it is the owner of
+    the default project (the person who set the platform up)."""
+    emails = {e.strip().lower() for e in (getattr(settings, "platform_owner_emails", "") or "").split(",") if e.strip()}
+    if emails:
+        return (user.get("email") or "").strip().lower() in emails
+    return (memberships.get(DEFAULT_PROJECT) or {}).get("role") == "owner"
+
+
 async def resolve(store, settings, bearer: str | None) -> Principal | None:
     """Who presents `bearer`; None = not allowed in."""
     if bearer and bearer.startswith(KEY_PREFIX):                  # an API key is a key or nothing: it never falls through to "open"
@@ -147,7 +158,7 @@ async def resolve(store, settings, bearer: str | None) -> Principal | None:
         user = await store.session_user(token_hash(bearer))
         if user is not None:
             ms = {m["workspace_id"]: m for m in await store.memberships(user["id"])}
-            return Principal("user", user, ms)
+            return Principal("user", user, ms, platform=is_platform_owner(user, ms, settings))
     if token is None and (store is None or await store.count_users() == 0):
         return Principal("open")
     return None

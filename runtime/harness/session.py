@@ -59,6 +59,7 @@ class Session:
     call_id: str
     ani: str | None = None
     agent_name: str = ""                 # the agent answering (prompt variable agent_name)
+    web_tools: set[str] = field(default_factory=set)             # web tools the visitor's page can run on this call
     supervisor_notes: list[str] = field(default_factory=list)   # live instructions typed in the console during the call
     agent_number: str = ""               # the number / extension that was called, when the transport knows it
     direction: str = "inbound"           # "inbound" | "outbound" (we only take inbound calls so far)

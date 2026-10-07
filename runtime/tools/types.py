@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ToolKind = Literal["read", "write", "send"]
-ToolSource = Literal["mcp", "local", "http"]
+ToolSource = Literal["mcp", "local", "http", "web"]
 ConfirmMode = Literal["none", "affirm", "readback"]
 
 

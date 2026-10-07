@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     voice_vad_threshold: float = 0.5     # speech probability that counts as speech (higher: less sensitive to noise)
     voice_inactivity_s: float = 0.0      # caller silent this long after the agent spoke → "are you still there?"; 0 = off
     call_max_minutes: float = 0.0        # the call ends (with a closing line) after this many minutes; 0 = no limit
+    record_calls: bool = False           # record the call's audio (stereo, encrypted, kept `recording_retention_days`); the agent says a notice first
+    recording_retention_days: int = 30   # a recording is deleted this long after the call
     llm_hedge_after_s: float = 2.5
     api_key_rate_per_min: int = 120      # requests an API key may make per minute (per server process)
     public_base_url: str = ""            # the address the IVR / PBX reaches this server on (dial requests carry it), e.g. https://agent.example.com
@@ -105,6 +107,7 @@ class Settings(BaseSettings):
     # Console / control plane
     console_token: SecretStr | None = None    # if set, /api requires "Authorization: Bearer <token>"
     # invitation emails (optional — without them the console shows the invitation link to copy)
+    platform_owner_emails: str = ""      # comma-separated e-mails that see and manage EVERY project; empty: the owner of the default project
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
@@ -114,6 +117,7 @@ class Settings(BaseSettings):
     # Runtime
     default_language: str = "ar"
     log_dir: Path = Field(default=ROOT_DIR / "logs")
+    recordings_dir: Path = Field(default=ROOT_DIR / "recordings")   # call recordings (encrypted with MASTER_KEY)
     log_console: bool = True
     log_level: str = "info"
 

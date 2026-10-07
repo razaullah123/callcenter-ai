@@ -58,7 +58,7 @@ class Catalog:
         for skill, entries in cfg["skills"].items():
             for name, policy in entries.items():
                 source = policy.get("source", "mcp")
-                if source == "http":           # API-request tool: its schema is part of its own definition
+                if source in ("http", "web"):  # API-request / web tool: its schema is part of its own definition
                     schema = {"description": policy.get("description", ""),
                               "input_schema": policy.get("input_schema") or {"type": "object", "properties": {}}}
                 else:

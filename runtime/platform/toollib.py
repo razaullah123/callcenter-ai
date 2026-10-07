@@ -16,7 +16,8 @@ Policy fields (all optional except kind):
   enabled       false = inactive: not offered to the agent, refuses to run (default true)
   async         write / send only: the agent gets {queued: true} at once and the call finishes in the background
   say_start, say_done   {ar, en} lines (templated, {{args.x}}) spoken when the call starts / succeeds
-  source        mcp | local | http;  http tools also: description, input_schema, http {method, url, headers}
+  source        mcp | local | http | web;  http tools also: description, input_schema, http {method, url, headers};
+                web tools (run in the visitor's browser, see runtime/tools/web.py): description, input_schema
 """
 
 import copy
@@ -31,7 +32,7 @@ KINDS = ("read", "write", "send")
 CONFIRM = ("none", "affirm", "readback")
 ROLES = ("identity.lookup", "identity.send_code", "identity.verify_code")
 CLAIMS = ("booked", "confirmed", "cancelled", "sent")
-SOURCES = ("mcp", "local", "http")
+SOURCES = ("mcp", "local", "http", "web")
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 FIELDS = {"kind", "confirm", "timeout_s", "cache_ttl", "idempotent", "role", "args", "hooks", "backs",
           "success_line", "source", "description", "input_schema", "http", "enabled", "async", "say_start", "say_done"}
@@ -57,7 +58,7 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
     for k in ("enabled", "async"):
         if k in policy and not isinstance(policy[k], bool):
             e.append(f"{k} must be true or false")
-    if policy.get("async") and kind == "read":
+    if policy.get("async") and kind == "read" and policy.get("source") != "web":
         e.append("read tools return data the agent needs, so they cannot be async")
     for k in ("say_start", "say_done"):
         v = policy.get(k)
@@ -88,6 +89,16 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
             e.append(f"http.method must be one of {', '.join(METHODS)}")
         from runtime.tools.http_tool import auth_errors
         e += auth_errors(http.get("auth"))
+        schema = policy.get("input_schema") or {"type": "object", "properties": {}}
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            e.append("input_schema must be a JSON schema object ({\"type\": \"object\", \"properties\": {...}})")
+        if not policy.get("description"):
+            e.append("description is required (the model reads it to decide when to call the tool)")
+    elif source == "web":
+        if policy.get("http"):
+            e.append("a web tool has no http settings: it runs in the visitor's browser")
+        if not name.replace("_", "").replace("-", "").isalnum() or not name[0].isalpha():
+            e.append("name: a web tool's name is the function name the website registers — a letter first, then letters, digits, _ or -")
         schema = policy.get("input_schema") or {"type": "object", "properties": {}}
         if not isinstance(schema, dict) or schema.get("type") != "object":
             e.append("input_schema must be a JSON schema object ({\"type\": \"object\", \"properties\": {...}})")

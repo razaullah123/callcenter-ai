@@ -174,7 +174,7 @@ blank agents) · `runtime/skills/loader.py::template_vars` (prompt variables) ·
 | Knowledge base attach | ✅ | Global Settings → Knowledge Base |
 | Tools: API request, MCP | ✅ | `config/tools.yaml` / Tools Templates |
 | Tools: webhook trigger | 🟡 | HTTP tools can POST anywhere; no dedicated webhook-tool type |
-| Tools: Web tools (client-side JS, SDK) | ❌ | no web SDK. Under Publishing |
+| Tools: Web tools (client-side JS, SDK) | ✅ | dashboard-only definitions; the site registers the function (`VoiceAgent.registerTools`). See "Web tools" below |
 | Outcome parameters / post-call prompts | ✅ | Global Settings → Outcome: switches + your own typed fields (section 14) |
 | Call webhook (all events + conversation) | 🟡 | ✅ `call.start` / `call.end` (summary + masked transcript) per agent, bearer secret, retries, test button — Global Settings → Call Webhook. No per-event types beyond start / end, no delivery history, no outcome data (needs post-call analysis) |
 | Phone number assignment | ✅ | Global Settings → Phone Number, `/numbers` |
@@ -187,7 +187,7 @@ blank agents) · `runtime/skills/loader.py::template_vars` (prompt variables) ·
 - **G. Prompt settings** — Enhanced Turn Taking, Prompt Enhancer. Needs a design (what each does for us).
 - **H. Audio extras** — ambient sound, noise-cancellation block, expressiveness, voice dictionaries. Provider-dependent; decide which providers support them first.
 - Intelligence toggles (gender detection, smart call end + custom prompt, dialect switcher): expose the always-on behaviours as toggles with defaults = today's behaviour. Medium.
-- Not planned / later modules: speaker identification, voice cloning, web tools, web SDK embed.
+- Not planned / later modules: speaker identification, voice cloning.
 
 Verdict: Voice Agents intro ✅. Single Prompt: prompt, LLM, KB, tools, phone, VAD, interruption ✅; call-behaviour ranges 🟡; intelligence toggles 🟡; greeting / first-speaker, noise cancellation, ambient, expressiveness, dictionaries, enhancer ❌.
 
@@ -215,7 +215,7 @@ Ours: `runtime/skills/graph.py` (graph model, edge conditions, `_holds`) · `run
 | Tool node: pick tool, map parameters (`{{var}}`), JSONPath output mapping | ✅ | `tool` + `args` (templates) + `outputs` (paths) |
 | Tool node: on success / on failure paths | ✅ | edges `on: success / failure` |
 | Tool node: error behaviour (continue / retry / fail), timeout, custom spoken response, processing message | ✅ | `on_error` (continue = follow the failure edge · retry = `retries` extra attempts · fail = hand to a person), `timeout_s` (a write already under way is never abandoned), `processing` line, `say` after success with `{{ }}` (gap O, 2026-10-06) |
-| Web tool node (client-side JS via SDK) | ❌ | no web SDK. Under Publishing |
+| Web tool node (client-side JS via SDK) | ✅ | a flow tool node can call a web tool (failure edge if the page lacks it). See "Web tools" below |
 | Transfer call node (E.164 number, cold / warm, message, timeout 1-60 s, SIP headers) | ✅ | `destination` (E.164 / extension / template, validated), `transfer_type` warm (announce, default) / cold (silent, at once), announcement per language, `timeout_s` 1-60, SIP `headers`; sent to the IVR as `destination` / `timeout_s` / `headers` (gap N, 2026-10-06). Whether the phone system honours timeout / headers is up to it (docs/ivr_protocol.md) |
 | Transfer agent node (other Hamsa agent, optional history + variables handoff) | ✅ | `agent` node: picks an agent of the project (or a `{{ }}` id), says its line, then the call's agent is swapped — the next agent's models, voice, skills, tools and call settings take over; `handoff_history` / `handoff_variables` choose what it inherits (no new greeting when the conversation comes along); failure (unknown agent, not published, > 3 hand-offs per call) follows the "On failure" edge or goes to a person; works on phone / browser calls and chat; the call record follows the new agent (gap R, 2026-10-06) |
 | End call node (static / prompt message, variables, silent end) | 🟡 | `end` with `say` per language (now rendered as a template, gap K), silent if empty; no prompt-written (LLM) goodbye |
@@ -282,7 +282,7 @@ Ours: `runtime/skills/graph.py` (graph model, edge conditions, `_holds`) · `run
 - ~~**P. Change Agent Settings node + per-node overrides**~~ done (expressiveness / dictionaries wait for H)
 - ~~**R. Transfer Agent node**~~ done
 - **P / R. Later:** Change Agent Settings node + per-node overrides (voice, prompt, call settings, LLM), Transfer Agent node (agent-to-agent handoff). Larger designs.
-- Not planned: Web tool node (needs the web SDK, under Publishing).
+- Web tool node: built, see "Web tools".
 
 Verdict: core graph (conversation / router / tool / set / transfer / end, prompt + equation + always transitions, global edges, test call, logs, variable extraction) ✅. Missing: DTMF in flows, static messages, richer operators, per-node settings, validation badge and variable inspector, agent-to-agent transfer.
 
@@ -341,13 +341,13 @@ Ours: `runtime/platform/share.py` (settings, limiter) · `runtime/control/share_
 | Origin whitelist (not in Hamsa's docs) | ➕ | "Websites that may embed the page": the page's `frame-ancestors` header lists them; the voice socket only accepts the page's own origin |
 | Cost protection (not in Hamsa's docs) | ➕ | per link: longest call (default 5 min), calls at the same time (5), calls per visitor per hour (10); in memory per process; `PUBLIC_TRUST_PROXY` reads the visitor address from `X-Forwarded-For` behind a proxy |
 | `params` from the host page | 🟡 | only the custom variable names the owner lists ("allowed params") can be set from the link's query string (`?customer_name=Sara`) |
-| Web tools (client-side JS) | ❌ | needs the page to call into the host site; not built |
+| Web tools (client-side JS) | ✅ | built: `registerTools` in the embed widget and the public page; see "Web tools" below |
 | Phone number assignment | ✅ | `/numbers`, routes per agent |
 
 Run time: `WS /ws/public/{token}` uses the same audio protocol as the browser call; calls are `pub-…` ids (shown as web calls) and
 appear in Call history / Live calls like any other call; the agent's call limits and the link's own cap both apply.
 
-Verdict: the public page, appearance, embed widget, unpublish and limits are ✅; web tools, logo, "test with microphone" in the preview ❌.
+Verdict: the public page, appearance, embed widget, unpublish, limits and web tools are ✅; logo, "test with microphone" in the preview ❌.
 
 ## 3. Tools  (reviewed and implemented 2026-10-06)
 
@@ -362,7 +362,7 @@ Ours: `runtime/platform/toollib.py` (policy fields + validation) · `runtime/too
 | **Async** toggle (fire and forget) | ✅ | policy `async: true` (write / send tools): the agent gets `{success, queued}` at once, the call runs in the background (TOOLS_MODE respected), the outcome is only logged (`tool.end` / `tool.error` with `background`) |
 | Timeout | ✅ | seconds, 1-60 (Hamsa: ms) |
 | MCP tools: server URL + auth, tool discovery | ✅ | MCP servers pane (status, discover, per-tool policy); also local (Python) tools |
-| Web tools (client-side JavaScript through the SDK, not on phone calls) | ❌ | needs a bridge from the agent to the page: a `web_tool` event over the public / browser WebSocket, the embed widget running the visitor's registered function and posting the result back. Not built: scope with the owner first |
+| Web tools (client-side JavaScript through the SDK, not on phone calls) | ✅ | see "Web tools" below |
 | Collections / folders | ✅ | collections in the library (sidebar list, move, new) |
 | Versioning with persistent IDs; agents follow the latest | 🟡 | agents run a frozen copy in each release; saving a tool publishes a new release of every agent that has it (new calls use it, calls in progress keep theirs) |
 | **Lifecycle messages** "Request start / Request complete" | ✅ | policy `say_start` / `say_done` as `{ar, en}`, templated (`{{args.x}}`); the start line replaces the generic "one moment", the done line is said on success only |
@@ -371,7 +371,7 @@ Ours: `runtime/platform/toollib.py` (policy fields + validation) · `runtime/too
 | Draft in the browser while editing | ✅ | drafts in localStorage (secret values never stored) |
 | Platform policy (not in Hamsa): kind, confirmation (affirm / readback), claim backing, roles, hooks, cache, idempotency | ➕ | unchanged |
 
-Verdict: everything in Hamsa's Function and MCP tool pages is ✅; **web tools ❌** (needs the SDK bridge above).
+Verdict: everything in Hamsa's Function and MCP tool pages is ✅, and web tools are ✅ (below).
 
 ## 4. Knowledge Base  (reviewed and implemented 2026-10-07)
 
@@ -459,7 +459,7 @@ Ours: `runtime/control/api.py` (`/api/calls`, `/api/calls/{id}`, `/instruction`)
 | Live monitoring: listen to an active call (mute / leave) | ✅ | "Listen in" card on running calls, both sides, per-side mute — section 15 |
 | **Real-time instructions** to the agent during a call | ✅ | new: Overview of a running call → "Send instruction to agent…"; the text joins the agent's prompt as a supervisor note for the rest of the call (last five count, never read out), is logged on the call (`supervisor_instruction`), and reaches the right worker in a cluster. Voice / IVR calls; not text-chat tests |
 | Outcome tab: results, parameters, success indicators | ✅ | outcome flags + every variable the agent collected + the AI "Call analysis" card (summary, sentiment, CSAT / NPS estimates, your outcome fields) |
-| Recording | ❌ | calls are not recorded (the footer says so); Hamsa's docs don't describe a recording either |
+| Recording | ✅ | per-agent "Record calls" (off by default): stereo WAV, encrypted, local folder, 30 days, player in the call panel. See "Call recordings" below |
 | Pending calls can't open the drawer | ✅ | n/a — we have no pending calls |
 
 Verdict: duration filter, CSV export and real-time instructions were the gaps and are ✅. Open: cost per call, agent-number column,
@@ -503,7 +503,7 @@ Ours: `runtime/platform/webhook.py` (`WebhookSink`) · `runtime/platform/bundle.
 | Authentication: none / Bearer token (`Authorization: Bearer …`) | ✅ | token stored as an encrypted secret (`WEBHOOK_TOKEN_<AGENT>`), only its name is in the release |
 | Events `call.started`, `call.answered`, `transcription.update`, `tool.executed`, `call.ended` | ✅ | all five, each switchable; sent in the order they happened per call. `call.started` and `call.answered` both fire when the call connects (we have no ringing phase) |
 | Envelope `eventType, callId, timestamp, projectId, agentId, agentName, data: {timestamp, data}` | ✅ | same shape |
-| `call.ended` data: `conversationId`, `conversationRecording`, `transcription: [{Agent}, {User}]`, `outcomeResult` | ✅ | transcription ✅ (masked, can be left out); `conversationRecording` is always null (calls aren't recorded); `outcomeResult` = echoed custom parameters + the agent's outcome fields from post-call analysis, plus an `analysis` object; `call.ended` waits up to 35 s for it |
+| `call.ended` data: `conversationId`, `conversationRecording`, `transcription: [{Agent}, {User}]`, `outcomeResult` | ✅ | transcription ✅ (masked, can be left out); `conversationRecording` is still always null (recordings are only played in the console); `outcomeResult` = echoed custom parameters + the agent's outcome fields from post-call analysis, plus an `analysis` object; `call.ended` waits up to 35 s for it |
 | Custom parameters echoed back so the receiver can match its own records | ✅ | the `params` a call started with (console call, batch CSV columns, outbound call parameters, public-link params) come back in `call.ended.outcomeResult` and in `call.started` / `call.answered`; read from the live call, never stored in the event log |
 | `tool.executed`: tool name, input, output | 🟡 | `toolName`, `input`, `success`, `duration`; `output` is null (tool results aren't kept in the event stream, they may hold patient data) |
 | Receiver rules: always answer 200 within ~4 s, retry with backoff, de-duplicate with `callId:eventType:timestamp` | ✅ | 5 s timeout; 3 attempts (waits 2 s, 4 s) on network errors, 429 and 5xx; other 4xx are not retried; a failure becomes a WARNING in Logs and never touches the call. New: `X-Webhook-Event` and `X-Webhook-Id` headers — one id per event, the same on every retry — for de-duplication |
@@ -639,3 +639,38 @@ Ours: `runtime/control/keys_api.py` · `runtime/control/accounts.py` (`resolve_k
 
 Verdict: ✅. Not built: per-key allowed endpoints or IP addresses, a rate limit shared across server workers, signing in with a key from the console page itself.
 Example: `curl https://<host>/api/outbound-calls -H "Authorization: Token hmg_…" -H "Content-Type: application/json" -d '{"agent_id": "…", "from_number": "+966…", "to_number": "+966…"}'`.
+
+## Web tools (Tools → Web Tool)
+
+Hamsa registers web tools in two places: the **definition** in the dashboard (name, description, parameters, timeout, messages — no URL, no auth) and the **implementation** on the website through its SDK, by the same name. We follow that model; a page can supply implementations but can never add a tool to the agent. MCP servers and API tools are unchanged.
+
+| Hamsa component | Status | Ours / note |
+|---|---|---|
+| Add New Tool → Web Tool (name, description, timeout, active, start / done messages, parameter schema) | ✅ | `source: web` in the tool library; no URL or auth fields |
+| The site registers the function | ✅ | `VoiceAgent.registerTools({name: fn})` (embed widget) or `window.VoiceAgentTools`; the public page asks its host page through `postMessage` |
+| Runs in the visitor's browser | ✅ | server → `web_tool` event over the call socket → page runs the function → `web_tool_result` back; result is plain data, up to 20,000 characters; times out at the tool's timeout |
+| Not on phone calls | ✅ | the model is only offered a web tool the page registered on this call; a flow tool node for it takes its failure edge |
+| Tool in the opening turn | ➕ | the socket keeps reading while the opening runs, so the first turn can use a web tool |
+| Origin checks | ➕ | widget only trusts its own iframe and origin; page only trusts its parent |
+| Async tools, Active / Inactive, say start / done | ✅ | same as other tools |
+| Test button | ➖ | refused with an explanation: a web tool needs a live visitor page (use the demo page) |
+
+Verdict: ✅. Not built: web tools on phone calls (no browser), results over 20 KB, a console "test with a page" button. Docs: `docs/web_tools.md`; demo: `docs/examples/web-tools-demo.html`.
+
+## Call recordings
+
+Decided with the owner: local folder, 30 days, anyone with access to the agent may play.
+
+| Component | Status | Ours / note |
+|---|---|---|
+| Switch | ✅ | Global Settings → Call settings → Record calls (per agent, off by default) and Keep recordings (days, default 30) |
+| Consent | ✅ | the agent says `RECORDING_NOTICE` (editable, ar / en) before anything else |
+| Audio | ✅ | stereo 16 kHz WAV, caller left / agent right, on the call's own timeline; phone and web calls |
+| Secrets | ➕ | the caller's audio is not kept while a one-time code is being read out |
+| Storage | ✅ | `RECORDINGS_DIR` (default `recordings/`, git-ignored), one file per call, encrypted with `MASTER_KEY` (no key: nothing is recorded, a warning is logged); metadata in `call_recordings` |
+| Retention | ✅ | deleted automatically when the agent's retention is over (hourly job); status shows "expired" |
+| Access | ✅ | anyone who can see the call (project members, API keys with access): play, download, delete in Call History → call panel; never a public link |
+| Audit | ➕ | every play, download and deletion is in the agent's audit log |
+| Webhook `conversationRecording` | ❌ | still null: no signed download link yet |
+
+Verdict: ✅. Not built: S3 storage, Opus compression (WAV is about 2 MB a minute before encryption), recording of listen-in audio, a download link in the webhook, a per-call "do not record" option.

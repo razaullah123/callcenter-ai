@@ -42,7 +42,10 @@ export type Satisfaction = {
   sentiment: { positive: number | null; neutral: number | null; negative: number | null; calls: number };
   resolved: { score: number | null; calls: number };
 };
+/** What the console knows about a call's recording (null: the call was not recorded). */
+export type CallRecording = { status: "ok" | "failed" | "expired" | "deleted"; duration_s: number | null; size_bytes: number | null; expires_at: string | null; error: string | null };
 export type CallDetail = {
+  recording?: CallRecording | null;
   call: CallRow; events: EventRow[]; turns: TurnLatency[]; agent?: CallAgent | null; analysis?: CallAnalysis | null; analysis_setup?: AnalysisSetup | null;
   transcript: { role: "user" | "agent" | "system"; text: string; ts: string; turn: number | null }[];
 };
@@ -127,7 +130,7 @@ export type SecretsResponse = {
 export type ToolPolicy = {
   kind: "read" | "write" | "send"; confirm?: string; timeout_s?: number; cache_ttl?: number; idempotent?: boolean;
   role?: string; args?: Record<string, string>; hooks?: string[]; backs?: string; success_line?: string;
-  source?: "mcp" | "local" | "http"; description?: string; input_schema?: Record<string, unknown>;
+  source?: "mcp" | "local" | "http" | "web"; description?: string; input_schema?: Record<string, unknown>;
   /** false = inactive: not offered to the agent, refuses to run */ enabled?: boolean;
   /** write / send only: answers {queued: true} at once, the call finishes in the background */ async?: boolean;
   say_start?: Record<string, string>; say_done?: Record<string, string>;
@@ -266,7 +269,7 @@ export type AuditRow = { id: number; ts: string; action: string; actor: string |
 
 export type Project = { id: string; name: string; created_at: string | null; platform_default: boolean; agents: number;
   connections: number; mcp_servers: number; tools: number; secrets: number; routes: string[];
-  role: "owner" | "admin"; mine: boolean; label: string | null; owner: string | null; default: boolean | null };
+  role: "owner" | "admin"; mine: boolean; access?: "member" | "platform"; label: string | null; owner: string | null; default: boolean | null };
 export type User = { id: string; email: string; name: string; default_project: string | null };
 export type AuthStatus = { mode: "setup" | "login" | "signed_in" | "token" | "open"; user?: User; accounts: boolean;
   mail: boolean; open?: boolean };
@@ -441,6 +444,19 @@ export const api = {
                 duration_op?: string; duration_a?: number; duration_b?: number }) =>
     req<{ total: number; items: CallRow[] }>(`/api/calls${qs(p)}`),
   call: (id: string) => req<CallDetail>(`/api/calls/${encodeURIComponent(id)}`),
+  /** The recording's audio (needs the sign-in header, so it is fetched, not linked). */
+  recordingAudio: async (id: string, download = false): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`/api/calls/${encodeURIComponent(id)}/recording${download ? "?download=true" : ""}`, {
+      headers: { ...(currentProject ? { "X-Project": currentProject } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+    if (!res.ok) {
+      let detail: unknown = res.statusText;
+      try { detail = (await res.json()).detail; } catch { /* not json */ }
+      throw new ApiError(res.status, detail);
+    }
+    return res.blob();
+  },
+  deleteRecording: (id: string) => req<{ deleted: boolean }>(`/api/calls/${encodeURIComponent(id)}/recording`, { method: "DELETE" }),
   analyzeCall: (id: string) => req<CallAnalysis>(`/api/calls/${encodeURIComponent(id)}/analyze`, { method: "POST" }),
   satisfaction: (p: { start: string; end: string; agent?: string }) => req<Satisfaction>(`/api/analytics/satisfaction${qs(p)}`),
   events: (p: { call_id?: string; type?: string[]; level?: string; text?: string; before_id?: number; limit?: number; agent?: string }) =>

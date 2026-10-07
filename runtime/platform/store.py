@@ -61,6 +61,7 @@ class MemoryStore:
         self._batches: dict[str, dict] = {}
         self._deliveries: list[dict] = []
         self._analysis: dict[str, dict] = {}
+        self._recordings: dict[str, dict] = {}
         self._api_keys: dict[str, dict] = {}
         self._recipients: dict[int, dict] = {}
 
@@ -341,6 +342,21 @@ class MemoryStore:
 
     async def call_analysis(self, call_id: str) -> dict | None:
         return copy.deepcopy(self._analysis.get(call_id))
+
+    # ---- call recordings (metadata; the audio is a file)
+    async def put_recording(self, row: dict) -> None:
+        self._recordings[row["call_id"]] = {**copy.deepcopy(row), "created_at": _now()}
+
+    async def recording(self, call_id: str) -> dict | None:
+        return copy.deepcopy(self._recordings.get(call_id))
+
+    async def due_recordings(self, now=None) -> list[dict]:
+        now = now or _now()
+        return [copy.deepcopy(r) for r in self._recordings.values() if r["status"] == "ok" and r["expires_at"] <= now]
+
+    async def end_recording(self, call_id: str, status: str) -> None:
+        if call_id in self._recordings:
+            self._recordings[call_id].update(status=status, path=None)
 
     async def call_analyses(self, ws: str, start=None, end=None, agent_id: str | None = None) -> list[dict]:
         return [copy.deepcopy(r) for r in self._analysis.values() if r["workspace_id"] == ws
@@ -896,6 +912,27 @@ class PgStore:
     async def call_analysis(self, call_id: str) -> dict | None:
         r = await self._row("SELECT * FROM call_analysis WHERE call_id = $1", call_id)
         return {**r, "outcome": _j(r["outcome"])} if r else None
+
+    # ---- call recordings (metadata; the audio is a file)
+    async def put_recording(self, row: dict) -> None:
+        await self._exec(
+            "INSERT INTO call_recordings (call_id, workspace_id, agent_id, status, path, size_bytes, duration_s, error, started_at, expires_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (call_id) DO UPDATE SET status = EXCLUDED.status, "
+            "path = EXCLUDED.path, size_bytes = EXCLUDED.size_bytes, duration_s = EXCLUDED.duration_s, error = EXCLUDED.error, "
+            "expires_at = EXCLUDED.expires_at",
+            row["call_id"], row["workspace_id"], row.get("agent_id"), row["status"], row.get("path"), row.get("size_bytes"),
+            row.get("duration_s"), row.get("error"), row.get("started_at"), row["expires_at"])
+
+    async def recording(self, call_id: str) -> dict | None:
+        r = await self._row("SELECT * FROM call_recordings WHERE call_id = $1", call_id)
+        return dict(r) if r else None
+
+    async def due_recordings(self, now=None) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM call_recordings WHERE status = 'ok' AND expires_at <= COALESCE($1, now())", now)
+        return [dict(r) for r in rows]
+
+    async def end_recording(self, call_id: str, status: str) -> None:
+        await self._exec("UPDATE call_recordings SET status = $2, path = NULL WHERE call_id = $1", call_id, status)
 
     async def call_analyses(self, ws: str, start=None, end=None, agent_id: str | None = None) -> list[dict]:
         where, args = ["workspace_id = $1"], [ws]

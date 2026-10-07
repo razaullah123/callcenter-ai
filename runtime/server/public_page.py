@@ -215,6 +215,39 @@ body.embed footer{display:none}
     ws = null; mic = null; ctx = null; analyser = null; sources = []; micLevel = 0;
     setState(error ? "error" : "ended", text);
   }
+  // ---------------------------------------------------------------- web tools: functions the embedding site registered
+  // The site (embed.js) answers which tools it can run and runs them; this page only relays between it and the server.
+  const pendingTools = {};
+  function hostTools() {
+    return new Promise(resolve => {
+      if (parent === window) return resolve([]);
+      const done = names => { removeEventListener("message", on); clearTimeout(timer); resolve(names); };
+      const on = e => {
+        if (e.source === parent && e.data && e.data.type === "hmg-web-tools")
+          done(Array.isArray(e.data.names) ? e.data.names.filter(n => typeof n === "string").slice(0, 50) : []);
+      };
+      const timer = setTimeout(() => done([]), 500);
+      addEventListener("message", on);
+      parent.postMessage({type: "hmg-web-tools?"}, "*");
+    });
+  }
+  addEventListener("message", e => {
+    if (e.source !== parent || !e.data || e.data.type !== "hmg-web-tool-result") return;
+    const reply = pendingTools[e.data.id];
+    if (!reply) return;
+    delete pendingTools[e.data.id];
+    reply("error" in e.data ? {error: String(e.data.error)} : {result: e.data.result});
+  });
+  function runWebTool(m, sock) {
+    const reply = r => {
+      if (sock.readyState !== 1) return;
+      try { sock.send(JSON.stringify(Object.assign({event: "web_tool_result", id: m.id}, r))); }
+      catch (err) { sock.send(JSON.stringify({event: "web_tool_result", id: m.id, error: "the result is not plain data"})); }
+    };
+    if (parent === window) return reply({error: "this page is not embedded in a site"});
+    pendingTools[m.id] = reply;
+    parent.postMessage({type: "hmg-web-tool", id: m.id, name: m.name, args: m.args || {}}, "*");
+  }
   async function start() {
     if (PREVIEW || state === "connecting" || state === "listening" || state === "thinking" || state === "speaking") return;
     setState("connecting"); lines.length = 0; $("tx").innerHTML = "";
@@ -228,9 +261,10 @@ body.embed footer{display:none}
     const node = new AudioWorkletNode(ctx, "capture");
     ctx.createMediaStreamSource(mic).connect(node);
     const params = {}; (cfg.allowed_params || []).forEach(k => { if (Q.has(k)) params[k] = Q.get(k); });
+    const webTools = await hostTools();
     ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/public/" + encodeURIComponent(TOKEN));
     const mine = ws;
-    ws.onopen = () => mine.send(JSON.stringify({event: "start", audio: {encoding: "pcm16", sample_rate: RATE}, params}));
+    ws.onopen = () => mine.send(JSON.stringify({event: "start", audio: {encoding: "pcm16", sample_rate: RATE}, params, web_tools: webTools}));
     node.port.onmessage = ev => {
       const f = ev.data, i16 = new Int16Array(f.length); let peak = 0;
       for (let i = 0; i < f.length; i++) { const v = Math.max(-1, Math.min(1, f[i])); i16[i] = v * 32767; peak = Math.max(peak, Math.abs(v)); }
@@ -246,6 +280,7 @@ body.embed footer{display:none}
       if (m.event === "media") play(m.payload);
       else if (m.event === "clear") { clearAudio(); setState("listening"); }
       else if (m.event === "ready") setState("listening");
+      else if (m.event === "web_tool") runWebTool(m, mine);
       else if (m.event === "transcript") {
         if (m.role === "user") { awaitingAudio = true; if (state === "listening") setState("thinking"); }
         else if (m.role === "agent") addLine(m.text);
@@ -284,6 +319,20 @@ body.embed footer{display:none}
 EMBED_JS = r'''(function () {
   var script = document.currentScript;
   if (!script) return;
+  // Web tools: the site registers functions the agent may call (the agent's dashboard defines which tools exist and what they take).
+  //   VoiceAgent.registerTools({ navigate_to_page: async function (args) { location.href = args.path; return "done"; } })
+  // or, before this script loads: window.VoiceAgentTools = { navigate_to_page: function (args) { ... } }
+  var local = {};
+  window.VoiceAgent = window.VoiceAgent || {};
+  window.VoiceAgent.registerTools = function (map) {
+    Object.keys(map || {}).forEach(function (k) { if (typeof map[k] === "function") local[k] = map[k]; });
+  };
+  function registered() {
+    var o = {}, g = window.VoiceAgentTools || {};
+    Object.keys(g).forEach(function (k) { if (typeof g[k] === "function") o[k] = g[k]; });
+    Object.keys(local).forEach(function (k) { o[k] = local[k]; });
+    return o;
+  }
   var d = script.dataset, origin = new URL(script.src, location.href).origin, token = d.token;
   if (!token) { console.error("[agent widget] data-token is missing"); return; }
   function fromAttributes() {
@@ -324,6 +373,18 @@ EMBED_JS = r'''(function () {
     var triggers = document.querySelectorAll("[data-agent-trigger]");
     btn.hidden = o.launcher === "never" || (o.launcher !== "always" && triggers.length > 0);
     var frame = null;
+    window.addEventListener("message", function (e) {          // the agent page asks which tools exist and runs them here
+      var d = e.data;
+      if (!frame || e.source !== frame.contentWindow || e.origin !== origin || !d || typeof d.type !== "string") return;
+      function post(msg) { if (frame) frame.contentWindow.postMessage(msg, origin); }
+      if (d.type === "hmg-web-tools?") return post({type: "hmg-web-tools", names: Object.keys(registered())});
+      if (d.type !== "hmg-web-tool") return;
+      var fn = registered()[d.name];
+      if (!fn) return post({type: "hmg-web-tool-result", id: d.id, error: "the website has not registered " + d.name});
+      Promise.resolve().then(function () { return fn(d.args || {}); }).then(
+        function (r) { post({type: "hmg-web-tool-result", id: d.id, result: r === undefined ? null : r}); },
+        function (err) { post({type: "hmg-web-tool-result", id: d.id, error: String((err && err.message) || err)}); });
+    });
     function open() {
       if (frame) return;
       frame = document.createElement("iframe");

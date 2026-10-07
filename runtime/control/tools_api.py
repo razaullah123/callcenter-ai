@@ -56,11 +56,11 @@ async def library() -> dict:
     names = {r["name"] for r in rows}
     tools = []
     for r in rows:
-        schema = (r["policy"] if r["source"] == "http" else mcp_schemas.get(r["name"]) or local.get(r["name"])) or {}
+        schema = (r["policy"] if r["source"] in ("http", "web") else mcp_schemas.get(r["name"]) or local.get(r["name"])) or {}
         tools.append({"name": r["name"], "group": r["grp"], "source": r["source"], "policy": r["policy"],
                       "description": (schema.get("description") or "")[:600],
                       "input_schema": schema.get("input_schema"), "server": server_of.get(r["name"]),
-                      "available": r["source"] == "http" or r["name"] in mcp_schemas or r["name"] in local,
+                      "available": r["source"] in ("http", "web") or r["name"] in mcp_schemas or r["name"] in local,
                       "used_by": used.get(r["name"], [])})
     discovered = [{"name": n, "server": server_of.get(n), "description": (s.get("description") or "")[:300],
                    "input_schema": s.get("input_schema")}
@@ -138,6 +138,9 @@ async def test_tool(name: str, body: TestBody) -> dict:
     if row is None:
         raise HTTPException(404, "tool not in the library")
     policy = row["policy"]
+    if row["source"] == "web":
+        raise HTTPException(400, "a web tool runs in the visitor's browser, so it can't be tested from here — open the Share page's "
+                                 "test page (or your own site) and talk to the agent")
     if policy.get("kind", "read") != "read":
         raise HTTPException(400, "only read tools can be tested here (write / send tools would really act)")
     args = dict(body.args)

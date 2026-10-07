@@ -25,7 +25,7 @@ def fixed_phrases(ph: Phrases | None = None, languages: tuple[str, ...] = ("ar",
     out = []
     for lang in languages:
         out += [(lang, ph.GREETING[lang]), (lang, ph.HANDOFF[lang]), (lang, ph.HANDOFF_SHORT[lang]),
-                (lang, ph.FALLBACK[lang])]
+                (lang, ph.FALLBACK[lang]), (lang, ph.RECORDING_NOTICE[lang])]
         out += [(lang, f) for f in ph.FILLER[lang]]
         out += [(lang, ph.STILL_WORKING[lang])] + [(lang, f[lang]) for f in ph.SLOW_TOOL_FILLER.values()]
     return out

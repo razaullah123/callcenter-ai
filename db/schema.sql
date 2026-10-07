@@ -478,6 +478,22 @@ CREATE TABLE IF NOT EXISTS call_analysis (
 );
 CREATE INDEX IF NOT EXISTS call_analysis_ws_idx ON call_analysis (workspace_id, started_at DESC);
 
+-- ---------------------------------------------------------------- call recordings (the audio is a file, encrypted, under RECORDINGS_DIR)
+CREATE TABLE IF NOT EXISTS call_recordings (
+    call_id       text PRIMARY KEY,
+    workspace_id  text NOT NULL,
+    agent_id      text,
+    status        text NOT NULL,                  -- ok | failed | expired | deleted
+    path          text,                           -- relative to RECORDINGS_DIR
+    size_bytes    bigint,
+    duration_s    double precision,
+    error         text,
+    started_at    timestamptz,
+    expires_at    timestamptz NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS call_recordings_expiry_idx ON call_recordings (expires_at) WHERE status = 'ok';
+
 -- ---------------------------------------------------------------- API keys (per project; only the hash is stored)
 CREATE TABLE IF NOT EXISTS api_keys (
     id            text PRIMARY KEY,

@@ -1013,11 +1013,16 @@ class Agent:
     def _allowed(self) -> set[str]:
         s = self.s
         skill = self._flow_skill()
-        return set(self.skills.tools(skill, s))
+        names = set(self.skills.tools(skill, s))
+        catalog = self.executor.catalog
+        # a web tool exists only where the visitor's page registered it (never on a phone call)
+        return {n for n in names if (t := catalog.get(n)) is None or t.source != "web" or n in s.web_tools}
 
     def _ctx(self, confirmed: str | None = None) -> ToolContext:
         s = self.s
         extra: dict[str, Any] = {"policy": self.policy}
+        if getattr(self, "web_bridge", None) is not None:
+            extra["web_bridge"] = self.web_bridge
         if confirmed:
             extra["confirmed_action"] = confirmed
         return ToolContext(call_id=s.call_id, language_id=s.language_id, patient_id=s.auth.patient_id,

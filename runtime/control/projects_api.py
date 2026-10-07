@@ -39,11 +39,13 @@ async def list_projects() -> list[dict]:
         role = who.role(w["id"])
         if role is None:
             continue
+        member = who.memberships.get(w["id"])          # None: seen only because this is the platform owner
         members = await store.members(w["id"]) if who.is_user else []
         owner = next((m for m in members if m["role"] == "owner"), None)
-        mine = who.memberships.get(w["id"], {})
+        mine = member or {}
         out.append({"id": w["id"], "name": w["name"], "created_at": w.get("created_at"),
-                    "role": role, "mine": role == "owner", "label": mine.get("label"),
+                    "role": role, "mine": (mine.get("role") == "owner") if who.is_user else role == "owner",
+                    "access": "platform" if who.is_user and member is None else "member", "label": mine.get("label"),
                     "owner": (owner or {}).get("name") or (owner or {}).get("email"),
                     "default": (who.user or {}).get("default_project") == w["id"] if who.is_user else None,
                     "platform_default": w["id"] == WORKSPACE,

@@ -88,7 +88,7 @@ class ToolExecutor:
             for hook in self.pre_hooks:
                 args = (await hook(tool, args, ctx)) or args
             args = self._prepare_args(tool, args, ctx)
-            if tool.run_async and tool.kind != "read":
+            if tool.run_async and (tool.kind != "read" or tool.source == "web"):
                 self._start_async(tool, args, ctx, emitter)
                 data = {"success": True, "queued": True}
                 result = ToolResult(ok=True, data=data, content=to_llm_content(tool.name, data))
@@ -256,6 +256,16 @@ class ToolExecutor:
             if self.knowledge is not None:
                 ctx.extra.setdefault("knowledge", self.knowledge)
             return True, await call_local(tool.name, args, ctx)
+        if tool.source == "web":                    # runs in the visitor's browser, through the call's bridge
+            from .web import WebToolError
+            bridge = ctx.extra.get("web_bridge")
+            if bridge is None:
+                return False, {"success": False, "error": "this tool runs in the visitor's browser, which this call doesn't have"}
+            try:
+                value = await bridge.call(tool.name, args, max(1.0, (tool.timeout_s or 10) - 0.5))
+            except WebToolError as e:
+                return False, {"success": False, "error": str(e)}
+            return True, value if isinstance(value, dict) else {"result": value}
         if tool.source == "http":
             from .http_tool import call_http, simulated
             if (fake := simulated(tool.kind)) is not None:      # TOOLS_MODE: nothing real happens while testing

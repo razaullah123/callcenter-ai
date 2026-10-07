@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from runtime.control import config_store, skills_store, store
@@ -307,7 +307,68 @@ async def get_call(call_id: str) -> dict:
     from runtime.platform.analysis import public
     data["analysis"] = public(await rt.platform.call_analysis(call_id)) if rt.platform is not None else None
     data["analysis_setup"] = await _analysis_setup(data["call"])
+    data["recording"] = await _recording_info(call_id)
     return data
+
+
+async def _recording_info(call_id: str) -> dict | None:
+    """What the console shows about a call's recording (None: the call was not recorded)."""
+    rt = _rt()
+    row = await rt.platform.recording(call_id) if rt.platform is not None else None
+    if row is None:
+        return None
+    return {k: row.get(k) for k in ("status", "duration_s", "size_bytes", "expires_at", "error")}
+
+
+async def _recorded_call(call_id: str) -> tuple[dict, dict, Any]:
+    """(call, recording row, store) for a call the caller may see; 404 when it has no recording to hand out."""
+    from runtime.voice.recorder import store_for
+    rt = _rt()
+    found = await store.get_call(call_id, await project_scope())
+    if found is None:
+        raise HTTPException(404, "call not found")
+    rec = await rt.platform.recording(call_id) if rt.platform is not None else None
+    if rec is None or rec["status"] != "ok":
+        why = {"expired": "its retention period is over", "deleted": "it was deleted", "failed": "it could not be saved"}.get(
+            (rec or {}).get("status"), "this call was not recorded")
+        raise HTTPException(404, f"no recording: {why}")
+    recs = store_for(rt)
+    if recs is None or not recs.available:
+        raise HTTPException(503, "recordings can't be read (MASTER_KEY is not set)")
+    return found["call"], rec, recs
+
+
+async def _audit_recording(action: str, call: dict, call_id: str) -> None:
+    from runtime.control.accounts import principal
+    rt = _rt()
+    try:
+        await rt.platform.audit(call.get("agent_id") or "", action, principal().actor, {"call_id": call_id})
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("recording audit not recorded: %r", e)
+
+
+@router.get("/calls/{call_id}/recording", dependencies=auth)
+async def get_recording(call_id: str, download: bool = False) -> Response:
+    """The call's recording (stereo WAV, caller left / agent right) for anyone who can see the call; every play or download is
+    written to the agent's audit log."""
+    call, rec, recs = await _recorded_call(call_id)
+    try:
+        wav = await recs.read(rec)
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("recording %s unreadable: %r", call_id, e)
+        raise HTTPException(500, "the recording can't be read") from None
+    await _audit_recording("call.recording.download" if download else "call.recording.play", call, call_id)
+    headers = {"Cache-Control": "no-store", "Content-Disposition": f'{"attachment" if download else "inline"}; filename="call-{call_id}.wav"'}
+    return Response(wav, media_type="audio/wav", headers=headers)
+
+
+@router.delete("/calls/{call_id}/recording", dependencies=auth)
+async def delete_recording(call_id: str) -> dict:
+    """Delete a recording now (e.g. a patient's request)."""
+    call, rec, recs = await _recorded_call(call_id)
+    await recs.remove(rec, "deleted")
+    await _audit_recording("call.recording.delete", call, call_id)
+    return {"call_id": call_id, "deleted": True}
 
 
 async def _analysis_setup(call: dict) -> dict | None:

@@ -27,6 +27,8 @@ def carry_over(old: Session, agent_name: str, req: AgentTransfer, *, agent_id: s
     except ValueError:
         new.custom = build_custom(declared or {}, None)
     new.language, new.gender = old.language, old.gender
+    new.web_tools = set(old.web_tools)                 # the visitor's page is still the same page
+    new.supervisor_notes = list(old.supervisor_notes)  # so are the live instructions given to this call
     new.turn_id = old.turn_id
     new.memory["agent_transfers"] = old.memory.get("agent_transfers", 0) + 1
     if req.history:

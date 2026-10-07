@@ -67,11 +67,16 @@ async def lifespan(app: FastAPI):
     rt.bus.subscribe(rt.analysis)
     rt.webhooks = WebhookSink(rt)
     rt.bus.subscribe(rt.webhooks)
+    from runtime.voice.recorder import purge_loop, store_for
+    recordings = store_for(rt)
+    recordings_task = asyncio.create_task(purge_loop(recordings)) if recordings is not None else None
     log.info("voice agent ready (tools_mode=%s)", rt.settings.tools_mode)
     yield
     lag_task.cancel()
     maint_task.cancel()
     batch_task.cancel()
+    if recordings_task is not None:
+        recordings_task.cancel()
     await rt.batch.close()
     await rt.webhooks.close()
     await rt.analysis.close()
