@@ -28,8 +28,22 @@ export type TurnLatency = {
   first_audio_ms: number | null; total_ms: number | null;
 };
 
+/** What the model read from a finished call. csat (1-5) and nps (0-10) are estimates, not survey answers. */
+export type CallAnalysis = {
+  status: "ok" | "skipped" | "failed"; error: string | null; summary: string | null; sentiment: "positive" | "neutral" | "negative" | null;
+  csat: number | null; nps: number | null; resolved: boolean | null; outcome: Record<string, unknown>; model: string | null; created_at: string;
+};
+export type AnalysisField = { name: string; type: "string" | "number" | "boolean" | "enum" | "array" | "object"; description?: string; options?: string[] };
+/** Was post-call analysis on for the version a call ran on, and in the agent's draft? */
+export type AnalysisSetup = { agent_id: string; release_version: number | null; in_release: boolean; in_draft: boolean };
+export type Satisfaction = {
+  analyzed: number; skipped: number; failed: number;
+  csat: { score: number | null; average: number | null; calls: number }; nps: { score: number | null; calls: number };
+  sentiment: { positive: number | null; neutral: number | null; negative: number | null; calls: number };
+  resolved: { score: number | null; calls: number };
+};
 export type CallDetail = {
-  call: CallRow; events: EventRow[]; turns: TurnLatency[]; agent?: CallAgent | null;
+  call: CallRow; events: EventRow[]; turns: TurnLatency[]; agent?: CallAgent | null; analysis?: CallAnalysis | null; analysis_setup?: AnalysisSetup | null;
   transcript: { role: "user" | "agent" | "system"; text: string; ts: string; turn: number | null }[];
 };
 
@@ -114,12 +128,16 @@ export type ToolPolicy = {
   kind: "read" | "write" | "send"; confirm?: string; timeout_s?: number; cache_ttl?: number; idempotent?: boolean;
   role?: string; args?: Record<string, string>; hooks?: string[]; backs?: string; success_line?: string;
   source?: "mcp" | "local" | "http"; description?: string; input_schema?: Record<string, unknown>;
+  /** false = inactive: not offered to the agent, refuses to run */ enabled?: boolean;
+  /** write / send only: answers {queued: true} at once, the call finishes in the background */ async?: boolean;
+  say_start?: Record<string, string>; say_done?: Record<string, string>;
   http?: { method?: string; url?: string; headers?: Record<string, unknown>; auth?: ToolAuth };
 };
 /** An API tool's authentication; secret parts are {"secret": NAME} references. */
 export type ToolAuth =
   | { type: "none" }
   | { type: "bearer"; token: unknown }
+  | { type: "token"; token: unknown }
   | { type: "basic"; username: unknown; password: unknown }
   | { type: "api_key"; header: string; value: unknown };
 export type ToolTestOverride = { url?: string; method?: string; timeout_s?: number; headers?: Record<string, unknown> };
@@ -156,13 +174,37 @@ export type FlowNode = {
   say?: Record<string, string>; skill?: string; position?: { x: number; y: number };
   /** tool nodes: slot ← path in the tool's result ("result.count") */
   outputs?: Record<string, string>;
+  /** conversation: keypad digits → a variable */
+  dtmf_capture?: { variable?: string; max_digits?: number; end_keys?: string[]; timeout_s?: number };
+  /** static message: move on without waiting for the caller */
+  skip_response?: boolean;
+  /** transfer: own number / extension, warm (announce) or cold, ring timeout, SIP headers */
+  destination?: string; transfer_type?: string; timeout_s?: number; headers?: Record<string, string>;
+  /** tool: continue / retry / fail, extra attempts, said while it runs */
+  on_error?: string; retries?: number; processing?: Record<string, string>;
+  /** settings node: what changes from here on · conversation: model / temperature for this step */
+  overrides?: Record<string, unknown>; llm?: { model?: string; temperature?: number };
+  /** agent node: the agent that takes the call, and what it inherits */
+  agent?: string; handoff_history?: boolean; handoff_variables?: boolean;
 };
-export type FlowEdge = { from: string; to: string; when?: Record<string, unknown>; on?: string };
+export type FlowEdge = {
+  from: string; to: string; when?: Record<string, unknown>; on?: string;
+  /** global edge: return to where the caller was afterwards · ask yes / no first (true or {lang: question}) · arrive silently */
+  back?: boolean; confirm?: boolean | Record<string, string>; silent?: boolean;
+};
 export type FlowGraph = {
   start: string; nodes: FlowNode[]; edges: FlowEdge[]; common_tools?: string[];
   infer?: Record<string, unknown>; reset?: Record<string, unknown>;
   variables?: Record<string, { type?: string; enum?: string[]; description?: string }>;
 };
+export type ShareSettings = {
+  description: string; tagline: string; show_name: boolean; show_transcript: boolean; theme: "light" | "dark"; theme_switcher: boolean;
+  visualizer: "orb" | "wave" | "aura"; gradient: string[]; bg_dark: string; bg_light: string;
+  embed: { position: "bottom-left" | "bottom-center" | "bottom-right"; size: "sm" | "md" | "lg"; label: string; auto_start: boolean;
+    launcher: "auto" | "always" | "never"; color: string };
+  limits: { max_minutes: number; max_concurrent: number; per_ip_per_hour: number; allowed_origins: string[]; allowed_params: string[] };
+};
+export type ShareInfo = { published: boolean; token: string | null; path: string | null; settings: ShareSettings; defaults: ShareSettings };
 export type Bundle = {
   schema: number; agent: { name: string; languages: string[]; default_language: string };
   models: Record<string, { provider?: string; type?: string; settings?: Record<string, unknown> }>;
@@ -171,18 +213,24 @@ export type Bundle = {
   tools: Record<string, unknown>;
   /** knowledge base items this agent searches (search_knowledge_base) */
   knowledge?: { items: string[] };
+  /** custom variables: available everywhere as {{ name }}; a call can pass new values as `params` */
+  variables?: Record<string, { type?: string; default?: unknown; description?: string }>;
+  /** call webhook: call.start / call.end JSON posted to `url` (auth = a secret sent as a Bearer token) */
+  webhook?: { url?: string; auth?: SecretRef | null; signing?: SecretRef | null; events?: string[]; include_transcript?: boolean };
+  /** post-call analysis: summary, sentiment, satisfaction estimates and the agent's own outcome fields */
+  analysis?: { enabled?: boolean; summary?: boolean; sentiment?: boolean; satisfaction?: boolean; fields?: AnalysisField[] };
 };
 
 export type KbStatus = "processing" | "completed" | "completed_with_errors" | "failed";
 export type KbItem = {
-  id: string; name: string; type: "text" | "file"; extension: string | null; size_bytes: number; words: number;
+  id: string; name: string; type: "text" | "file" | "url"; source_url?: string | null; extension: string | null; size_bytes: number; words: number;
   chunks: number; status: KbStatus; error: string | null; created_by: string | null; created_at: string;
   updated_at: string; used_by: { agent: string; name: string }[]; draft_by: { agent: string; name: string }[];
   content?: string;
 };
 export type KbList = {
   items: KbItem[]; usage_bytes: number; quota_bytes: number;
-  limits: { file_bytes: number; text_chars: number; extensions: string[] };
+  limits: { file_bytes: number; text_chars: number; extensions: string[]; urls: number };
 };
 export type AgentDetail = {
   agent: { id: string; name: string; description: string; published_release_id: number | null;
@@ -286,9 +334,67 @@ export type AgentVoices = { agent: string; name: string; provider: string | null
   draft_voices: Record<string, string | null>;
   voices: Record<string, { voice: string | null; model: string | null }> };
 
+export type WebhookDelivery = { id: number; call_id: string | null; event: string; ok: boolean; detail: string | null; attempts: number; created_at: string };
+export type ApiKey = { id: string; name: string; prefix: string; scope: "read" | "full"; created_by: string | null; created_at: string;
+  last_used_at: string | null; expires_at: string | null; revoked_at: string | null; status: "active" | "expired" | "revoked" };
+export type NewApiKey = ApiKey & { key: string; note: string };
+export type BatchStatus = "scheduled" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type RecipientStatus = "pending" | "in_progress" | "completed" | "failed" | "no_answer";
+export type BatchConfig = { send_type: "now" | "schedule"; scheduled_at?: string | null; timezone: string;
+  window_start: string; window_end: string; days: number[] };
+export type BatchRow = { row?: number; phone: string; name?: string | null; variables: Record<string, string>;
+  ignore_e164?: boolean; errors?: string[] };
+export type BatchCheck = { accepted: BatchRow[]; rejected: BatchRow[]; duplicates: number; variables: string[] };
+export type BatchCall = {
+  id: string; name: string; agent_id: string; agent_name: string; from_number: string; status: BatchStatus; config: BatchConfig;
+  created_by: string | null; created_at: string; started_at: string | null; finished_at: string | null;
+  counts: Partial<Record<RecipientStatus, number>>; total: number; progress: number;
+};
+export type BatchRecipient = {
+  id: number; phone: string; name: string | null; variables: Record<string, string>; status: RecipientStatus; call_id: string | null;
+  error: string | null; attempts: number; dialed_at: string | null; ended_at: string | null; duration_s: number | null;
+};
+export type OutboundNumber = { number: string; label: string | null; dial_url: string; has_token: boolean; created_at?: string | null };
+export type PhoneRoute = { pattern: string; agent_id: string; priority: number; label?: string | null; created_at?: string | null };
+
 export const api = {
+  apiKeys: () => req<ApiKey[]>("/api/api-keys"),
+  createApiKey: (b: { name: string; scope: "read" | "full"; expires_days?: number }) =>
+    req<NewApiKey>("/api/api-keys", { method: "POST", body: JSON.stringify(b) }),
+  revokeApiKey: (id: string) => req<{ id: string; revoked: boolean }>(`/api/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  makeOutboundCall: (b: { agent_id: string; from_number: string; to_number: string; params: Record<string, string>; draft?: boolean }) =>
+    req<{ batch_call_id: string; recipient_id: number; to: string }>("/api/outbound-calls", { method: "POST", body: JSON.stringify(b) }),
+  outboundNumbers: () => req<OutboundNumber[]>("/api/outbound-numbers"),
+  putOutboundNumber: (b: { number: string; label?: string; dial_url: string; dial_token?: string }) =>
+    req<{ number: string }>("/api/outbound-numbers", { method: "PUT", body: JSON.stringify(b) }),
+  deleteOutboundNumber: (n: string) => req<{ number: string }>(`/api/outbound-numbers/${encodeURIComponent(n)}`, { method: "DELETE" }),
+  batchCalls: () => req<BatchCall[]>("/api/batch-calls"),
+  batchCall: (id: string) => req<BatchCall>(`/api/batch-calls/${encodeURIComponent(id)}`),
+  validateBatchRows: (b: { csv_base64?: string; rows?: BatchRow[] }) =>
+    req<BatchCheck>("/api/batch-calls/validate", { method: "POST", body: JSON.stringify(b) }),
+  createBatch: (b: { name: string; agent_id: string; from_number: string; rows: BatchRow[]; config: BatchConfig }) =>
+    req<{ id: string; recipients: number; duplicates: number }>("/api/batch-calls", { method: "POST", body: JSON.stringify(b) }),
+  batchAction: (id: string, action: "pause" | "resume" | "cancel" | "retry") =>
+    req<{ id: string; status: BatchStatus }>(`/api/batch-calls/${encodeURIComponent(id)}/actions/${action}`, { method: "POST" }),
+  renameBatch: (id: string, name: string) =>
+    req<{ id: string; name: string }>(`/api/batch-calls/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  deleteBatch: (id: string) => req<{ deleted: string }>(`/api/batch-calls/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  batchRecipients: (id: string, p: { status?: string; q?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]));
+    return req<{ items: BatchRecipient[]; total: number; counts: Partial<Record<RecipientStatus, number>> }>(
+      `/api/batch-calls/${encodeURIComponent(id)}/recipients?${qs}`);
+  },
+  addBatchRecipients: (id: string, b: { csv_base64?: string; rows?: BatchRow[] }) =>
+    req<{ added: number }>(`/api/batch-calls/${encodeURIComponent(id)}/recipients`, { method: "POST", body: JSON.stringify(b) }),
+  removeBatchRecipient: (id: string, rid: number) =>
+    req<{ deleted: number }>(`/api/batch-calls/${encodeURIComponent(id)}/recipients/${rid}`, { method: "DELETE" }),
   voices: () => req<AgentVoices[]>("/api/voices"),
   voiceCatalog: () => req<CatalogVoice[]>("/api/voices/catalog"),
+  share: (id: string) => req<ShareInfo>(`/api/agents/${encodeURIComponent(id)}/share`),
+  putShare: (id: string, settings: ShareSettings) => req<ShareInfo>(`/api/agents/${encodeURIComponent(id)}/share`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings }) }),
+  deleteShare: (id: string) => req<{ published: boolean; ended_calls: number }>(`/api/agents/${encodeURIComponent(id)}/share`, { method: "DELETE" }),
+  systemVariables: () => req<{ group: string; name: string; description: string }[]>("/api/variables/system"),
   useVoice: (body: { agent: string; language: string; voice: string }) =>
     req<{ agent: string; language: string; voice: string; previous: string | null }>("/api/voices/use",
       { method: "POST", body: JSON.stringify(body) }),
@@ -331,12 +437,17 @@ export const api = {
   dashboard: (p: { start: string; end: string; agent?: string; tz?: string }) =>
     req<DashboardData>(`/api/dashboard${qs(p)}`),
   calls: (p: { limit?: number; offset?: number; q?: string; outcome?: string; channel?: string; agent?: string;
-                channels?: string; status?: string; start?: string; end?: string; sort?: string; desc?: boolean }) =>
+                channels?: string; status?: string; start?: string; end?: string; sort?: string; desc?: boolean;
+                duration_op?: string; duration_a?: number; duration_b?: number }) =>
     req<{ total: number; items: CallRow[] }>(`/api/calls${qs(p)}`),
   call: (id: string) => req<CallDetail>(`/api/calls/${encodeURIComponent(id)}`),
+  analyzeCall: (id: string) => req<CallAnalysis>(`/api/calls/${encodeURIComponent(id)}/analyze`, { method: "POST" }),
+  satisfaction: (p: { start: string; end: string; agent?: string }) => req<Satisfaction>(`/api/analytics/satisfaction${qs(p)}`),
   events: (p: { call_id?: string; type?: string[]; level?: string; text?: string; before_id?: number; limit?: number; agent?: string }) =>
     req<EventRow[]>(`/api/events${qs(p)}`),
   liveCalls: () => req<ActiveCall[]>("/api/live/calls"),
+  instructCall: (id: string, text: string) => req<{ call_id: string; sent: boolean }>(`/api/calls/${encodeURIComponent(id)}/instruction`,
+    { method: "POST", body: JSON.stringify({ text }) }),
   endCall: (id: string) => req<{ call_id: string; ended: boolean }>(`/api/calls/${encodeURIComponent(id)}/end`,
     { method: "POST" }),
   providers: (agent?: string) => req<ProvidersResponse>(`/api/providers${qs({ agent })}`),
@@ -377,6 +488,9 @@ export const api = {
   deleteAgent: (id: string) => req<{ deleted: string }>(`/api/agents/${encodeURIComponent(id)}`, { method: "DELETE" }),
   putDraft: (id: string, bundle: Bundle) =>
     req<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/draft`, { method: "PUT", body: JSON.stringify({ bundle }) }),
+  testWebhook: (id: string, webhook: Bundle["webhook"], typed?: { token?: string; signing_secret?: string }) =>
+    req<{ ok: boolean; detail: string }>(`/api/agents/${encodeURIComponent(id)}/webhook/test`, { method: "POST", body: JSON.stringify({ webhook, ...typed }) }),
+  webhookDeliveries: (id: string) => req<WebhookDelivery[]>(`/api/agents/${encodeURIComponent(id)}/webhook/deliveries?limit=50`),
   putDraftSkill: (id: string, key: string, body: { graph?: FlowGraph; files?: Record<string, string>; note?: string }) =>
     req<{ skill: string; version: number }>(`/api/agents/${encodeURIComponent(id)}/draft/skills/${encodeURIComponent(key)}`,
       { method: "PUT", body: JSON.stringify(body) }),
@@ -400,8 +514,8 @@ export const api = {
   exportAgent: (id: string) => req<Record<string, unknown>>(`/api/agents/${encodeURIComponent(id)}/export`),
   release: (id: string, release: number) =>
     req<{ bundle: Bundle; version: number }>(`/api/agents/${encodeURIComponent(id)}/releases/${release}`),
-  routes: () => req<{ pattern: string; agent_id: string; priority: number }[]>("/api/routes"),
-  putRoute: (body: { pattern: string; agent_id: string; priority?: number }) =>
+  routes: () => req<PhoneRoute[]>("/api/routes"),
+  putRoute: (body: { pattern: string; agent_id: string; priority?: number; label?: string }) =>
     req<{ ok: boolean }>("/api/routes", { method: "PUT", body: JSON.stringify(body) }),
   deleteRoute: (pattern: string) => req<{ ok: boolean }>(`/api/routes?pattern=${encodeURIComponent(pattern)}`, { method: "DELETE" }),
   toolLibrary: () => req<ToolLibrary>("/api/tool-library"),
@@ -411,6 +525,12 @@ export const api = {
     req<{ id: string }>("/api/knowledge/text", { method: "POST", body: JSON.stringify(body) }),
   addKbFile: (body: { filename: string; data: string; name?: string }) =>
     req<{ id: string; words: number }>("/api/knowledge/file", { method: "POST", body: JSON.stringify(body) }),
+  addKbUrl: (body: { name: string; url: string; urls?: string[] }) =>
+    req<{ id: string; pages: number }>("/api/knowledge/url", { method: "POST", body: JSON.stringify(body) }),
+  discoverKbUrl: (url: string) =>
+    req<{ urls: string[] }>("/api/knowledge/url/discover", { method: "POST", body: JSON.stringify({ url }) }),
+  renameKb: (id: string, name: string) =>
+    req<{ id: string; name: string }>(`/api/knowledge/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteKb: (id: string) => req<{ deleted: string }>(`/api/knowledge/${encodeURIComponent(id)}`, { method: "DELETE" }),
   reprocessKb: (id: string) => req<{ id: string }>(`/api/knowledge/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
   searchKb: (body: { query: string; items?: string[] }) =>

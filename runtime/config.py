@@ -60,11 +60,18 @@ class Settings(BaseSettings):
     voice_barge_in_confirm: bool = True  # transcribe that speech first: interrupt only for real words, not echo / noise
     voice_level_gate_db: float = 12.0    # ignore speech this far below the caller's own level (background voices); 0 = off
     voice_filler_after_s: float = 0.7
+    voice_wait_for_user: str = "never"   # who speaks first: never (agent greets) | always (agent waits for the caller) | outbound (waits only on outbound calls)
     voice_interrupt: bool = True         # the caller may interrupt the agent (barge-in); off: the agent always finishes
     voice_vad_threshold: float = 0.5     # speech probability that counts as speech (higher: less sensitive to noise)
     voice_inactivity_s: float = 0.0      # caller silent this long after the agent spoke → "are you still there?"; 0 = off
     call_max_minutes: float = 0.0        # the call ends (with a closing line) after this many minutes; 0 = no limit
     llm_hedge_after_s: float = 2.5
+    api_key_rate_per_min: int = 120      # requests an API key may make per minute (per server process)
+    public_base_url: str = ""            # the address the IVR / PBX reaches this server on (dial requests carry it), e.g. https://agent.example.com
+    batch_live_dial: bool = False         # batch calls: False = nothing is dialed (every recipient is 'simulated'); True = POST to the number's dial URL
+    batch_max_concurrent: int = 5         # batch calls in progress at once (all batches together)
+    batch_ring_timeout_s: int = 90        # a dialed call that never connects is a no-answer after this
+    public_trust_proxy: bool = False     # behind a reverse proxy: take the visitor address for the public link limits from X-Forwarded-For
     # Agents (per release knobs): does the caller have to be verified first, and where does the conversation start?
     require_verification: bool = True    # False: e.g. an information line — no mobile / OTP, starts in entry_skill
     entry_skill: str = "home"            # the skill after verification (or from the start when none is required)

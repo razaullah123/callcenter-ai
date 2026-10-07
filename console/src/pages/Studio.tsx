@@ -6,6 +6,7 @@ import SchemaForm from "../SchemaForm";
 import FlowCanvas from "../studio/FlowCanvas";
 import TestPanel, { Icon, ICONS, loadFollow, saveFollow, type LiveEvent } from "../studio/TestPanel";
 import GlobalSettings, { KNOB_LABELS } from "../studio/GlobalSettings";
+import { MakeCall } from "./Numbers";
 import TestsTab, { AuditCard, gateBadge, PublishDialog } from "../studio/TestsTab";
 import { useTestCall, type TestMode } from "../studio/useTestCall";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
@@ -23,8 +24,10 @@ export default function Studio() {
   const [tab, setTab] = useState<Tab>("flow");
   const [publishing, setPublishing] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [phoneTest, setPhoneTest] = useState(false);
+  const outNumbers = useQuery({ queryKey: ["outbound-numbers"], queryFn: api.outboundNumbers, enabled: phoneTest });
   const [useDraft, setUseDraft] = useState(true);
-  const [panel, setPanel] = useState<"chat" | "logs" | null>(null);
+  const [panel, setPanel] = useState<"chat" | "logs" | "vars" | null>(null);
   const [follow, setFollowState] = useState(loadFollow);       // saved on this device, like Hamsa
   const setFollow = (v: boolean) => { setFollowState(v); saveFollow(v); };
   const [active, setActive] = useState<string | null>(null);        // "skill/node" the test call is in
@@ -92,6 +95,7 @@ export default function Studio() {
                 <div className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-line bg-panel p-1 shadow-lg">
                   <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-soft" onClick={() => startTest("voice")}>🎙 Browser call</button>
                   <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-soft" onClick={() => startTest("chat")}>💬 Chat</button>
+                  <button id="test-phone" className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-soft" onClick={() => { setMenu(false); setPhoneTest(true); }}>📞 Test via phone…</button>
                   <div className="my-1 border-t border-line" />
                   <label className="flex items-center gap-2 px-2 py-1 text-xs">
                     <input type="checkbox" checked={testWithDraft} disabled={!d.has_draft} onChange={e => setUseDraft(e.target.checked)} />
@@ -101,6 +105,7 @@ export default function Studio() {
             </div>
           )}
           <Button onClick={() => { setTab("flow"); setPanel(p => (p === "logs" ? null : "logs")); }}><span className="inline-flex items-center gap-1.5"><Icon d={ICONS.activity} />Live Call Logs</span></Button>
+          <Link to={`/agents/${d.agent.id}/share`} className="rounded-lg border border-line bg-panel px-3 py-1.5 text-sm font-medium hover:bg-soft">Share</Link>
           <Button kind="primary" onClick={() => setPublishing(true)} disabled={!d.has_draft}>⇪ Publish</Button>
           <span className={`rounded-lg border px-3 py-1.5 text-sm ${dirty ? "border-warn/50 text-warn" : "border-good/40 text-good"}`}>
             {dirty ? "● Unsaved changes" : "✓ Saved"}</span>
@@ -109,6 +114,7 @@ export default function Studio() {
         </div>
       </div>
       <ErrorBox error={discard.error ?? exportAgent.error} />
+      {phoneTest && outNumbers.data && <MakeCall numbers={outNumbers.data} fixedAgent={d.agent.id} draft={testWithDraft} onClose={() => setPhoneTest(false)} />}
       {publishing && <PublishDialog d={d} onClose={() => setPublishing(false)} onPublished={refresh} />}
 
       <div className="flex gap-1 border-b border-line">
@@ -163,7 +169,7 @@ function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLog
       {s?.flow?.graph && <FlowCanvas key={`${skill}:${s.version}`} graph={s.flow.graph} converted={!!s.flow.converted} tools={d.tools}
         skills={Object.keys(d.skills).filter(k => k !== "_persona")} saving={save.isPending} onSave={g => save.mutate(g)}
         onDirty={onDirty} aside={aside} activeNode={activeSkill === skill ? activeNode : null} follow={follow} locate={locateHere}
-        toolInfo={toolInfo} onViewLogs={onViewLogs} onInspect={onInspect}
+        toolInfo={toolInfo} onViewLogs={onViewLogs} onInspect={onInspect} customVars={d.bundle.variables}
         globalPanel={<GlobalSettings key={`${skill}:${JSON.stringify(d.bundle).length}`} d={d} skill={skill} onSaved={onSaved} />} />}
     </div>
   );

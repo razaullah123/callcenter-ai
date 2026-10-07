@@ -190,6 +190,12 @@ def check_value(spec: dict[str, Any], value: Any) -> Any:
             value = value if isinstance(value, bool) else str(value).strip().lower() in ("true", "yes", "1")
         elif kind == "date":
             value = date.fromisoformat(str(value)[:10]).isoformat()
+        elif kind in ("array", "object"):
+            if isinstance(value, str):
+                value = json.loads(value)
+            if not isinstance(value, list if kind == "array" else dict):
+                return None
+            return value if value else None
         else:
             value = str(value).strip()
     except (TypeError, ValueError):

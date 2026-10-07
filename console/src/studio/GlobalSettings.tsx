@@ -1,8 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type AgentDetail, type Bundle } from "../api";
+import { api, type AgentDetail, type AnalysisField, type Bundle } from "../api";
 import { Badge, Button, ErrorBox, cx } from "../ui";
+import VariablePicker from "./VariablePicker";
+import { nameProblem, type VarGroup } from "./variables";
 
 // The flow canvas's ⚙ panel, laid out like Hamsa's "Global Settings": one collapsible section per area — system
 // prompt, voice, LLM, noise, knowledge base, tools, outcome, phone number, call settings, webhook. Everything edits the
@@ -25,6 +27,7 @@ const IC = {
   chev: ico(<path d="m6 9 6 6 6-6" />),
   chevR: ico(<path d="m9 6 6 6-6 6" />),
   expand: ico(<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />),
+  vars: ico(<path d="M8 21s-4-3-4-9 4-9 4-9M16 3s4 3 4 9-4 9-4 9M15 9l-6 6M9 9l6 6" />),
 };
 
 /** Human names for the per-agent knobs (also used by the Settings tab). */
@@ -32,6 +35,7 @@ export const KNOB_LABELS: Record<string, [string, string]> = {
   voice_end_silence_ms: ["Response delay (ms)", "Silence after the caller stops talking before the agent answers"],
   voice_barge_in_ms: ["Minimum interruption (ms)", "Caller speech needed to interrupt the agent"],
   voice_barge_in_confirm: ["Interrupt only for real words", "Transcribe the interruption first: ignore echo, coughs and noise"],
+  voice_wait_for_user: ["Wait for user to speak first", "Never: the agent greets as soon as the call connects. Always: it stays silent until the caller speaks. Outbound only: waits just on calls it places"],
   voice_interrupt: ["Interrupt", "The caller can interrupt the agent while it speaks; off: the agent always finishes"],
   voice_level_gate_db: ["Background voice filter (dB)", "Ignore speech this much quieter than the caller (TV, people nearby); 0 = off"],
   voice_vad_threshold: ["VAD activation threshold", "Speech probability that counts as speech — higher is less sensitive to noise"],
@@ -131,6 +135,53 @@ function ModelPicker({ id, label, models, value, onChange }: { id: string; label
   );
 }
 
+type CustomSpec = { type?: string; default?: unknown; description?: string };
+
+const WH_EVENTS = ["call.started", "call.answered", "transcription.update", "tool.executed", "call.ended"];
+
+/** The agent's custom variables: {{ name }} anywhere, a default each, new values passed as params when a call starts. */
+function CustomVariables({ value, reserved, onChange }: { value: Record<string, CustomSpec>; reserved: string[]; onChange: (v: Record<string, CustomSpec> | undefined) => void }) {
+  const [name, setName] = useState("");
+  const problem = name ? (nameProblem(name, reserved) ?? (value[name] ? "already exists" : null)) : null;
+  const set = (k: string, spec: CustomSpec) => onChange({ ...value, [k]: spec });
+  const text = (v: unknown) => (typeof v === "string" ? v : v === undefined || v === null ? "" : JSON.stringify(v));
+  const parse = (kind: string, raw: string): unknown => {
+    if (raw === "") return undefined;
+    if (kind === "number") return isNaN(Number(raw)) ? raw : Number(raw);
+    if (kind === "array" || kind === "object") { try { return JSON.parse(raw); } catch { return raw; } }
+    return raw;
+  };
+  return (
+    <div className="space-y-2">
+      {Object.entries(value).map(([k, spec]) => {
+        const kind = spec.type ?? "string";
+        return (
+          <div key={k} className="space-y-1.5 rounded-lg border border-line p-2">
+            <div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-semibold">{`{{ ${k} }}`}</span>
+              <Button kind="ghost" onClick={() => { const { [k]: _gone, ...rest } = value; void _gone; onChange(Object.keys(rest).length ? rest : undefined); }}>Remove</Button></div>
+            <div className="grid grid-cols-[7rem_1fr] gap-2">
+              <select aria-label={`${k} type`} className="text-xs" value={kind} onChange={e => set(k, { ...spec, type: e.target.value, default: undefined })}>
+                {["string", "number", "boolean", "array", "object"].map(t => <option key={t}>{t}</option>)}</select>
+              {kind === "boolean"
+                ? <select aria-label={`${k} default`} className="text-xs" value={String(spec.default ?? false)} onChange={e => set(k, { ...spec, default: e.target.value === "true" })}>
+                    <option value="false">false</option><option value="true">true</option></select>
+                : <input aria-label={`${k} default`} className="min-w-0 font-mono text-xs" placeholder={kind === "array" ? "[]" : kind === "object" ? "{}" : "default value"}
+                    value={text(spec.default)} onChange={e => set(k, { ...spec, default: parse(kind, e.target.value) })} />}
+            </div>
+            <input aria-label={`${k} description`} className="w-full text-xs" placeholder="what it is (optional)" value={spec.description ?? ""} onChange={e => set(k, { ...spec, description: e.target.value })} />
+          </div>);
+      })}
+      <form className="space-y-1" onSubmit={e => { e.preventDefault(); if (name && !problem) { set(name, { type: "string", default: "" }); setName(""); } }}>
+        <div className="flex gap-2">
+          <input id="custom-var-name" className="min-w-0 flex-1 font-mono text-xs" placeholder="business_name" value={name} onChange={e => setName(e.target.value.replace(/[^\w]/g, ""))} />
+          <Button type="submit" disabled={!name || !!problem}>+ Add variable</Button>
+        </div>
+        {problem && <div className="text-[11px] text-bad">The name {problem}.</div>}
+      </form>
+    </div>
+  );
+}
+
 function PromptDialog({ title, value, onChange, onClose }: { title: string; value: string; onChange: (v: string) => void; onClose: () => void }) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -152,6 +203,13 @@ function PromptDialog({ title, value, onChange, onClose }: { title: string; valu
   );
 }
 
+const STARTER_FIELDS: AnalysisField[] = [
+  { name: "caller_name", type: "string", description: "The caller's name if they said it; empty if not." },
+  { name: "call_reason", type: "string", description: "Why the caller phoned, in a few words." },
+  { name: "objective_met", type: "boolean", description: "true if the caller got what they called for." },
+  { name: "follow_up_needed", type: "boolean", description: "true if a person should follow up with the caller." },
+];
+
 export default function GlobalSettings({ d, skill, onSaved, onClose }: {
   d: AgentDetail; skill: string; onSaved: () => void; onClose?: () => void;
 }) {
@@ -163,7 +221,32 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
   const [open, setOpen] = useState<Set<string>>(new Set(["prompt"]));
   const [editing, setEditing] = useState<"persona" | "flow" | null>(null);
   const catalog = useQuery({ queryKey: ["voice-catalog"], queryFn: api.voiceCatalog });
+  const sysVars = useQuery({ queryKey: ["system-variables"], queryFn: api.systemVariables, staleTime: Infinity });
+  const reservedNames = (sysVars.data ?? []).map(v => v.name);
+  const promptVars: VarGroup[] = [
+    { label: "System", items: (sysVars.data ?? []).map(v => ({ name: v.name, hint: v.description })) },
+    { label: "Custom", items: Object.entries(b.variables ?? {}).map(([name, v]) => ({ name, hint: v.type ?? "string" })) },
+  ].filter(g => g.items.length);
   const kb = useQuery({ queryKey: ["knowledge"], queryFn: api.knowledge });
+  const [whToken, setWhToken] = useState("");
+  const [whSign, setWhSign] = useState("");
+  const [whTest, setWhTest] = useState<{ ok: boolean; detail: string } | null>(null);
+  const wh = b.webhook ?? {};
+  const an = b.analysis ?? {};
+  const anFields = an.fields ?? [];
+  const setAn = (patch: Partial<NonNullable<Bundle["analysis"]>>) => setB(x => ({ ...x, analysis: { ...x.analysis, ...patch } }));
+  const setAnField = (i: number, patch: Partial<AnalysisField>) => setAn({ fields: anFields.map((f, j) => (j === i ? { ...f, ...patch } : f)) });
+  const setWh = (patch: Partial<NonNullable<Bundle["webhook"]>>) => { setWhTest(null); setB(x => ({ ...x, webhook: { ...x.webhook, ...patch } })); };
+  const whEvents = wh.events ?? WH_EVENTS;
+  const whSecretName = `WEBHOOK_TOKEN_${d.agent.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  const whSignName = `WEBHOOK_SIGNING_${d.agent.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  const deliveries = useQuery({ queryKey: ["webhook-deliveries", d.agent.id], queryFn: () => api.webhookDeliveries(d.agent.id),
+    enabled: open.has("webhook"), refetchInterval: open.has("webhook") ? 10_000 : false });
+  const testWh = useMutation({
+    mutationFn: () => api.testWebhook(d.agent.id, wh, { token: whToken || undefined, signing_secret: whSign || undefined }),
+    onSuccess: r => { setWhTest(r); deliveries.refetch(); },
+    onError: (e: Error) => setWhTest({ ok: false, detail: e.message }),
+  });
   const toggle = (id: string) => setOpen(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const bundleDirty = JSON.stringify(b) !== JSON.stringify(d.bundle);
   const dirty = bundleDirty || p !== persona || f !== flowText;
@@ -171,9 +254,18 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
     mutationFn: async () => {
       if (p !== persona) await api.putDraftSkill(d.agent.id, "_persona", { files: { "SKILL.md": p }, note: "system prompt (global settings)" });
       if (f !== flowText) await api.putDraftSkill(d.agent.id, skill, { files: { ...d.skills[skill].files, "SKILL.md": f }, note: "flow prompt (global settings)" });
-      if (bundleDirty) await api.putDraft(d.agent.id, b);
+      let next = b;
+      if (whToken) {                      // the token is kept as a secret; the bundle only holds its name
+        await api.putSecret(whSecretName, whToken);
+        next = { ...next, webhook: { ...next.webhook, auth: { secret: whSecretName } } };
+      }
+      if (whSign) {
+        await api.putSecret(whSignName, whSign);
+        next = { ...next, webhook: { ...next.webhook, signing: { secret: whSignName } } };
+      }
+      if (bundleDirty || whToken || whSign) await api.putDraft(d.agent.id, next);
     },
-    onSuccess: onSaved,
+    onSuccess: () => { setWhToken(""); setWhSign(""); onSaved(); },
   });
   const knob = <T,>(k: string, dflt: T): T => (b.knobs[k] ?? dflt) as T;
   const setKnob = (k: string, v: unknown) => setB(x => ({ ...x, knobs: { ...x.knobs, [k]: v } }));
@@ -210,6 +302,7 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
             <div className="mb-1 flex items-center justify-between"><span className="text-sm font-medium">System prompt <span className="text-bad">*</span></span>
               <button onClick={() => setEditing("persona")} className="flex items-center gap-1 text-xs text-accent-text hover:underline">{IC.expand}Open editor</button></div>
             <textarea id="global-persona" rows={7} dir="auto" className="w-full font-mono text-[11px]" value={p} onChange={e => setP(e.target.value)} />
+            <div className="mt-1"><VariablePicker groups={promptVars} fields={[{ id: "global-persona", value: p, onChange: setP }]} /></div>
             <div className="text-[11px] text-muted">The whole agent: who it is, tone, language rules, what it never does. ## ar / ## en sections per language; {"{{ }}"} templates allowed.</div>
           </div>
           {d.skills[skill] && <div>
@@ -224,7 +317,7 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
               <input key={l} aria-label={`Greeting (${l})`} dir={l === "ar" ? "rtl" : "ltr"} className="mb-2 w-full" placeholder={`default greeting (${l})`}
                 value={greeting[l] ?? ""} onChange={e => setB(x => ({ ...x, phrases: { ...x.phrases, GREETING: { ...greeting, [l]: e.target.value } } }))} />
             ))}
-            <div className="text-[11px] text-muted">Said word for word when the call starts. Empty: the platform default.</div>
+            <div className="text-[11px] text-muted">Said when the call starts (not at all if the agent waits for the caller). Empty: the platform default. It may be a template — e.g. {"{{ agent_name }}"}, {"{{ current_time }}"}, {"{{ user_number }}"} — to greet differently per call.</div>
           </div>
         </Section>
 
@@ -299,6 +392,14 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
           <div className="text-[11px] text-muted">With items chosen, the agent searches them (“search the knowledge base”) in every step.</div>
         </Section>
 
+        <Section id="vars" icon={IC.vars} title="Variables" sub="Custom values available everywhere as {{ name }}." open={open.has("vars")} onToggle={toggle}
+          badge={Object.keys(b.variables ?? {}).length ? <Badge>{Object.keys(b.variables ?? {}).length}</Badge> : undefined}>
+          <CustomVariables value={b.variables ?? {}} reserved={reservedNames}
+            onChange={v => setB(x => { const { variables: _v, ...rest } = x; void _v; return (v ? { ...rest, variables: v } : rest) as Bundle; })} />
+          <div className="text-[11px] text-muted">Use <span className="font-mono">{"{{ name }}"}</span> in prompts, messages and tool arguments (<span className="font-mono">{"{{ name || 'fallback' }}"}</span> if it may be empty). 
+            A call can pass new values as <span className="font-mono">params</span> when it starts; the system variables (call_id, current_time, user_number …) are always there — see the (x) panel on the flow canvas.</div>
+        </Section>
+
         <Section id="tools" icon={IC.tools} title="Tools" sub="Connect to external services and APIs." open={open.has("tools")} onToggle={toggle}
           badge={<Badge>{d.tools.length}</Badge>}>
           <div className="flex flex-wrap gap-1">{d.tools.map(t => <Link key={t} to={`/tools?tool=${encodeURIComponent(t)}`} className="rounded border border-line bg-soft px-1.5 py-0.5 font-mono text-[11px] hover:border-accent">{t}</Link>)}</div>
@@ -306,9 +407,37 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
         </Section>
 
         <Section id="outcome" icon={IC.outcome} title="Outcome" sub="Define post-conversation processing prompts." open={open.has("outcome")} onToggle={toggle}
-          badge={<span className="rounded bg-soft px-1.5 text-[10px] font-medium text-muted">Soon</span>}>
-          <p className="text-sm text-muted">Post-call analysis (a summary, satisfaction and your own fields extracted from each call) is planned (12.9).
-            Today each call records its outcome — booked, verified, handed to a person — in <Link className="underline" to="/calls">Call history</Link>.</p>
+          badge={an.enabled ? <span className="rounded bg-soft px-1.5 text-[10px] font-medium text-muted">On</span> : undefined}>
+          <Row title="Analyse every call" help="When a call ends, the agent's own model reads the (masked) transcript once and writes a summary, the caller's sentiment, estimated satisfaction and your fields below. Shown in Call history, the dashboard and the call.ended webhook. Calls with fewer than 2 caller turns are skipped.">
+            <Switch id="gs-an-on" on={!!an.enabled} onChange={v => setAn({ enabled: v })} /></Row>
+          {an.enabled && <>
+            <Row title="Summary" help="2-3 sentences in the language of the call."><Switch id="gs-an-summary" on={an.summary !== false} onChange={v => setAn({ summary: v })} /></Row>
+            <Row title="Sentiment" help="Positive, neutral or negative at the end of the call."><Switch id="gs-an-sentiment" on={an.sentiment !== false} onChange={v => setAn({ sentiment: v })} /></Row>
+            <Row title="Satisfaction" help="Estimated CSAT (1-5), NPS (0-10) and whether the agent resolved the request — estimates, not survey answers."><Switch id="gs-an-sat" on={an.satisfaction !== false} onChange={v => setAn({ satisfaction: v })} /></Row>
+            <div>
+              <div className="mb-1 flex items-center justify-between"><span className="text-sm font-medium">Your outcome fields</span>
+                <span className="flex gap-1.5">
+                  <button type="button" className="rounded border border-line px-2 py-0.5 text-xs hover:bg-soft disabled:opacity-50" disabled={anFields.length >= 20}
+                    title="Caller name, why they called, whether the request was met, follow-up needed"
+                    onClick={() => setAn({ fields: [...anFields, ...STARTER_FIELDS.filter(s => !anFields.some(f => f.name === s.name))].slice(0, 20) })}>+ Suggested fields</button>
+                  <button type="button" className="rounded border border-line px-2 py-0.5 text-xs hover:bg-soft disabled:opacity-50" disabled={anFields.length >= 20}
+                    onClick={() => setAn({ fields: [...anFields, { name: "", type: "string", description: "" }] })}>+ Add field</button></span></div>
+              <p className="mb-2 text-[11px] text-muted">Each is filled from the conversation (or left empty) and returned as <span className="font-mono">outcomeResult</span> in the webhook. Names are snake_case.</p>
+              {anFields.map((f, i) => (
+                <div key={i} className="mb-2 space-y-1.5 rounded-lg border border-line p-2.5">
+                  <div className="grid grid-cols-[1fr_6.5rem_auto] gap-2">
+                    <input aria-label={`Field ${i + 1} name`} className="font-mono text-xs" placeholder="call_reason" value={f.name} onChange={e => setAnField(i, { name: e.target.value })} />
+                    <select aria-label={`Field ${i + 1} type`} className="text-xs" value={f.type} onChange={e => setAnField(i, { type: e.target.value as AnalysisField["type"] })}>
+                      {["string", "number", "boolean", "enum", "array", "object"].map(t => <option key={t}>{t}</option>)}</select>
+                    <button type="button" aria-label={`Remove field ${i + 1}`} className="rounded px-2 text-bad hover:bg-bad/10" onClick={() => setAn({ fields: anFields.filter((_, j) => j !== i) })}>✕</button>
+                  </div>
+                  <input aria-label={`Field ${i + 1} description`} className="w-full text-xs" maxLength={300} placeholder="What to extract, e.g. why the caller phoned" value={f.description ?? ""} onChange={e => setAnField(i, { description: e.target.value })} />
+                  {f.type === "enum" && <input aria-label={`Field ${i + 1} options`} className="w-full text-xs" placeholder="Allowed values, comma separated: booking, billing, other"
+                    value={(f.options ?? []).join(", ")} onChange={e => setAnField(i, { options: e.target.value.split(",").map(x => x.trim()).filter(Boolean) })} />}
+                </div>))}
+            </div>
+          </>}
+          <div className="rounded-lg bg-soft/60 p-3 text-[11px] text-muted">Applies to calls after Save + Publish. The transcript sent to the model is the masked one (no phone numbers or ids). Open a past call in <Link className="underline" to="/calls">Call history</Link> and press Analyze to run it on that call.</div>
         </Section>
 
         <Section id="phone" icon={IC.phone} title="Phone Number" sub="Assign a phone number for calls." open={open.has("phone")} onToggle={toggle}
@@ -322,6 +451,10 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
         </Section>
 
         <Section id="call" icon={IC.call} title="Call Settings" sub="Configure call behavior and thresholds." open={open.has("call")} onToggle={toggle}>
+          <Row title={KNOB_LABELS.voice_wait_for_user[0]} help={KNOB_LABELS.voice_wait_for_user[1]}>
+            <select id="gs-wait-first" className="text-sm" value={knob("voice_wait_for_user", "never")} onChange={e => setKnob("voice_wait_for_user", e.target.value)}>
+              <option value="never">Never</option><option value="always">Always</option><option value="outbound">Outbound calls only</option>
+            </select></Row>
           <Row title={KNOB_LABELS.voice_interrupt[0]} help={KNOB_LABELS.voice_interrupt[1]}>
             <Switch id="gs-interrupt" on={knob("voice_interrupt", true)} onChange={v => setKnob("voice_interrupt", v)} /></Row>
           <Row title={KNOB_LABELS.require_verification[0]} help={KNOB_LABELS.require_verification[1]}>
@@ -354,8 +487,58 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
         </Section>
 
         <Section id="webhook" icon={IC.hook} title="Call Webhook" sub="Send all call events and conversation data to your webhook." open={open.has("webhook")} onToggle={toggle}
-          badge={<span className="rounded bg-soft px-1.5 text-[10px] font-medium text-muted">Soon</span>}>
-          <p className="text-sm text-muted">Not built yet. Call events are in <Link className="underline" to="/logs">Logs</Link> and each call's record in Call history.</p>
+          badge={wh.url ? <span className="rounded bg-soft px-1.5 text-[10px] font-medium text-muted">On</span> : undefined}>
+          <div>
+            <label htmlFor="gs-wh-url" className="mb-1 block text-sm font-medium">Webhook URL</label>
+            <input id="gs-wh-url" className="w-full" placeholder="https://api.yourcompany.com/webhook (HTTPS only; empty = off)" value={wh.url ?? ""} onChange={e => setWh({ url: e.target.value.trim() })} />
+          </div>
+          <div>
+            <label htmlFor="gs-wh-token" className="mb-1 block text-sm font-medium">Bearer token</label>
+            <input id="gs-wh-token" type="password" className="w-full" autoComplete="off" value={whToken} onChange={e => { setWhTest(null); setWhToken(e.target.value); }}
+              placeholder={wh.auth ? "Set — type a new one to replace it" : "Optional — sent as Authorization: Bearer …"} />
+            <div className="mt-1 text-[11px] text-muted">Stored as an encrypted secret ({wh.auth?.secret ?? whSecretName}).
+              {wh.auth && <> <button type="button" className="underline" onClick={() => setWh({ auth: null })}>Remove token</button></>}</div>
+          </div>
+          <div>
+            <label htmlFor="gs-wh-sign" className="mb-1 block text-sm font-medium">Signing secret <span className="text-xs font-normal text-muted">(optional)</span></label>
+            <input id="gs-wh-sign" type="password" className="w-full" autoComplete="off" value={whSign} onChange={e => { setWhTest(null); setWhSign(e.target.value); }}
+              placeholder={wh.signing ? "Set — type a new one to replace it" : "Optional — signs every request so you can check it came from us"} />
+            <div className="mt-1 text-[11px] text-muted">Each request then carries <span className="font-mono">X-Webhook-Timestamp</span> and <span className="font-mono">X-Webhook-Signature: sha256=…</span>,
+              the HMAC-SHA256 of <span className="font-mono">timestamp.body</span> under this secret. <span className="font-mono">X-Webhook-Id</span> is the same on every retry — use it to ignore duplicates.
+              {wh.signing && <> <button type="button" className="underline" onClick={() => setWh({ signing: null })}>Remove signing</button></>}</div>
+          </div>
+          <div>
+            <div className="text-sm font-medium">Events</div>
+            <p className="mt-0.5 text-[11px] text-muted">call.started and call.answered when the call connects; transcription.update for every line spoken; tool.executed after each tool; call.ended with the conversation.</p>
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-sm">
+              {WH_EVENTS.map(ev => (
+                <label key={ev} className="flex items-center gap-1.5"><input type="checkbox" checked={whEvents.includes(ev)}
+                  onChange={e => setWh({ events: e.target.checked ? [...whEvents, ev] : whEvents.filter(x => x !== ev) })} />{ev}</label>))}
+            </div>
+          </div>
+          <Row title="Include conversation" help="Add the (masked) transcript to call.ended.">
+            <Switch id="gs-wh-transcript" on={wh.include_transcript !== false} onChange={v => setWh({ include_transcript: v })} /></Row>
+          <div className="flex items-center gap-3">
+            <button type="button" className="rounded border border-line px-3 py-1 text-sm hover:bg-soft disabled:opacity-50" disabled={!wh.url || testWh.isPending}
+              onClick={() => testWh.mutate()}>{testWh.isPending ? "Sending…" : "Send test call.ended"}</button>
+            {whTest && <span role="status" className={`text-sm ${whTest.ok ? "text-good" : "text-bad"}`}>{whTest.ok ? "Delivered" : "Failed"} — {whTest.detail}</span>}
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between"><span className="text-sm font-medium">Recent deliveries</span>
+              <button type="button" className="text-xs text-muted underline" onClick={() => deliveries.refetch()}>Reload</button></div>
+            {!deliveries.data?.length ? <p className="rounded-lg bg-soft/60 p-3 text-xs text-muted">{deliveries.isLoading ? "Loading…" : "Nothing sent yet. Deliveries of published calls (and tests) show up here."}</p> : (
+              <div className="max-h-56 overflow-auto rounded-lg border border-line text-xs">
+                {deliveries.data.map(r => (
+                  <div key={r.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-line px-2.5 py-1.5 last:border-0">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${r.ok ? "bg-good/15 text-good" : "bg-bad/15 text-bad"}`}>{r.ok ? "Delivered" : "Failed"}</span>
+                    <span className="min-w-0"><span className="font-mono">{r.event}</span> <span className="text-muted">· {r.call_id ? r.call_id.slice(0, 18) : "—"} · {r.detail ?? ""}{r.attempts > 1 ? ` · ${r.attempts} attempts` : ""}</span></span>
+                    <span className="whitespace-nowrap text-muted">{new Date(r.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+                  </div>))}
+              </div>
+            )}
+          </div>
+          <div className="rounded-lg bg-soft/60 p-3 text-[11px] text-muted">Applies after Save + Publish. Delivery is retried up to 3 times on network errors, 429 and 5xx;
+            a failure shows in <Link className="underline" to="/logs">Logs</Link> and never affects the call. The caller's number is never sent.</div>
         </Section>
       </div>
 

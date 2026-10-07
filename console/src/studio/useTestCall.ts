@@ -64,6 +64,7 @@ export function useTestCall() {
     else if (m.event === "transcript") add({ role: m.role, text: m.text });
     else if (m.event === "metric") setLatency(p => [...p, m.ms]);
     else if (m.event === "transfer") add({ role: "sys", text: `↪ transferred to a person: ${m.reason ?? ""}` });
+    else if (m.event === "agent_transfer") add({ role: "sys", text: `↪ now speaking with ${m.name ?? m.agent_id}` });
     else if (m.event === "hangup") { add({ role: "sys", text: "☎ the agent ended the call" }); stop(); }
     else if (m.event === "error") add({ role: "sys", text: `⚠ ${m.message}` });
   };

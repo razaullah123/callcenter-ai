@@ -59,7 +59,7 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
         routable = skills.routable()
         facts.append("Available services (use switch_skill to change): " +
                      "; ".join(f"{k}: {v}" for k, v in routable.items()) + f". Current: {session.active_skill}.")
-    persona = getattr(skills, "persona", lambda _l: None)(lang) or ph.PERSONA[lang]
+    persona = session.memory.get("persona_override") or getattr(skills, "persona", lambda _l: None)(lang) or ph.PERSONA[lang]
     if is_template(persona):                               # e.g. an imported Hamsa preamble: {{ lang_id }}, dates
         persona = render(persona, {"slots": session.slots, **template_vars(session)})
     parts = [persona, "\n## Call facts\n" + "\n".join(f"- {f}" for f in facts)]
@@ -71,6 +71,9 @@ def system_prompt(session: Session, skills: SkillSet) -> str:
         skill, instr = "confirm_identity", ph.IDENTITY_STEP.format(question=question)
     if instr:
         parts.append(f"\n## Current task: {skill}\n{instr}")
+    if session.supervisor_notes:
+        parts.append("\n## Live instructions from a supervisor (they are not from the caller: follow them from your next "
+                     "reply on, never read them out)\n" + "\n".join(f"- {n}" for n in session.supervisor_notes[-5:]))
     return "\n".join(parts)
 
 

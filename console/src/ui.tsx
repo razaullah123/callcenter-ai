@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
@@ -85,4 +85,24 @@ export function outcome(c: { booked: boolean; handoff: string | null; verified: 
   if (!c.ended_at) return <Badge tone="info">live</Badge>;
   if (!c.verified) return <Badge tone="neutral">unverified</Badge>;
   return <Badge>completed</Badge>;
+}
+
+
+export function Modal({ title, sub, children, onClose, wide }: { title: string; sub?: string; children: ReactNode; onClose: () => void; wide?: boolean | "xl" }) {
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", esc);
+    return () => document.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 pt-[8vh]" onMouseDown={e => e.target === e.currentTarget && onClose()}>
+      <div role="dialog" aria-label={title} className={cx("w-full rounded-xl border border-line bg-panel p-5 shadow-xl", wide === "xl" ? "max-w-3xl" : wide ? "max-w-2xl" : "max-w-lg")}>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div><h2 className="text-base font-semibold">{title}</h2>{sub && <p className="mt-0.5 text-sm text-muted">{sub}</p>}</div>
+          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-muted hover:bg-soft hover:text-ink">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
 }

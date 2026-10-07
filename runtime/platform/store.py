@@ -56,6 +56,13 @@ class MemoryStore:
         self._secrets: dict[tuple[str, str], dict] = {}
         self._eval_cases: dict[tuple[str, str], dict] = {}
         self._audit: list[dict] = []
+        self._shares: dict[str, dict] = {}
+        self._outbound: dict[tuple[str, str], dict] = {}
+        self._batches: dict[str, dict] = {}
+        self._deliveries: list[dict] = []
+        self._analysis: dict[str, dict] = {}
+        self._api_keys: dict[str, dict] = {}
+        self._recipients: dict[int, dict] = {}
 
     @asynccontextmanager
     async def advisory_lock(self, key: str):
@@ -188,6 +195,7 @@ class MemoryStore:
             self._releases.pop(rid)
         for key in [k for k in self._eval_cases if k[0] == agent_id]:
             self._eval_cases.pop(key)
+        self._shares.pop(agent_id, None)
 
     async def delete_route(self, ws: str, pattern: str) -> None:
         self._routes.pop((ws, pattern), None)
@@ -218,9 +226,11 @@ class MemoryStore:
         return sorted((copy.deepcopy(r) for (w, _), r in self._routes.items() if w == ws),
                       key=lambda r: -r.get("priority", 0))
 
-    async def put_route(self, ws: str, pattern: str, agent_id: str, priority: int = 0) -> None:
-        self._routes[(ws, pattern)] = {"workspace_id": ws, "pattern": pattern, "agent_id": agent_id,
-                                       "priority": priority}
+    async def put_route(self, ws: str, pattern: str, agent_id: str, priority: int = 0, label: str | None = None) -> None:
+        old = self._routes.get((ws, pattern)) or {}
+        self._routes[(ws, pattern)] = {"workspace_id": ws, "pattern": pattern, "agent_id": agent_id, "priority": priority,
+                                       "label": (label or None) if label is not None else old.get("label"),
+                                       "created_at": old.get("created_at") or _now()}
 
     # ---- users, sessions, members, invitations (console sign-in)
     def _acc(self) -> dict:
@@ -287,6 +297,150 @@ class MemoryStore:
 
     async def delete_invitation(self, inv_id: str) -> None:
         self._acc()["invites"].pop(inv_id, None)
+
+    # ---- public page / embed
+    async def share(self, agent_id: str) -> dict | None:
+        return copy.deepcopy(self._shares.get(agent_id))
+
+    async def share_by_token(self, token: str) -> dict | None:
+        return copy.deepcopy(next((r for r in self._shares.values() if r["token"] == token), None))
+
+    async def put_share(self, row: dict) -> None:
+        old = self._shares.get(row["agent_id"])
+        self._shares[row["agent_id"]] = {**(old or {"created_at": _now()}), **copy.deepcopy(row), "updated_at": _now()}
+
+    async def delete_share(self, agent_id: str) -> None:
+        self._shares.pop(agent_id, None)
+
+    # ---- API keys
+    async def create_api_key(self, row: dict) -> None:
+        self._api_keys[row["id"]] = {"created_at": _now(), "last_used_at": None, "expires_at": None, "revoked_at": None,
+                                     **copy.deepcopy(row)}
+
+    async def api_key_by_hash(self, key_hash: str) -> dict | None:
+        return copy.deepcopy(next((k for k in self._api_keys.values() if k["key_hash"] == key_hash), None))
+
+    async def api_keys(self, ws: str) -> list[dict]:
+        return sorted((copy.deepcopy(k) for k in self._api_keys.values() if k["workspace_id"] == ws),
+                      key=lambda k: k["created_at"], reverse=True)
+
+    async def revoke_api_key(self, ws: str, key_id: str) -> bool:
+        k = self._api_keys.get(key_id)
+        if not k or k["workspace_id"] != ws or k["revoked_at"]:
+            return False
+        k["revoked_at"] = _now()
+        return True
+
+    async def touch_api_key(self, key_id: str) -> None:
+        if key_id in self._api_keys:
+            self._api_keys[key_id]["last_used_at"] = _now()
+
+    # ---- post-call analysis
+    async def put_call_analysis(self, row: dict) -> None:
+        self._analysis[row["call_id"]] = {**copy.deepcopy(row), "created_at": _now()}
+
+    async def call_analysis(self, call_id: str) -> dict | None:
+        return copy.deepcopy(self._analysis.get(call_id))
+
+    async def call_analyses(self, ws: str, start=None, end=None, agent_id: str | None = None) -> list[dict]:
+        return [copy.deepcopy(r) for r in self._analysis.values() if r["workspace_id"] == ws
+                and (agent_id is None or r.get("agent_id") == agent_id)
+                and (start is None or (r.get("started_at") and r["started_at"] >= start))
+                and (end is None or (r.get("started_at") and r["started_at"] < end))]
+
+    # ---- webhook delivery history
+    async def add_webhook_delivery(self, row: dict) -> None:
+        self._deliveries.append({"id": max((d["id"] for d in self._deliveries), default=0) + 1, "created_at": _now(),
+                                 **copy.deepcopy(row)})
+        mine = [d for d in self._deliveries if d["agent_id"] == row["agent_id"]]
+        for old in mine[:-200]:
+            self._deliveries.remove(old)
+
+    async def webhook_deliveries(self, agent_id: str, limit: int = 50) -> list[dict]:
+        return copy.deepcopy([d for d in reversed(self._deliveries) if d["agent_id"] == agent_id][:limit])
+
+    # ---- batch (outbound) calls
+    async def outbound_numbers(self, ws: str) -> list[dict]:
+        return sorted((copy.deepcopy(r) for (w, _), r in self._outbound.items() if w == ws), key=lambda r: r["number"])
+
+    async def put_outbound_number(self, row: dict) -> None:
+        old = self._outbound.get((row["workspace_id"], row["number"]))
+        self._outbound[(row["workspace_id"], row["number"])] = {**(old or {"created_at": _now()}), **copy.deepcopy(row)}
+
+    async def delete_outbound_number(self, ws: str, number: str) -> None:
+        self._outbound.pop((ws, number), None)
+
+    async def put_batch(self, row: dict) -> None:
+        old = self._batches.get(row["id"])
+        self._batches[row["id"]] = {**(old or {"created_at": _now(), "started_at": None, "finished_at": None,
+                                               "status": "scheduled", "config": {}}), **copy.deepcopy(row), "updated_at": _now()}
+
+    async def batch(self, batch_id: str) -> dict | None:
+        return copy.deepcopy(self._batches.get(batch_id))
+
+    async def batches(self, ws: str) -> list[dict]:
+        return sorted((copy.deepcopy(b) for b in self._batches.values() if b["workspace_id"] == ws),
+                      key=lambda b: b["created_at"], reverse=True)
+
+    async def batches_in(self, statuses: list[str]) -> list[dict]:
+        return [copy.deepcopy(b) for b in self._batches.values() if b["status"] in statuses]
+
+    async def delete_batch(self, batch_id: str) -> None:
+        self._batches.pop(batch_id, None)
+        self._recipients = {k: r for k, r in self._recipients.items() if r["batch_id"] != batch_id}
+
+    async def add_recipients(self, batch_id: str, rows: list[dict]) -> int:
+        for r in rows:
+            rid = max(self._recipients, default=0) + 1
+            self._recipients[rid] = {"id": rid, "batch_id": batch_id, "phone": r["phone"], "name": r.get("name"),
+                                     "variables": copy.deepcopy(r.get("variables") or {}), "status": "pending",
+                                     "call_id": None, "error": None, "attempts": 0, "dialed_at": None,
+                                     "ended_at": None, "duration_s": None}
+        return len(rows)
+
+    async def recipients(self, batch_id: str, status: str | None = None, q: str | None = None,
+                         limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        rows = sorted((r for r in self._recipients.values() if r["batch_id"] == batch_id), key=lambda r: r["id"])
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        if q:
+            q = q.lower()
+            rows = [r for r in rows if q in r["phone"].lower() or q in (r["name"] or "").lower()]
+        return copy.deepcopy(rows[offset:offset + limit]), len(rows)
+
+    async def recipient(self, rid: int) -> dict | None:
+        return copy.deepcopy(self._recipients.get(rid))
+
+    async def recipient_counts(self, batch_id: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in self._recipients.values():
+            if r["batch_id"] == batch_id:
+                out[r["status"]] = out.get(r["status"], 0) + 1
+        return out
+
+    async def update_recipient(self, rid: int, patch: dict) -> None:
+        if rid in self._recipients:
+            self._recipients[rid].update(copy.deepcopy(patch))
+
+    async def pending_recipients(self, batch_id: str, limit: int) -> list[dict]:
+        rows = sorted((r for r in self._recipients.values() if r["batch_id"] == batch_id and r["status"] == "pending"),
+                      key=lambda r: r["id"])
+        return copy.deepcopy(rows[:limit])
+
+    async def recipients_with_status(self, statuses: list[str]) -> list[dict]:
+        return [copy.deepcopy(r) for r in self._recipients.values() if r["status"] in statuses]
+
+    async def reset_recipients(self, batch_id: str, statuses: list[str]) -> int:
+        n = 0
+        for r in self._recipients.values():
+            if r["batch_id"] == batch_id and r["status"] in statuses:
+                r.update(status="pending", error=None, call_id=None, dialed_at=None, ended_at=None, duration_s=None)
+                n += 1
+        return n
+
+    async def delete_recipient(self, batch_id: str, rid: int) -> None:
+        if (self._recipients.get(rid) or {}).get("batch_id") == batch_id:
+            self._recipients.pop(rid)
 
     # ---- test cases + audit (publish gate, 12.7)
     async def eval_cases(self, agent_id: str) -> list[dict]:
@@ -573,6 +727,7 @@ class PgStore:
         async with (await self._p()).acquire() as c, c.transaction():
             await c.execute("DELETE FROM agent_releases WHERE agent_id = $1", agent_id)
             await c.execute("DELETE FROM agent_eval_cases WHERE agent_id = $1", agent_id)
+            await c.execute("DELETE FROM agent_shares WHERE agent_id = $1", agent_id)
             await c.execute("DELETE FROM agents WHERE id = $1", agent_id)
 
     async def delete_route(self, ws: str, pattern: str) -> None:
@@ -610,10 +765,14 @@ class PgStore:
     async def routes(self, ws: str = WORKSPACE) -> list[dict]:
         return await self._fetch("SELECT * FROM phone_routes WHERE workspace_id = $1 ORDER BY priority DESC", ws)
 
-    async def put_route(self, ws: str, pattern: str, agent_id: str, priority: int = 0) -> None:
-        await self._exec("INSERT INTO phone_routes (workspace_id, pattern, agent_id, priority) VALUES ($1, $2, $3, $4) "
+    async def put_route(self, ws: str, pattern: str, agent_id: str, priority: int = 0, label: str | None = None) -> None:
+        """`label`: None keeps the current one, "" clears it."""
+        await self._exec("INSERT INTO phone_routes (workspace_id, pattern, agent_id, priority, label) "
+                         "VALUES ($1, $2, $3, $4, NULLIF($5::text, '')) "
                          "ON CONFLICT (workspace_id, pattern) DO UPDATE SET agent_id = EXCLUDED.agent_id, "
-                         "priority = EXCLUDED.priority", ws, pattern, agent_id, priority)
+                         "priority = EXCLUDED.priority, "
+                         "label = CASE WHEN $5::text IS NULL THEN phone_routes.label ELSE NULLIF($5::text, '') END",
+                         ws, pattern, agent_id, priority, label)
 
     # ---- users, sessions, members, invitations (console sign-in)
     async def count_users(self) -> int:
@@ -685,6 +844,183 @@ class PgStore:
         await self._exec("DELETE FROM project_invitations WHERE id = $1", inv_id)
 
     # ---- test cases + audit (publish gate, 12.7)
+    async def share(self, agent_id: str) -> dict | None:
+        r = await self._row("SELECT * FROM agent_shares WHERE agent_id = $1", agent_id)
+        return {**r, "settings": _j(r["settings"])} if r else None
+
+    async def share_by_token(self, token: str) -> dict | None:
+        r = await self._row("SELECT * FROM agent_shares WHERE token = $1", token)
+        return {**r, "settings": _j(r["settings"])} if r else None
+
+    async def put_share(self, row: dict) -> None:
+        await self._exec("INSERT INTO agent_shares (agent_id, workspace_id, token, settings, created_by) "
+                         "VALUES ($1, $2, $3, $4::jsonb, $5) ON CONFLICT (agent_id) DO UPDATE SET "
+                         "settings = EXCLUDED.settings, updated_at = now()", row["agent_id"], row["workspace_id"], row["token"],
+                         json.dumps(row.get("settings") or {}, ensure_ascii=False), row.get("created_by"))
+
+    async def delete_share(self, agent_id: str) -> None:
+        await self._exec("DELETE FROM agent_shares WHERE agent_id = $1", agent_id)
+
+    # ---- API keys
+    async def create_api_key(self, row: dict) -> None:
+        await self._exec("INSERT INTO api_keys (id, workspace_id, name, prefix, key_hash, scope, created_by, expires_at) "
+                         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", row["id"], row["workspace_id"], row["name"], row["prefix"],
+                         row["key_hash"], row["scope"], row.get("created_by"), row.get("expires_at"))
+
+    async def api_key_by_hash(self, key_hash: str) -> dict | None:
+        return await self._row("SELECT * FROM api_keys WHERE key_hash = $1", key_hash)
+
+    async def api_keys(self, ws: str) -> list[dict]:
+        return await self._fetch("SELECT * FROM api_keys WHERE workspace_id = $1 ORDER BY created_at DESC", ws)
+
+    async def revoke_api_key(self, ws: str, key_id: str) -> bool:
+        r = await self._row("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND workspace_id = $2 AND revoked_at IS NULL "
+                            "RETURNING id", key_id, ws)
+        return r is not None
+
+    async def touch_api_key(self, key_id: str) -> None:
+        await self._exec("UPDATE api_keys SET last_used_at = now() WHERE id = $1", key_id)
+
+    # ---- post-call analysis
+    async def put_call_analysis(self, row: dict) -> None:
+        await self._exec(
+            "INSERT INTO call_analysis (call_id, workspace_id, agent_id, started_at, status, error, summary, sentiment, csat, nps, "
+            "resolved, outcome, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13) "
+            "ON CONFLICT (call_id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error, summary = EXCLUDED.summary, "
+            "sentiment = EXCLUDED.sentiment, csat = EXCLUDED.csat, nps = EXCLUDED.nps, resolved = EXCLUDED.resolved, "
+            "outcome = EXCLUDED.outcome, model = EXCLUDED.model, created_at = now()",
+            row["call_id"], row["workspace_id"], row.get("agent_id"), row.get("started_at"), row["status"], row.get("error"),
+            row.get("summary"), row.get("sentiment"), row.get("csat"), row.get("nps"), row.get("resolved"),
+            json.dumps(row.get("outcome") or {}, ensure_ascii=False), row.get("model"))
+
+    async def call_analysis(self, call_id: str) -> dict | None:
+        r = await self._row("SELECT * FROM call_analysis WHERE call_id = $1", call_id)
+        return {**r, "outcome": _j(r["outcome"])} if r else None
+
+    async def call_analyses(self, ws: str, start=None, end=None, agent_id: str | None = None) -> list[dict]:
+        where, args = ["workspace_id = $1"], [ws]
+        for cond, val in (("started_at >= ${}", start), ("started_at < ${}", end), ("agent_id = ${}", agent_id)):
+            if val is not None:
+                args.append(val)
+                where.append(cond.format(len(args)))
+        rows = await self._fetch(f"SELECT call_id, agent_id, started_at, status, sentiment, csat, nps, resolved FROM call_analysis "
+                                 f"WHERE {' AND '.join(where)}", *args)
+        return [dict(r) for r in rows]
+
+    # ---- webhook delivery history
+    async def add_webhook_delivery(self, row: dict) -> None:
+        await self._exec("INSERT INTO webhook_deliveries (agent_id, workspace_id, call_id, event, ok, detail, attempts) "
+                         "VALUES ($1, $2, $3, $4, $5, $6, $7)", row["agent_id"], row["workspace_id"], row.get("call_id"),
+                         row["event"], row["ok"], row.get("detail"), row.get("attempts", 1))
+        await self._exec("DELETE FROM webhook_deliveries WHERE agent_id = $1 AND id NOT IN "
+                         "(SELECT id FROM webhook_deliveries WHERE agent_id = $1 ORDER BY id DESC LIMIT 200)", row["agent_id"])
+
+    async def webhook_deliveries(self, agent_id: str, limit: int = 50) -> list[dict]:
+        return await self._fetch("SELECT * FROM webhook_deliveries WHERE agent_id = $1 ORDER BY id DESC LIMIT $2",
+                                 agent_id, limit)
+
+    # ---- batch (outbound) calls
+    async def outbound_numbers(self, ws: str) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM outbound_numbers WHERE workspace_id = $1 ORDER BY number", ws)
+        return [{**r, "dial_auth": _j(r["dial_auth"])} for r in rows]
+
+    async def put_outbound_number(self, row: dict) -> None:
+        await self._exec("INSERT INTO outbound_numbers (workspace_id, number, label, dial_url, dial_auth) "
+                         "VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (workspace_id, number) DO UPDATE SET "
+                         "label = EXCLUDED.label, dial_url = EXCLUDED.dial_url, dial_auth = EXCLUDED.dial_auth",
+                         row["workspace_id"], row["number"], row.get("label"), row["dial_url"],
+                         json.dumps(row["dial_auth"]) if row.get("dial_auth") else None)
+
+    async def delete_outbound_number(self, ws: str, number: str) -> None:
+        await self._exec("DELETE FROM outbound_numbers WHERE workspace_id = $1 AND number = $2", ws, number)
+
+    @staticmethod
+    def _batch(r: dict | None) -> dict | None:
+        return {**r, "config": _j(r["config"])} if r else None
+
+    async def put_batch(self, row: dict) -> None:
+        cols = [c for c in ("workspace_id", "name", "agent_id", "from_number", "status", "config", "created_by",
+                            "started_at", "finished_at") if c in row]
+        vals = [json.dumps(row[c]) if c == "config" else row[c] for c in cols]
+        ph = [f"${i + 2}::jsonb" if c == "config" else f"${i + 2}" for i, c in enumerate(cols)]
+        if "workspace_id" not in row:
+            sets = ", ".join(f"{c} = {p}" for c, p in zip(cols, ph))
+            await self._exec(f"UPDATE batch_calls SET {sets}, updated_at = now() WHERE id = $1", row["id"], *vals)
+            return
+        sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
+        await self._exec(f"INSERT INTO batch_calls (id, {', '.join(cols)}) VALUES ($1, {', '.join(ph)}) "
+                         f"ON CONFLICT (id) DO UPDATE SET {sets}, updated_at = now()", row["id"], *vals)
+
+    async def batch(self, batch_id: str) -> dict | None:
+        return self._batch(await self._row("SELECT * FROM batch_calls WHERE id = $1", batch_id))
+
+    async def batches(self, ws: str) -> list[dict]:
+        return [self._batch(r) for r in await self._fetch(
+            "SELECT * FROM batch_calls WHERE workspace_id = $1 ORDER BY created_at DESC", ws)]
+
+    async def batches_in(self, statuses: list[str]) -> list[dict]:
+        return [self._batch(r) for r in await self._fetch("SELECT * FROM batch_calls WHERE status = ANY($1::text[])", statuses)]
+
+    async def delete_batch(self, batch_id: str) -> None:
+        await self._exec("DELETE FROM batch_calls WHERE id = $1", batch_id)
+
+    async def add_recipients(self, batch_id: str, rows: list[dict]) -> int:
+        async with (await self._p()).acquire() as c:
+            await c.executemany("INSERT INTO batch_recipients (batch_id, phone, name, variables) VALUES ($1, $2, $3, $4::jsonb)",
+                                [(batch_id, r["phone"], r.get("name"), json.dumps(r.get("variables") or {}, ensure_ascii=False))
+                                 for r in rows])
+        return len(rows)
+
+    @staticmethod
+    def _rec(r: dict) -> dict:
+        return {**r, "variables": _j(r["variables"])}
+
+    async def recipients(self, batch_id: str, status: str | None = None, q: str | None = None,
+                         limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        where, args = ["batch_id = $1"], [batch_id]
+        if status:
+            args.append(status)
+            where.append(f"status = ${len(args)}")
+        if q:
+            args.append(f"%{q.lower()}%")
+            where.append(f"(lower(phone) LIKE ${len(args)} OR lower(coalesce(name, '')) LIKE ${len(args)})")
+        w = " AND ".join(where)
+        total = (await self._row(f"SELECT count(*)::int AS n FROM batch_recipients WHERE {w}", *args))["n"]
+        rows = await self._fetch(f"SELECT * FROM batch_recipients WHERE {w} ORDER BY id LIMIT {int(limit)} OFFSET {int(offset)}", *args)
+        return [self._rec(r) for r in rows], total
+
+    async def recipient(self, rid: int) -> dict | None:
+        r = await self._row("SELECT * FROM batch_recipients WHERE id = $1", rid)
+        return self._rec(r) if r else None
+
+    async def recipient_counts(self, batch_id: str) -> dict[str, int]:
+        rows = await self._fetch("SELECT status, count(*)::int AS n FROM batch_recipients WHERE batch_id = $1 GROUP BY status", batch_id)
+        return {r["status"]: r["n"] for r in rows}
+
+    async def update_recipient(self, rid: int, patch: dict) -> None:
+        cols = [c for c in ("status", "call_id", "error", "attempts", "dialed_at", "ended_at", "duration_s") if c in patch]
+        if cols:
+            sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+            await self._exec(f"UPDATE batch_recipients SET {sets} WHERE id = $1", rid, *(patch[c] for c in cols))
+
+    async def pending_recipients(self, batch_id: str, limit: int) -> list[dict]:
+        rows = await self._fetch("SELECT * FROM batch_recipients WHERE batch_id = $1 AND status = 'pending' "
+                                 "ORDER BY id LIMIT $2", batch_id, limit)
+        return [self._rec(r) for r in rows]
+
+    async def recipients_with_status(self, statuses: list[str]) -> list[dict]:
+        return [self._rec(r) for r in await self._fetch(
+            "SELECT * FROM batch_recipients WHERE status = ANY($1::text[])", statuses)]
+
+    async def reset_recipients(self, batch_id: str, statuses: list[str]) -> int:
+        r = await self._row("WITH u AS (UPDATE batch_recipients SET status = 'pending', error = NULL, call_id = NULL, "
+                            "dialed_at = NULL, ended_at = NULL, duration_s = NULL WHERE batch_id = $1 "
+                            "AND status = ANY($2::text[]) RETURNING 1) SELECT count(*)::int AS n FROM u", batch_id, statuses)
+        return r["n"]
+
+    async def delete_recipient(self, batch_id: str, rid: int) -> None:
+        await self._exec("DELETE FROM batch_recipients WHERE id = $1 AND batch_id = $2", rid, batch_id)
+
     async def eval_cases(self, agent_id: str) -> list[dict]:
         rows = await self._fetch("SELECT * FROM agent_eval_cases WHERE agent_id = $1", agent_id)
         rows = [{**r, "spec": _j(r["spec"])} for r in rows]
@@ -726,7 +1062,7 @@ class PgStore:
     # ---- knowledge base (12.9)
     async def kb_items(self, ws: str) -> list[dict]:
         return await self._fetch("SELECT id, workspace_id, name, type, extension, size_bytes, words, chunks, status, "
-                                 "error, created_by, created_at, updated_at FROM kb_items WHERE workspace_id = $1 "
+                                 "error, source_url, created_by, created_at, updated_at FROM kb_items WHERE workspace_id = $1 "
                                  "ORDER BY created_at DESC", ws)
 
     async def kb_item(self, item_id: str) -> dict | None:
@@ -734,7 +1070,7 @@ class PgStore:
 
     async def put_kb_item(self, row: dict) -> None:
         cols = [c for c in ("workspace_id", "name", "type", "extension", "size_bytes", "words", "chunks", "status",
-                            "error", "content", "created_by") if c in row]
+                            "error", "content", "created_by", "source_url") if c in row]
         args = [row["id"], *(row[c] for c in cols)]
         if "workspace_id" not in row:                  # a status / counts update of an existing item
             sets = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))

@@ -251,6 +251,9 @@ async def import_agent(body: ImportBody) -> dict:
               "skills": {"_persona": {"skill": persona, "version": v_persona}, flow_skill: v_flow},
               "tools": {**blank["tools"], "skills": {"imported": parts["tools"]}} if parts["tools"] else blank["tools"],
               "imported": {**parts["source"], "filename": body.filename, "report": parts["report"]}}
+    if parts.get("analysis"):
+        bundle["analysis"] = parts["analysis"]
+        parts["report"].append("The outcome schema became the Outcome fields (Global Settings → Outcome) and is switched on.")
     if errors := await _check(rt, store, agent_id, copy.deepcopy(bundle)):
         raise HTTPException(422, {"errors": errors, "report": parts["report"]})
     await store.put_agent({"id": agent_id, "workspace_id": ws, "name": name,
@@ -473,6 +476,47 @@ async def get_release(agent_id: str, release_id: int) -> dict:
     return rel
 
 
+class WebhookTest(BaseModel):
+    webhook: dict[str, Any] | None = None       # the settings as typed in the console; default = the draft's
+    token: str | None = None                    # a bearer token / signing secret just typed (not saved yet), used for this test only
+    signing_secret: str | None = None
+
+
+@router.post("/agents/{agent_id}/webhook/test", dependencies=auth)
+async def test_webhook(agent_id: str, body: WebhookTest) -> dict:
+    """Send a sample `call.ended` to the agent's webhook URL (one attempt) and report what it answered."""
+    from runtime.platform.webhook import WebhookSink, build_payload, ended_data, webhook_errors
+    rt, store = _platform()
+    a = await _agent(store, agent_id)
+    cfg = body.webhook if body.webhook is not None else (await _working(store, a)).get("webhook")
+    if errors := webhook_errors(cfg):
+        raise HTTPException(422, {"errors": errors})
+    if not (cfg or {}).get("url"):
+        raise HTTPException(422, {"errors": ["set the webhook URL first"]})
+    sample = build_payload(
+        "call.ended", "test-call",
+        ended_data("test-call", {"channel": "web", "language": "en", "duration_s": 42, "status": "completed",
+                                 "end_reason": "agent_ended"},
+                   [{"role": "agent", "text": "Hello, how can I help?"}, {"role": "user", "text": "This is a test."}]),
+        agent_id=agent_id, agent_name=a.get("name"), project_id=a.get("workspace_id"))
+    sink = WebhookSink(rt, delays=())
+    try:
+        ok, detail, attempts = await sink._deliver(cfg, sample, token=body.token or None,
+                                                   signing_secret=body.signing_secret or None)
+        await sink.record(agent_id, a.get("workspace_id"), "test-call", "call.ended", ok, f"test: {detail}", attempts)
+    finally:
+        await sink.close()
+    return {"ok": ok, "detail": detail}
+
+
+@router.get("/agents/{agent_id}/webhook/deliveries", dependencies=auth)
+async def webhook_deliveries(agent_id: str, limit: int = 50) -> list[dict]:
+    """The agent's latest webhook deliveries (newest first): event, call, delivered or not, what the receiver answered."""
+    rt, store = _platform()
+    await _agent(store, agent_id)
+    return await store.webhook_deliveries(agent_id, max(1, min(limit, 200)))
+
+
 # ---------------------------------------------------------------- phone routes
 
 
@@ -486,6 +530,7 @@ class RouteBody(BaseModel):
     pattern: str
     agent_id: str
     priority: int = 0
+    label: str | None = None          # None keeps the current label, "" clears it
 
 
 @router.put("/routes", dependencies=auth)
@@ -501,7 +546,10 @@ async def put_route(body: RouteBody) -> dict:
     if other is not None:
         raise HTTPException(409, f"{pattern!r} already reaches an agent of project {other['workspace_id']!r} — a "
                                  "number / prefix / '*' can belong to one project only")
-    await store.put_route(current_project(), pattern, body.agent_id, body.priority)
+    if body.label is not None and len(body.label) > 100:
+        raise HTTPException(422, {"errors": ["label: at most 100 characters"]})
+    await store.put_route(current_project(), pattern, body.agent_id, body.priority,
+                          None if body.label is None else body.label.strip())
     await changed(rt, "release", route=body.pattern)
     return {"ok": True}
 

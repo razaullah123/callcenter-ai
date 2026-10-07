@@ -127,6 +127,9 @@ class ClusterSync:
     async def config_changed(self, kind: str, **detail: Any) -> None:
         await self.notify(CONFIG, {"kind": kind, **detail})
 
+    async def instruct_call(self, call_id: str, text: str) -> None:
+        await self.notify(CONTROL, {"action": "instruct", "call_id": call_id, "text": text})
+
     async def end_call(self, call_id: str) -> None:
         await self.notify(CONTROL, {"action": "end", "call_id": call_id})
 

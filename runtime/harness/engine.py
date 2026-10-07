@@ -22,12 +22,14 @@ from runtime.providers import LLMProvider, TextDelta, ToolCall, ToolCallsReady
 from runtime.providers.base import LLMDone
 from runtime.providers.hedge import hedged
 from runtime.tools import ToolContext, ToolExecutor, ToolResult
-from runtime.skills.flow import _eval as flow_eval
+from runtime.skills.flow import _eval as flow_eval, is_template, render
 from runtime.skills.graph import ACTION_TYPES
+from runtime.skills.loader import template_vars
 from runtime.tools.hooks import load_packs, run_tool_hooks, turn_hooks
 
 from . import control
 from .context import build_messages, tool_call_message
+from .handoff import MAX_AGENT_TRANSFERS, AgentTransfer
 from .nlu.dates import resolve_dob, today_riyadh
 from .nlu.gender import gender_from_text
 from .nlu.extract import classify_and_extract, dateish, extract, numberish
@@ -60,7 +62,7 @@ MAX_TOOL_FAILURES = 3
 
 class AgentOutput(Protocol):
     async def say(self, text: str, *, language: str, interruptible: bool = True) -> None: ...
-    async def transfer(self, reason: str) -> None: ...
+    async def transfer(self, reason: str, **options: Any) -> None: ...      # options: destination, timeout_s, headers
     async def hangup(self) -> None: ...
 
 
@@ -141,6 +143,8 @@ class Agent:
         self._filler_said = False
         self._filler_idx = 0
         self._last_step: str | None = None
+        self.on_settings = None          # the transport re-reads these when a settings node changes them: f(overrides)
+        self.transfer_agent = None       # the transport swaps the call to another agent: async f(AgentTransfer) -> bool
         load_packs()                                       # named tool / turn hooks referenced by the config
         if _dispatch_pre not in executor.pre_hooks:        # hooks are shared; they route per call via ctx
             executor.pre_hooks.append(_dispatch_pre)
@@ -148,7 +152,9 @@ class Agent:
 
     # ------------------------------------------------------------------ lifecycle
 
-    async def start(self) -> None:
+    async def start(self, *, resumed: bool = False, greet: bool = True) -> None:
+        """Begin the call. `resumed`: this agent took over a call in progress (agent-to-agent hand-off) — no new call
+        record; `greet`: say the opening line (not when the conversation was handed over with it)."""
         if self.settings.main_flow:                          # one flow graph runs the whole call
             self.s.flow_skill = self.s.active_skill = self.settings.main_flow
         if not self.settings.require_verification:          # e.g. an information line: straight to its entry skill
@@ -157,10 +163,25 @@ class Agent:
             if not self.s.flow_skill:
                 self.s.active_skill = self.settings.entry_skill
         lang = self.s.language.language
-        self.ev.emit(EventType.CALL_START, ani_present=self.s.ani is not None, language=lang,
-                     config_version=getattr(self, "config_version", None), **getattr(self, "agent_ref", {}))
-        await self._say(self.ph.GREETING[lang])
-        self.s.history.append({"role": "assistant", "content": self.ph.GREETING[lang]})
+        if not resumed:
+            self.ev.emit(EventType.CALL_START, ani_present=self.s.ani is not None, language=lang,
+                         config_version=getattr(self, "config_version", None), **getattr(self, "agent_ref", {}))
+        if not greet:
+            return
+        wait = self.settings.voice_wait_for_user
+        if wait == "always" or (wait == "outbound" and self.s.direction == "outbound"):
+            return                                           # the caller speaks first; the agent answers that
+        greeting = self.greeting(lang)
+        await self._say(greeting)
+        self.s.history.append({"role": "assistant", "content": greeting})
+
+    def greeting(self, lang: str) -> str:
+        """The opening line: the agent's greeting, rendered as a template when it has {{ }} (a dynamic greeting such
+        as "Good {{ 'morning' if current_time < '12' else 'evening' }}, this is {{ agent_name }}")."""
+        text = self.ph.GREETING[lang]
+        if is_template(text):
+            text = render(text, {"slots": self.s.slots, **template_vars(self.s)}).strip() or self.ph.GREETING[lang]
+        return text
 
     async def handle(self, text: str, stt_language: str | None = None) -> None:
         s = self.s
@@ -183,6 +204,7 @@ class Agent:
             s.tool_failures += 1
             await self._say(self.ph.FALLBACK[s.language.language])
         finally:
+            s.slots.pop("_dtmf", None)                     # a keypad press counts for this turn only
             ev.emit(EventType.TURN_END, latency_ms=round((time.perf_counter() - t0) * 1000, 1))
         if s.tool_failures >= MAX_TOOL_FAILURES and not s.handoff:
             await self._handoff("repeated system errors", ev)
@@ -285,9 +307,9 @@ class Agent:
         graph = getattr(self.skills, "graph", lambda _s: None)(skill)
         if graph is None:
             return
-        node = self.skills.node(skill, self.s)
         state = self.skills.graph_state(skill, self.s)
         state["llm"] = {}
+        node = self.skills.node(skill, self.s)
         questions = graph.llm_conditions(node.id)
         variables = {n: graph.variables[n] for n in node.extract if n in graph.variables}
         if not questions and not variables:
@@ -312,9 +334,28 @@ class Agent:
         for _ in range(6):
             skill = self._flow_skill()
             node = node_of(skill, self.s)
+            state = self.skills.graph_state(skill, self.s)
+            if (ask := state.pop("ask", None)) is not None:            # an edge wants the caller's yes / no first
+                lang = self.s.language.language
+                line = (ask.get("text") or {}).get(lang) or self.ph.CONFIRM_GLOBAL[lang]
+                self.ev.emit(EventType.POLICY_BLOCK, reason="confirm_transition", text=line[:120])
+                await self._say(line)
+                self.s.history.append({"role": "assistant", "content": line})
+                return True
+            silent = node is not None and state.get("silent") == node.id
+            if node is not None and node.type == "conversation" and silent:
+                return True                                             # arrived silently: nothing to say here
+            if node is not None and node.type == "conversation" and node.say:
+                step = await self._say_static(skill, node, ev)          # a fixed message, no model round trip
+                if step == "again":
+                    continue                                            # it doesn't wait for the caller: next node now
+                if step == "over":
+                    return True
+                return False
             if node is None or node.type not in ACTION_TYPES:
                 return False
-            state = self.skills.graph_state(skill, self.s)
+            if node.type in ("settings", "agent") and (state.get("ran") or {}).get(node.id) == self.s.turn_id:
+                return False                                            # already done this turn, nothing follows
             ev.emit(EventType.STEP_TRANSITION, previous=self._last_step, step=f"{skill}/{node.id}", action=node.type)
             self._last_step = f"{skill}/{node.id}"
             if node.type == "tool":
@@ -322,7 +363,7 @@ class Agent:
                 args = {k: flow_eval(v, ctx) for k, v in node.args.items()}
                 call = ToolCall(id=f"flow_{node.id}_{self.s.turn_id}", name=node.tool, arguments=args)
                 state.setdefault("ran", {})[node.id] = self.s.turn_id   # at most once per turn (no retry loops)
-                result = await self._execute_with_filler(call, self._ctx(), ev)
+                result = await self._run_tool_node(node, call, ev)
                 self.s.history.append(tool_call_message("", [call]))
                 self.s.history.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
                 self._after_tool(call, result, ev)
@@ -334,13 +375,34 @@ class Agent:
                     ev.emit(EventType.SLOT_SET, field=slot, value=value if not isinstance(value, (list, dict))
                             else f"{type(value).__name__}[{len(value)}]", source=f"tool:{node.id}")
                 state.setdefault("outcome", {})[node.id] = result.ok
+                if result.ok and node.say and (line := self._flow_line(node)):     # the node's own spoken result
+                    await self._say(line)
+                    self.s.history.append({"role": "assistant", "content": line})
+                if not result.ok and node.on_error == "fail":
+                    await self._handoff(f"flow: tool {node.tool} failed", ev)
                 if self.s.handoff or self.s.ended:
                     return True
+            elif node.type == "settings":
+                state.setdefault("ran", {})[node.id] = self.s.turn_id
+                self._apply_settings(node, ev)
+                state.setdefault("outcome", {})[node.id] = True
+            elif node.type == "agent":
+                state.setdefault("ran", {})[node.id] = self.s.turn_id
+                done = await self._transfer_agent(node, ev)
+                state.setdefault("outcome", {})[node.id] = done
+                if done:
+                    return True                                         # the call belongs to the other agent now
+                graph = self.skills.graph(skill)
+                if not any(e.source == node.id and (e.on == "failure" or (e.on is None and not e.when)) for e in graph.edges):
+                    await self._handoff(f"flow: could not transfer to agent {self._agent_target(node)}", ev)
+                    return True
             elif node.type == "transfer":
-                await self._handoff(node.reason or "flow: transfer to a person", ev)
+                state.pop("silent", None)
+                await self._handoff(node.reason or "flow: transfer to a person", ev, node=node, quiet=silent)
                 return True
             elif node.type == "end":
-                if line := node.say.get(self.s.language.language):
+                state.pop("silent", None)
+                if (line := self._flow_line(node)) and not silent:
                     await self._say(line)
                     self.s.history.append({"role": "assistant", "content": line})
                 self.s.ended = True
@@ -357,6 +419,132 @@ class Agent:
                 self.s.active_skill = target
                 ev.emit(EventType.SKILL_ENTER, skill=target, routed_by="flow")
         return False
+
+    def _flow_line(self, node) -> str:
+        """A node's fixed line in the call language (any language when that one is missing), with {{ }} filled in."""
+        line = node.say.get(self.s.language.language) or next(iter(node.say.values()), "")
+        if line and is_template(line):
+            line = render(line, {"slots": self.s.slots, **template_vars(self.s)})
+        return line.strip()
+
+    async def _say_static(self, skill: str, node, ev: BoundEmitter) -> str:
+        """A conversation node with a fixed message: say it once when the flow reaches the node. Returns \"over\" (the
+        turn is finished), \"again\" (the node doesn't wait for the caller: look at the next node now) or \"pass\" (let
+        the model handle this turn). If the caller replies and no transition fires, the node's prompt (when it has
+        one) takes over; without a prompt the line is said again."""
+        state = self.skills.graph_state(skill, self.s)
+        mark = (node.id, state.get("entered"))
+        if state.get("said") == mark:
+            if node.instructions:
+                return "pass"
+            if node.skip_response:
+                return "over"                                # said already and nothing follows: wait for the caller
+        line = self._flow_line(node)
+        if not line:
+            return "pass"
+        state["said"] = mark
+        ev.emit(EventType.STEP_TRANSITION, previous=self._last_step, step=f"{skill}/{node.id}", action="say")
+        self._last_step = f"{skill}/{node.id}"
+        await self._say(line)
+        self.s.history.append({"role": "assistant", "content": line})
+        return "again" if node.skip_response else "over"
+
+    async def _run_tool_node(self, node, call: ToolCall, ev: BoundEmitter) -> ToolResult:
+        """A flow tool node's call with its own behaviour: a longest wait, retries (on_error: retry), and a
+        \"one moment\" line of its own. (A write already under way is never abandoned, so the wait doesn't cut it short.)"""
+        lang = self.s.language.language
+        filler = (node.processing.get(lang) or next(iter(node.processing.values()), "")) if node.processing else None
+        attempts = 1 + (node.retries if node.on_error == "retry" else 0)
+        for attempt in range(attempts):
+            run = self._execute_with_filler(call, self._ctx(), ev, filler=filler)
+            try:
+                result = await (asyncio.wait_for(run, node.timeout_s) if node.timeout_s else run)
+            except asyncio.TimeoutError:
+                result = ToolResult(ok=False, error="timeout", content=json.dumps(
+                    {"error": f"{node.tool} did not answer within {node.timeout_s} s"}))
+                ev.emit(EventType.ERROR, level=Level.WARNING, during="flow_tool", tool=node.tool, error="timeout")
+            if result.ok:
+                break
+            if attempt + 1 < attempts:
+                ev.emit(EventType.SLOT_SET, field="flow:retry", node=node.id, attempt=attempt + 1)
+        return result
+
+    def _apply_settings(self, node, ev: BoundEmitter) -> None:
+        """A settings node: its overrides join those already in force for this call (a later node changes them again;
+        an empty value withdraws one). The transport applies the voice / listening ones; the model ones are read at
+        the next reply, the system prompt at the next message."""
+        ov = self.s.memory.setdefault("overrides", {})
+        for section, value in node.overrides.items():
+            if isinstance(value, dict):
+                cur = ov.setdefault(section, {})
+                for k, v in value.items():
+                    if v is None or v == "":
+                        cur.pop(k, None)
+                    else:
+                        cur[k] = v
+                if not cur:
+                    ov.pop(section, None)
+            elif value is None or value == "":
+                ov.pop(section, None)
+            else:
+                ov[section] = value
+        self.s.memory["persona_override"] = ov.get("system_prompt") or None
+        ev.emit(EventType.SLOT_SET, field="flow:settings", node=node.id, value=sorted(node.overrides))
+        if self.on_settings:
+            self.on_settings({k: (dict(v) if isinstance(v, dict) else v) for k, v in ov.items()})
+
+    def _llm_options(self) -> dict[str, Any]:
+        """The model / temperature this reply uses when the flow chose them: the current step's own, else the ones a
+        settings node set (else the agent's, which the provider already has)."""
+        base = (self.s.memory.get("overrides") or {}).get("llm") or {}
+        node_of = getattr(self.skills, "node", None)
+        node = node_of(self._flow_skill(), self.s) if node_of else None
+        own = getattr(node, "llm", None) or {}
+        out: dict[str, Any] = {}
+        if model := own.get("model") or base.get("model"):
+            out["model"] = model
+        temperature = own.get("temperature") if own.get("temperature") is not None else base.get("temperature")
+        if temperature is not None:
+            out["temperature"] = temperature
+        return out
+
+    def _agent_target(self, node) -> str:
+        """The agent an agent node hands the call to ({{ }} filled in)."""
+        target = node.agent
+        if is_template(target):
+            target = render(target, {"slots": self.s.slots, **template_vars(self.s)}).strip()
+        return target
+
+    async def _transfer_agent(self, node, ev: BoundEmitter) -> bool:
+        """An agent node: say the node's line, then hand the call to the other agent. False: it couldn't (no transport
+        support, unknown agent, too many hand-offs) — the flow's failure path, or a person, takes over."""
+        target = self._agent_target(node)
+        if self.transfer_agent is None or not target:
+            ev.emit(EventType.ERROR, level=Level.WARNING, during="agent_transfer", error="not available here", agent=target)
+            return False
+        if self.s.memory.get("agent_transfers", 0) >= MAX_AGENT_TRANSFERS:
+            ev.emit(EventType.ERROR, level=Level.WARNING, during="agent_transfer", error="too many hand-offs", agent=target)
+            return False
+        if line := self._flow_line(node):
+            await self._say(line)
+            self.s.history.append({"role": "assistant", "content": line})
+        try:
+            return bool(await self.transfer_agent(AgentTransfer(target, node.handoff_history, node.handoff_variables)))
+        except Exception as e:                                          # noqa: BLE001 — the call carries on
+            ev.emit(EventType.ERROR, level=Level.ERROR, during="agent_transfer", error=repr(e)[:160], agent=target)
+            return False
+
+    def dtmf_plan(self) -> dict[str, Any] | None:
+        """What the keypad does right now, for the voice call: the keys that move the flow on (the node's own
+        transitions and the global ones) and the node's digit capture, if it collects digits. None: this agent's
+        flow doesn't use the keypad."""
+        skill = self._flow_skill()
+        graph = getattr(self.skills, "graph", lambda _s: None)(skill)
+        node = self.skills.node(skill, self.s) if graph is not None else None
+        if node is None:
+            return None
+        return {"node": node.id, "keys": graph.dtmf_keys(node.id),
+                "capture": dict(node.dtmf_capture) if node.type == "conversation" and node.dtmf_capture else None}
 
     def _turn_hooks(self) -> list:
         """The active skill's turn hooks (e.g. hmg.booking: dates, times, "I'm at …")."""
@@ -523,7 +711,7 @@ class Agent:
         asked = False   # one question per reply: stop speaking after the first question …
         after_question = 0   # … except one short statement after it
         ev.emit(EventType.LLM_REQUEST, hop=hop, tools=len(tools), messages=len(messages))
-        async for event in self.llm.stream(messages, tools=tools):
+        async for event in self.llm.stream(messages, tools=tools, **self._llm_options()):
             if isinstance(event, TextDelta):
                 if first:
                     ev.emit(EventType.LLM_FIRST_TOKEN, latency_ms=round((time.perf_counter() - t0) * 1000, 1))
@@ -570,16 +758,29 @@ class Agent:
             await self._handoff("OTP attempts exhausted", ev)
         return result.content
 
-    async def _execute_with_filler(self, call: ToolCall, ctx: ToolContext, ev: BoundEmitter) -> ToolResult:
+    def _tool_line(self, lines: dict[str, str], call: ToolCall) -> str:
+        """A tool's start / done line in the caller's language (templated with the call's arguments)."""
+        text = lines.get(self.s.language.language) or lines.get("en") or lines.get("ar") or ""
+        if text and is_template(text):
+            text = render(text, {"slots": self.s.slots, "args": call.arguments, **template_vars(self.s)})
+        return text
+
+    async def _execute_with_filler(self, call: ToolCall, ctx: ToolContext, ev: BoundEmitter,
+                                   filler: str | None = None) -> ToolResult:
         tool = self.executor.catalog.get(call.name)
         task = asyncio.ensure_future(self.executor.execute(call, ctx, ev))
         critical = tool is not None and tool.kind in ("write", "send")
         try:
             lang = self.s.language.language
+            if tool is not None and tool.enabled and tool.say_start and (line := self._tool_line(tool.say_start, call)):
+                self._filler_said = True                    # the tool's own start line replaces the generic filler
+                await self._say(line)
             done, _ = await asyncio.wait({task}, timeout=self.filler_after_s)
             if not done and not self._filler_said:
                 self._filler_said = True
-                if special := self.ph.SLOW_TOOL_FILLER.get(call.name):
+                if filler:                                  # the flow node's own "one moment" line
+                    await self._say(render(filler, {"slots": self.s.slots, **template_vars(self.s)}) if is_template(filler) else filler)
+                elif special := self.ph.SLOW_TOOL_FILLER.get(call.name):
                     await self._say(special[lang])
                 else:
                     fillers = self.ph.FILLER[lang]
@@ -590,7 +791,10 @@ class Agent:
                     if done:
                         break
                     await self._say(self.ph.STILL_WORKING[lang])     # no long silences on the phone
-            return await (asyncio.shield(task) if critical else task)
+            result = await (asyncio.shield(task) if critical else task)
+            if result.ok and tool is not None and tool.say_done and (line := self._tool_line(tool.say_done, call)):
+                await self._say(line)
+            return result
         except asyncio.CancelledError:
             if critical:   # never abandon a booking / cancellation half-way: finish and record it
                 result = await task
@@ -835,18 +1039,35 @@ class Agent:
         self.ev.emit(EventType.AGENT_SAY, text=text)
         await self.out.say(text, language=self.s.language.language)
 
-    async def _handoff(self, reason: str, ev: BoundEmitter) -> None:
+    def _transfer_options(self, node) -> dict[str, Any]:
+        """A transfer node's own destination / ring timeout / SIP headers (templates filled in) for the transport."""
+        if node is None:
+            return {}
+        ctx = {"slots": self.s.slots, **template_vars(self.s)}
+        fill = lambda v: render(v, ctx).strip() if isinstance(v, str) and is_template(v) else v          # noqa: E731
+        opts: dict[str, Any] = {}
+        if dest := fill(node.destination):
+            opts["destination"] = dest
+        if node.timeout_s:
+            opts["timeout_s"] = node.timeout_s
+        if node.headers:
+            opts["headers"] = {k: fill(v) for k, v in node.headers.items()}
+        return opts
+
+    async def _handoff(self, reason: str, ev: BoundEmitter, node=None, quiet: bool = False) -> None:
         s = self.s
         if s.handoff:
             return
         s.handoff = {"reason": reason, "turn": s.turn_id, "verified": s.auth.verified, "skill": s.active_skill}
         ev.emit(EventType.HANDOFF, reason=reason)
-        announced = any(w in " ".join(self._spoken) for w in ("أحول", "بحول", "الزملاء", "زميل", "transfer",
-                                                                 "connect you", "colleague"))
-        msg = (self.ph.HANDOFF_SHORT if announced else self.ph.HANDOFF)[s.language.language]
-        s.history.append({"role": "assistant", "content": msg})
-        await self._say(msg)
-        await self.out.transfer(reason)
+        if not (quiet or (node is not None and node.transfer_type == "cold")):     # cold / silent: connect at once
+            announced = any(w in " ".join(self._spoken) for w in ("أحول", "بحول", "الزملاء", "زميل", "transfer",
+                                                                     "connect you", "colleague"))
+            msg = (node is not None and node.say and self._flow_line(node)) or \
+                (self.ph.HANDOFF_SHORT if announced else self.ph.HANDOFF)[s.language.language]
+            s.history.append({"role": "assistant", "content": msg})
+            await self._say(msg)
+        await self.out.transfer(reason, **self._transfer_options(node))
 
     def _record_interrupted(self) -> None:
         """Keep history consistent after barge-in: pair dangling tool calls, keep what was spoken."""

@@ -130,6 +130,16 @@ class Runtime:
             return True
         return False
 
+    async def instruct_call(self, call_id: str, text: str) -> bool:
+        """A live instruction for a call, wherever it runs. False if no worker has it."""
+        if (call := self.calls.get(call_id)) is not None:
+            call.add_supervisor_note(text)
+            return True
+        if self.sync is not None and self.live is not None and call_id in self.live.active:
+            await self.sync.instruct_call(call_id, text)
+            return True
+        return False
+
     # ---- messages from the other workers
 
     async def _on_config(self, msg: dict) -> None:
@@ -139,6 +149,8 @@ class Runtime:
     async def _on_control(self, msg: dict) -> None:
         if msg.get("action") == "end" and (call := self.calls.get(msg.get("call_id"))) is not None:
             await call.end_from_console()
+        elif msg.get("action") == "instruct" and (call := self.calls.get(msg.get("call_id"))) is not None:
+            call.add_supervisor_note(str(msg.get("text") or ""))
 
     async def _on_live(self, msg: dict) -> None:
         if self.live is not None:

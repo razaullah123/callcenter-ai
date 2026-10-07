@@ -123,3 +123,125 @@ def test_agent_treats_groq_parse_failure_as_retryable():
     assert _tool_call_error(RuntimeError("Parsing failed. The model generated output that could not be parsed.")) \
         == "malformed tool call"
     assert _tool_call_error(RuntimeError("rate limit")) is None
+
+
+# ---------------------------------------------------------------- a provider failure is not the agent's failure
+
+def test_which_errors_are_the_providers():
+    from evals.runner import is_provider_error
+    for e in ("APITimeoutError('Request timed out.')", "ReadTimeout('')", "ConnectError('x')", "RateLimitError('429')",
+              "InternalServerError('boom')", "APIConnectionError('Connection error.')", "Error code: 503 status_code=503"):
+        assert is_provider_error(e), e
+    for e in (None, "", "KeyError('x')", "ValueError('bad')", "simulated caller failed: ValueError()"):
+        assert not is_provider_error(e), e
+
+
+def _ran(error=None, passed=None):
+    checks = [{"check": "booked", "passed": error is None, "detail": ""}]
+    if error:
+        checks.append({"check": "no_error", "passed": False, "detail": error})
+    return {"case": "t", "error": error, "checks": checks, "passed": passed if passed is not None else error is None}
+
+
+async def test_a_case_is_played_again_when_the_provider_times_out(monkeypatch):
+    import evals.runner as runner
+    answers = [_ran("APITimeoutError('Request timed out.')"), _ran("ReadTimeout('')"), _ran()]
+    calls = []
+
+    async def once(case, **kw):
+        calls.append(1)
+        return answers.pop(0)
+    monkeypatch.setattr(runner, "_run_case_once", once)
+    r = await runner.run_case(Case(id="t", suite="s", title="t", caller={}, expect={}), agent_llm=None, caller_llm=None)
+    assert r["passed"] and r["attempts"] == 3 and len(calls) == 3 and "provider_problem" not in r
+
+
+async def test_a_case_that_never_gets_an_answer_says_the_provider_failed(monkeypatch):
+    import evals.runner as runner
+    calls = []
+
+    async def once(case, **kw):
+        calls.append(1)
+        return _ran("APITimeoutError('Request timed out.')")
+    monkeypatch.setattr(runner, "_run_case_once", once)
+    r = await runner.run_case(Case(id="t", suite="s", title="t", caller={}, expect={}), agent_llm=None, caller_llm=None)
+    assert not r["passed"] and r["attempts"] == 3 and len(calls) == 3 and r["provider_problem"] is True
+    detail = next(c["detail"] for c in r["checks"] if c["check"] == "no_error")
+    assert "failed on all 3 attempts" in detail and "not a verdict on the agent" in detail
+    calls.clear()
+    r2 = await runner.run_case(Case(id="t", suite="s", title="t", caller={}, expect={}), agent_llm=None, caller_llm=None, attempts=1)
+    assert len(calls) == 1 and r2["attempts"] == 1
+
+
+async def test_real_failures_are_not_retried(monkeypatch):
+    import evals.runner as runner
+    calls = []
+
+    async def once(case, **kw):
+        calls.append(1)
+        return _ran("KeyError('x')") if len(calls) == 1 else _ran()
+    monkeypatch.setattr(runner, "_run_case_once", once)
+    r = await runner.run_case(Case(id="t", suite="s", title="t", caller={}, expect={}), agent_llm=None, caller_llm=None)
+    assert not r["passed"] and len(calls) == 1 and "provider_problem" not in r                       # an agent bug counts at once
+    plain = {"case": "t", "error": None, "checks": [{"check": "booked", "passed": False, "detail": "x"}], "passed": False}
+
+    async def failing(case, **kw):
+        calls.append(1)
+        return dict(plain)
+    monkeypatch.setattr(runner, "_run_case_once", failing)
+    calls.clear()
+    r = await runner.run_case(Case(id="t", suite="s", title="t", caller={}, expect={}), agent_llm=None, caller_llm=None)
+    assert len(calls) == 1 and not r["passed"]                                                       # a failed check isn't a retry reason
+
+
+def test_the_gate_shows_the_providers_failure_alone():
+    from runtime.platform.gate import failed_lines
+    consequences = [{"check": "tools_in_order", "passed": False, "detail": "missing / out of order: ['api_book_Appointment']"},
+                    {"check": "booked", "passed": False, "detail": "api_book_Appointment not called"},
+                    {"check": "language", "passed": True, "detail": ""},
+                    {"check": "no_error", "passed": False, "detail": "the model provider failed on all 3 attempts (ReadTimeout('')) — not a verdict on the agent"}]
+    broke = {"checks": consequences, "provider_problem": True}
+    assert failed_lines(broke) == ["no_error: the model provider failed on all 3 attempts (ReadTimeout('')) — not a verdict on the agent"]
+    ordinary = {"checks": consequences[:2]}                                  # a real failure keeps every failed check
+    assert [x.split(":")[0] for x in failed_lines(ordinary)] == ["tools_in_order", "booked"]
+    assert failed_lines({"checks": []}) == []
+
+
+# ---------------------------------------------------------------- the simulated caller waits and retries its own slow replies
+
+class _SlowThenFine:
+    def __init__(self, failures, error="APITimeoutError('Request timed out.')"):
+        self.failures, self.error, self.calls = failures, error, 0
+
+    async def stream(self, messages, **kw):
+        from runtime.providers import TextDelta
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError(self.error)
+        yield TextDelta('{"say": "Dermatology, please"}')
+
+
+async def test_the_simulated_caller_retries_a_slow_reply_itself():
+    import pytest
+
+    from evals.caller import LLMCaller
+    llm = _SlowThenFine(2)
+    caller = LLMCaller(llm, language="en", persona="", goal="book", facts={})
+    assert await caller.next("Which clinic?") == "Dermatology, please" and llm.calls == 3          # two timeouts, then an answer
+    assert sum("retrying after" in r for r in caller.raw) == 2
+    dead = LLMCaller(_SlowThenFine(5), language="en", persona="", goal="book", facts={})
+    with pytest.raises(RuntimeError):                                                              # three timeouts in a row: give up
+        await dead.next("Which clinic?")
+    broken = LLMCaller(_SlowThenFine(1, "KeyError('x')"), language="en", persona="", goal="book", facts={})
+    with pytest.raises(RuntimeError):                                                              # not a provider error: no retry
+        await broken.next("Which clinic?")
+
+
+async def test_test_tooling_gets_a_longer_time_limit_than_a_live_call(monkeypatch):
+    from types import SimpleNamespace
+    import evals.runner as runner
+    seen = []
+    monkeypatch.setattr(runner, "create", lambda kind, name, cfg=None: seen.append(cfg or {}) or SimpleNamespace())
+    await runner.run_suite([], agent_llm=SimpleNamespace(settings=SimpleNamespace(model="m")), use_judge=True)
+    caller, judge = seen
+    assert caller["timeout_s"] == judge["timeout_s"] == runner.TOOLING_TIMEOUT_S >= 60            # a live call's model waits 10 s

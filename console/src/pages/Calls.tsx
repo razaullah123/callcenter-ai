@@ -9,6 +9,87 @@ import { ErrorBox, cx, fmtMs } from "../ui";
 import CallPanel from "./CallPanel";
 
 const PAGE = 25;
+const MAX_EXPORT = 10_000;
+const DUR_OPS: [string, string][] = [["between", "is between"], ["gt", "is greater than"], ["lt", "is less than"], ["eq", "is equal to"]];
+
+/** `dur=between:10:60` → the filter; null when absent or malformed. */
+function parseDur(v: string | null) {
+  const [op, a, b] = (v ?? "").split(":");
+  if (!DUR_OPS.some(o => o[0] === op) || a === undefined || a === "" || isNaN(+a) || (op === "between" && (b === undefined || b === "" || isNaN(+b)))) return null;
+  return { op, a: +a, b: op === "between" ? +b : undefined };
+}
+
+function DurationFilter({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
+  const cur = parseDur(value);
+  const [op, setOp] = useState(cur?.op ?? "gt");
+  const [a, setA] = useState(cur ? String(cur.a) : "");
+  const [b, setB] = useState(cur?.b != null ? String(cur.b) : "");
+  const ok = a !== "" && +a >= 0 && (op !== "between" || (b !== "" && +b >= +a));
+  const label = cur ? `Duration ${DUR_OPS.find(o => o[0] === cur.op)?.[1].replace("is ", "")} ${cur.a}${cur.b != null ? `–${cur.b}` : ""} s` : "Duration";
+  return (
+    <details className="relative" id="calls-duration">
+      <summary className={cx("flex cursor-pointer list-none items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm hover:bg-soft", cur ? "border-accent bg-accent/10" : "border-line")}>{label}</summary>
+      <div className="absolute z-20 mt-1 w-72 space-y-2 rounded-xl border border-line bg-panel p-3 shadow-lg">
+        <div className="text-xs text-muted">Call length in seconds</div>
+        <select aria-label="Condition" className="w-full text-sm" value={op} onChange={e => setOp(e.target.value)}>{DUR_OPS.map(o => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
+        <div className="flex items-center gap-2">
+          <input aria-label="Seconds" type="number" min={0} className="w-24 text-sm" value={a} onChange={e => setA(e.target.value)} />
+          {op === "between" && <><span className="text-xs text-muted">and</span><input aria-label="Up to seconds" type="number" min={0} className="w-24 text-sm" value={b} onChange={e => setB(e.target.value)} /></>}
+        </div>
+        <div className="flex justify-between">
+          <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => { setA(""); setB(""); onChange(null); }}>Clear</button>
+          <button type="button" disabled={!ok} className="rounded-lg bg-accent px-3 py-1 text-xs font-medium text-accent-fg disabled:opacity-50"
+            onClick={() => { onChange(`${op}:${a}${op === "between" ? `:${b}` : ""}`); (document.getElementById("calls-duration") as HTMLDetailsElement | null)?.removeAttribute("open"); }}>Apply</button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+const csvCell = (v: unknown) => {
+  const s = v == null ? "" : String(v);
+  return /^[=+\-@]/.test(s) && !/^\+?\d[\d ]*$/.test(s) ? `"'${s.replace(/"/g, '""')}"` : /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;   // no spreadsheet formulas
+};
+
+function ExportMenu({ rows, columns, agentName, fetchAll, busy }: {
+  rows: CallRow[]; columns: Col[]; agentName: (id?: string | null) => string; fetchAll: () => Promise<CallRow[]>; busy: boolean;
+}) {
+  const [working, setWorking] = useState(false);
+  const [note, setNote] = useState("");
+  const cell = (c: CallRow, k: string): unknown => ({
+    time: c.started_at, call: c.call_id, agent: agentName(c.agent_id), user: c.mobile, channel: CHANNELS.find(x => x[0] === c.channel)?.[1] ?? c.channel,
+    duration: c.duration_s, status: STATUSES.find(x => x[0] === c.status)?.[1] ?? c.status,
+    outcome: [c.booked && "Booked", c.verified && "Verified"].filter(Boolean).join(" + "), language: c.language, turns: c.turns,
+    latency: c.latency_p50_ms, version: c.config_version,
+  } as Record<string, unknown>)[k];
+  const download = (items: CallRow[]) => {
+    const lines = [columns.map(c => csvCell(c.label)).join(","), ...items.map(r => columns.map(c => csvCell(cell(r, c.key))).join(","))];
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }));
+    a.download = `call-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const all = async () => {
+    setWorking(true); setNote("");
+    try { const items = await fetchAll(); download(items); if (items.length >= MAX_EXPORT) setNote(`Stopped at ${MAX_EXPORT.toLocaleString()} calls — narrow the filters for the rest.`); }
+    catch (e) { setNote(e instanceof Error ? e.message : String(e)); }
+    finally { setWorking(false); }
+  };
+  return (
+    <details className="relative">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm hover:bg-soft">Export CSV</summary>
+      <div className="absolute right-0 z-20 mt-1 w-64 space-y-1 rounded-xl border border-line bg-panel p-2 shadow-lg">
+        <button id="calls-export-page" type="button" disabled={busy || !rows.length} onClick={() => download(rows)} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-soft disabled:opacity-50">
+          Current page <span className="text-xs text-muted">({rows.length} calls)</span></button>
+        <button id="calls-export-all" type="button" disabled={busy || working} onClick={all} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-soft disabled:opacity-50">
+          {working ? "Preparing…" : "All filtered results"}</button>
+        <p className="px-3 pb-1 text-[11px] text-muted">The columns you have turned on. Phone numbers are exported as shown here.</p>
+        {note && <p className="px-3 pb-1 text-[11px] text-warn">{note}</p>}
+      </div>
+    </details>
+  );
+}
 
 export const fmtDuration = (s: number | null | undefined) =>
   s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.max(0, s) % 60).padStart(2, "0")}`;
@@ -90,18 +171,35 @@ export default function Calls() {
   const asc = params.get("dir") === "asc";
   const page = Math.max(0, Number(params.get("page") ?? 1) - 1) || 0;
   const agent = params.get("agent") ?? "";
+  const dur = parseDur(params.get("dur"));
   const [cols, setCols] = useState(() => loadColumns(COLS_KEY, COLUMNS.filter(c => c.on).map(c => c.key)));
   const saveCols = (v: string[]) => { setCols(v); saveColumns(COLS_KEY, v); };
   const show = (k: string) => k === "time" || cols.includes(k);
 
   const agents = useQuery({ queryKey: ["agents"], queryFn: api.agents, staleTime: 30_000 });
   const agentName = (id?: string | null) => agents.data?.find(a => a.id === id)?.name ?? id ?? "—";
+  const durationArgs = dur ? { duration_op: dur.op, duration_a: dur.a, duration_b: dur.b } : {};
+  const filterArgs = () => {
+    const r = preset === "all" ? null : rangeOf(preset, from, to);
+    return { q: q || undefined, agent: agent || undefined, channels: channels.length ? channels.join(",") : undefined,
+      status: statuses.length === ALL_STATUSES.length ? undefined : statuses.length ? statuses.join(",") : "none",
+      start: r?.start.toISOString(), end: r?.end.toISOString(), sort, desc: !asc, ...durationArgs };
+  };
+  const fetchAll = async () => {
+    const out: CallRow[] = [];
+    while (out.length < MAX_EXPORT) {
+      const r = await api.calls({ ...filterArgs(), limit: 200, offset: out.length });
+      out.push(...r.items);
+      if (out.length >= r.total || !r.items.length) break;
+    }
+    return out;
+  };
   const calls = useQuery({
-    queryKey: ["calls", q, channels.join(), statuses.join(), preset, from, to, sort, asc, page, agent],
+    queryKey: ["calls", q, channels.join(), statuses.join(), preset, from, to, sort, asc, page, agent, params.get("dur")],
     queryFn: () => {
       const r = preset === "all" ? null : rangeOf(preset, from, to);
       return api.calls({
-        q: q || undefined, agent: agent || undefined, limit: PAGE, offset: page * PAGE,
+        q: q || undefined, agent: agent || undefined, limit: PAGE, offset: page * PAGE, ...durationArgs,
         channels: channels.length ? channels.join(",") : undefined,
         status: statuses.length === ALL_STATUSES.length ? undefined : statuses.length ? statuses.join(",") : "none",
         start: r?.start.toISOString(), end: r?.end.toISOString(), sort, desc: !asc,
@@ -111,7 +209,7 @@ export default function Calls() {
   });
   const total = calls.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE));
-  const filtered = Boolean(q || channels.length || statusParam !== null || preset !== "all" || agent);
+  const filtered = Boolean(q || channels.length || statusParam !== null || preset !== "all" || agent || dur);
   const open = (id: string) => navigate(`/calls/${encodeURIComponent(id)}${location.search}`);
   const sortBy = (k: "time" | "duration") => set(sort === k ? { sort: k === "time" ? null : k, dir: asc ? null : "asc" } : { sort: k === "time" ? null : k, dir: null });
 
@@ -133,11 +231,13 @@ export default function Calls() {
         <MultiSelect id="calls-status" label="Status" options={STATUSES.map(s => [s[0], s[1]])} value={statuses}
           onChange={v => set({ status: v.length === ALL_STATUSES.length ? null : v.join(",") || "none" })} />
         <AgentPicker value={agent} onChange={v => set({ agent: v || null })} />
+        <DurationFilter key={params.get("dur") ?? "none"} value={params.get("dur")} onChange={v => set({ dur: v })} />
         {filtered && <button id="calls-reset" onClick={() => { setSearch(""); setParams(new URLSearchParams(), { replace: true }); }}
           className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-ink">{CI.reset}Reset</button>}
         <div className="ml-auto flex items-center gap-2">
           <RangePicker withAll preset={preset} from={from} to={to}
             onChange={(p, a, b) => set({ preset: p === "all" ? null : p, start: p === "custom" ? a ?? null : null, end: p === "custom" ? b ?? null : null })} />
+          <ExportMenu rows={calls.data?.items ?? []} columns={COLUMNS.filter(c => show(c.key))} agentName={agentName} fetchAll={fetchAll} busy={calls.isLoading} />
           <ViewMenu id="calls-view" columns={COLUMNS} shown={cols} onChange={saveCols} />
         </div>
       </div>

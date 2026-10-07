@@ -152,3 +152,109 @@ def test_an_agent_searches_its_knowledge(kbconsole):
     agent = loop.run_until_complete(rt.loader.load_draft("hmg-care"))
     assert "search_knowledge_base" not in agent.executor.catalog.tools
     assert c.post("/api/knowledge/use", json={"agent": "hmg-care", "items": ["kb_nope"]}).status_code == 404
+
+
+# ---------------------------------------------------------------- Hamsa parity: URL items, rename, delete protection
+
+
+@pytest.fixture
+def web(monkeypatch):
+    """A fake internet: {url: (status, content type, body)}; every host counts as public except *.internal."""
+    import httpx
+    pages: dict[str, tuple] = {}
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        status, kind, body = pages.get(str(request.url), (404, "text/plain", "not found"))
+        return httpx.Response(status, headers={"content-type": kind, **({"location": body} if status in (301, 302) else {})},
+                              content=b"" if status in (301, 302) else body.encode())
+
+    async def public(host):
+        return not host.endswith(".internal")
+    monkeypatch.setattr(kb, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(kb, "_public_host", public)
+    pages["seen"] = seen          # type: ignore[assignment]
+    return pages
+
+
+def test_url_checks(web):
+    import asyncio
+    run = asyncio.new_event_loop().run_until_complete
+    assert run(kb.check_url("https://example.com/faq")) == "https://example.com/faq"
+    for bad, msg in (("http://example.com", "https"), ("https://localhost/x", "https"), ("https://example.com/a.mp4", "media"),
+                     ("https://user:pw@example.com/", "user name"), ("https://db.internal/x", "not a public")):
+        with pytest.raises(ValueError, match=msg):
+            run(kb.check_url(bad))
+
+
+def test_adding_a_web_page(kbconsole, web):
+    c, rt, store, loop = kbconsole
+    web["https://example.com/faq"] = (200, "text/html", "<html><body><h1>Visiting</h1><p>Open 9 to 9.</p><script>x()</script></body></html>")
+    r = c.post("/api/knowledge/url", json={"name": "FAQ page", "url": "https://example.com/faq"})
+    assert r.status_code == 200, r.text
+    item = wait_done(c, r.json()["id"])
+    assert item["status"] == "completed" and item["type"] == "url" and item["source_url"] == "https://example.com/faq"
+    assert "Open 9 to 9." in item["content"] and "x()" not in item["content"]
+    hits = c.post("/api/knowledge/search", json={"query": "open 9"}).json()
+    assert hits["results"] and "Open 9" in hits["results"][0]["text"]
+
+
+def test_a_page_that_cannot_be_read_fails_with_the_reason(kbconsole, web):
+    c, rt, store, loop = kbconsole
+    web["https://example.com/private"] = (403, "text/html", "no")
+    item = wait_done(c, c.post("/api/knowledge/url", json={"name": "P", "url": "https://example.com/private"}).json()["id"])
+    assert item["status"] == "failed" and "refused access" in item["error"]
+    # refused up front: not https, a private host
+    assert c.post("/api/knowledge/url", json={"name": "P", "url": "http://example.com/"}).status_code == 422
+    assert c.post("/api/knowledge/url", json={"name": "P", "url": "https://db.internal/"}).status_code == 422
+
+
+def test_redirect_to_a_private_host_is_refused(kbconsole, web):
+    c, rt, store, loop = kbconsole
+    web["https://example.com/go"] = (302, "text/html", "https://db.internal/secret")
+    web["https://db.internal/secret"] = (200, "text/html", "<p>secret</p>")
+    item = wait_done(c, c.post("/api/knowledge/url", json={"name": "R", "url": "https://example.com/go"}).json()["id"])
+    assert item["status"] == "failed" and "not a public" in item["error"]
+    assert "https://db.internal/secret" not in web["seen"]
+
+
+def test_sitemap_discovery_and_a_multi_page_item(kbconsole, web):
+    c, rt, store, loop = kbconsole
+    locs = "".join(f"<url><loc>https://example.com/p{i}</loc></url>" for i in range(130))
+    web["https://example.com/sitemap.xml"] = (200, "application/xml", f"<urlset>{locs}<url><loc>https://other.com/x</loc></url>"
+                                                                       "<url><loc>https://example.com/logo.png</loc></url></urlset>")
+    urls = c.post("/api/knowledge/url/discover", json={"url": "https://example.com/"}).json()["urls"]
+    assert len(urls) == kb.MAX_URLS and urls[0] == "https://example.com/p0" and all(u.startswith("https://example.com/") for u in urls)
+    assert c.post("/api/knowledge/url/discover", json={"url": "https://nowhere.example/"}).json() == {"urls": []}
+    web["https://example.com/p0"] = (200, "text/html", "<p>Zero page</p>")
+    web["https://example.com/p1"] = (200, "text/html", "<p>First page</p>")
+    r = c.post("/api/knowledge/url", json={"name": "Site", "url": "https://example.com/", "urls": [
+        "https://example.com/p0", "https://example.com/p1", "https://example.com/p2"]})        # p2 is a 404
+    item = wait_done(c, r.json()["id"])
+    assert item["status"] == "completed_with_errors" and "1 of 3 pages could not be read" in item["error"]
+    assert "Source: https://example.com/p0\nZero page" in item["content"] and "First page" in item["content"]
+    assert c.post("/api/knowledge/url", json={"name": "Big", "url": "https://example.com/",
+                                              "urls": [f"https://example.com/p{i}" for i in range(101)]}).status_code == 422
+
+
+def test_rename_keeps_the_content(kbconsole):
+    c, rt, store, loop = kbconsole
+    item = c.post("/api/knowledge/text", json={"name": "Old", "content": "Parking is free."}).json()
+    wait_done(c, item["id"])
+    assert c.patch(f"/api/knowledge/{item['id']}", json={"name": "  Parking policy "}).json()["name"] == "Parking policy"
+    got = c.get(f"/api/knowledge/{item['id']}").json()
+    assert got["name"] == "Parking policy" and got["content"] == "Parking is free." and got["status"] == "completed"
+    assert c.patch(f"/api/knowledge/{item['id']}", json={"name": "   "}).status_code == 422
+    assert c.patch("/api/knowledge/kb_missing", json={"name": "x"}).status_code == 404
+
+
+def test_an_item_in_use_cannot_be_deleted(kbconsole):
+    c, rt, store, loop = kbconsole
+    item = c.post("/api/knowledge/text", json={"name": "ICU", "content": "ICU visiting is limited."}).json()
+    wait_done(c, item["id"])
+    assert c.post("/api/knowledge/use", json={"agent": "hmg-care", "items": [item["id"]]}).status_code == 200
+    r = c.delete(f"/api/knowledge/{item['id']}")
+    assert r.status_code == 409 and "ICU is used by" in r.json()["detail"]
+    c.post("/api/knowledge/use", json={"agent": "hmg-care", "items": []})
+    assert c.delete(f"/api/knowledge/{item['id']}").status_code == 200

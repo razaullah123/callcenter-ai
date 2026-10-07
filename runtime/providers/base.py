@@ -102,7 +102,7 @@ class STTProvider(Provider):
 
     @abstractmethod
     async def transcribe(self, audio: AudioInput, *, language: str | None = None,
-                         prompt: str | None = None) -> Transcript: ...
+                         prompt: str | None = None, model: str | None = None) -> Transcript: ...
 
 
 class LLMProvider(Provider):

@@ -95,19 +95,47 @@ def call_facts(session: Any) -> dict[str, Any]:
             "mobile_heard": bool(parsed.get("mobile")), "code_heard": bool(parsed.get("code")),
             "files_found": len(a.candidates) if a.lookup_attempts else None,
             "otp_exhausted": a.otp_attempts >= 3, "awaiting_confirmation": session.pending_action is not None,
-            "_turn": session.turn_id, **template_vars(session)}
+            "_turn": session.turn_id, "_reply": getattr(session, "last_reply", None), **template_vars(session)}
+
+
+def area_code(number: str) -> str:
+    """The caller's area code: for a Saudi number (+966 / 966 / 00966 / 0…) the first two digits of the national
+    number — "54" for a mobile, "11" for Riyadh; empty for anything else."""
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if digits.startswith("00966"):
+        digits = digits[5:]
+    elif digits.startswith("966"):
+        digits = digits[3:]
+    elif digits.startswith("0"):
+        digits = digits[1:]
+    else:
+        return ""
+    return digits[:2] if len(digits) == 9 else ""
 
 
 def template_vars(session: Any) -> dict[str, Any]:
-    """Built-in names for templates (the ones Hamsa flows use): the time in Riyadh, the call language and the
-    caller's number."""
+    """Built-in names for templates and prompts: Hamsa's system variables (current_time, current_date,
+    current_weekday, call_id, direction, user_number, user_number_area_code, agent_name, agent_number) and the names
+    its flows use (current_datetime, call_lang, userNumber, callParams). Time is Riyadh time."""
     from datetime import datetime
     from runtime.harness.nlu.dates import RIYADH
     now = datetime.now(RIYADH)
     number = getattr(session, "ani", None) or ""
-    return {"current_datetime": now.strftime("%Y-%m-%dT%H:%M:%S"), "current_weekday": now.strftime("%A"),
-            "call_lang": session.language.language, "userNumber": number,
-            "callParams": {"userNumber": number, "from": number}}
+    call_id = getattr(session, "call_id", "") or ""
+    started = getattr(session, "started_at", None)
+    system = {"current_datetime": now.strftime("%Y-%m-%dT%H:%M:%S"), "current_weekday": now.strftime("%A"),
+              "current_time": now.strftime("%H:%M"), "current_date": now.strftime("%Y-%m-%d"),
+              "current_timestamp": str(int(now.timestamp() * 1000)), "current_day": str(now.day),
+              "current_month": str(now.month), "current_year": str(now.year),
+              "call_id": call_id, "direction": getattr(session, "direction", "inbound"),
+              "call_type": "phone" if call_id.startswith("ivr-") else "chat" if call_id.startswith("chat-") else "web",
+              "call_start_time": started.isoformat() if started else "",
+              "user_number": number, "user_number_area_code": area_code(number),
+              "agent_name": getattr(session, "agent_name", ""), "agent_number": getattr(session, "agent_number", ""),
+              "agent_id": getattr(session, "agent_id", ""),
+              "call_lang": session.language.language, "userNumber": number,
+              "callParams": {"userNumber": number, "from": number}}
+    return {**(getattr(session, "custom", None) or {}), **system}        # custom values never replace a system one
 
 
 class SkillSet:

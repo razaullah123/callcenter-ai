@@ -160,3 +160,110 @@ def test_runtime_never_reads_the_source_database():
             if p.name != "config.py" and ("source_database_url" in (t := p.read_text(encoding="utf-8"))
                                           or "ai_agent_patient_appointment" in t)]
     assert hits == []
+
+
+def test_outbound_call_connects_with_its_token_and_reports_back(client):
+    """A batch call: the PBX connects the answered call with the token from the dial request."""
+    import asyncio
+
+    from runtime.platform import batch
+    from runtime.platform.store import MemoryStore
+    from runtime.server import app as server_app
+    rt = server_app.state["rt"]
+    loop = asyncio.new_event_loop()
+    store = rt.platform = MemoryStore()
+
+    async def agent_for_call(**kw):
+        return None                                           # the fixture's repo agent answers
+    rt.agent_for_call = agent_for_call
+    rt.batch = batch.BatchDialer(rt)
+
+    async def setup():
+        await store.put_batch({"id": "bc_t", "workspace_id": "hmg", "name": "B", "agent_id": "a", "from_number": "+966112000000",
+                               "status": "running", "config": {}})
+        await store.add_recipients("bc_t", [{"phone": "+966548802968", "name": "Sara", "variables": {"city": "Riyadh"}}])
+        (rec,), _ = await store.recipients("bc_t")
+        await store.update_recipient(rec["id"], {"status": "in_progress", "dialed_at": batch.datetime.now(batch.timezone.utc)})
+        return rec
+    rec = loop.run_until_complete(setup())
+    token = batch.make_token(rt.settings, "bc_t", rec["id"], 60)
+    with pytest.raises(Exception) as e:                        # a forged token is refused like a bad access token
+        with client.websocket_connect(f"/ws/voice-pipeline?access_token={_token()}&outbound_token=forged") as ws:
+            ws.receive_bytes()
+    assert e.value.code == 1008
+    with client.websocket_connect(f"/ws/voice-pipeline?phone_number=ignored&access_token={_token()}&outbound_token={token}") as ws:
+        ws.receive_bytes()                                     # the greeting
+        live = loop.run_until_complete(store.recipient(rec["id"]))
+        assert live["call_id"].startswith("ivr-") and live["status"] == "in_progress"
+        call = next(iter(rt.calls.values()))
+        assert call.session.direction == "outbound" and call.session.agent_number == "+966112000000"
+        assert call.session.params == {"name": "Sara", "city": "Riyadh"} and call.session.ani == "+966548802968"
+    for _ in range(300):                                       # the socket closed: the recipient is completed
+        done = loop.run_until_complete(store.recipient(rec["id"]))
+        if done["status"] == "completed":
+            break
+        import time as _t
+        _t.sleep(0.05)
+    assert done["status"] == "completed" and done["duration_s"] is not None
+    loop.close()
+
+
+def test_a_draft_phone_test_loads_the_draft(client):
+    """An outbound call of a "test via phone" batch asks for the agent's draft, a normal one for the published version."""
+    import asyncio
+
+    from runtime.platform import batch
+    from runtime.platform.store import MemoryStore
+    from runtime.server import app as server_app
+    rt = server_app.state["rt"]
+    loop = asyncio.new_event_loop()
+    store = rt.platform = MemoryStore()
+    asked = []
+
+    async def agent_for_call(**kw):
+        asked.append(kw)
+        return None
+    rt.agent_for_call = agent_for_call
+    rt.batch = batch.BatchDialer(rt)
+
+    async def setup(bid, cfg):
+        await store.put_batch({"id": bid, "workspace_id": "hmg", "name": "B", "agent_id": "a", "from_number": "+966112000000",
+                               "status": "running", "config": cfg})
+        await store.add_recipients(bid, [{"phone": "+966548802968"}])
+        (rec,), _ = await store.recipients(bid)
+        return rec["id"]
+    for bid, cfg in (("bc_draft", {"draft": True}), ("bc_live", {})):
+        rid = loop.run_until_complete(setup(bid, cfg))
+        token = batch.make_token(rt.settings, bid, rid, 60)
+        with client.websocket_connect(f"/ws/voice-pipeline?access_token={_token()}&outbound_token={token}") as ws:
+            ws.receive_bytes()
+    assert asked == [{"agent_id": "a", "draft": True}, {"agent_id": "a", "draft": False}]
+    loop.close()
+
+
+def test_a_console_listener_hears_a_real_call_through_the_audio_tap(client):
+    """The real VoiceCall: the caller's audio and the agent's replies reach a listener on /api/live/listen."""
+    import struct
+
+    from runtime.control import api as control_api
+    from runtime.platform.store import MemoryStore
+    from runtime.server import app as server_app
+    rt = server_app.state["rt"]
+    rt.platform, rt.live = MemoryStore(), None
+    client.app.include_router(control_api.router)
+    with client.websocket_connect(f"/ws/voice-pipeline?phone_number=+966548802968&access_token={_token()}") as ivr:
+        ivr.receive_bytes()                                                 # the greeting has started: the call exists now
+        (call_id,) = list(rt.calls)
+        with client.websocket_connect(f"/api/live/listen?call_id={call_id}") as ear:
+            tone = (np.sin(np.arange(8000) / 3) * 16000).astype(np.int16).tobytes()       # 1 s of "speech" @ 8 kHz, then 0.5 s silence
+            for chunk in [tone[i:i + 320] for i in range(0, len(tone), 320)] + [bytes(320)] * 25:
+                ivr.send_bytes(chunk)
+            sources = set()
+            for _ in range(3000):                                           # the agent's reply (and the handoff sentence) follow
+                frame = ear.receive_bytes()
+                source, rate = struct.unpack(">BH", frame[:3])
+                assert rate in (8000, 24000) and len(frame) > 3 and (len(frame) - 3) % 2 == 0
+                sources.add(source)
+                if sources == {0, 1}:
+                    break
+            assert sources == {0, 1}                                         # both sides of the conversation

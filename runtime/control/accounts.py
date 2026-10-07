@@ -30,9 +30,10 @@ ROLES = ("owner", "admin")
 
 @dataclass
 class Principal:
-    kind: str                                  # user | token | open
+    kind: str                                  # user | token | open | key
     user: dict[str, Any] | None = None
     memberships: dict[str, dict] = field(default_factory=dict)   # project → membership row
+    key: dict[str, Any] | None = None          # kind "key": the API key row (it belongs to one project)
 
     @property
     def is_user(self) -> bool:
@@ -40,10 +41,14 @@ class Principal:
 
     @property
     def actor(self) -> str:
+        if self.kind == "key":
+            return f"API key {(self.key or {}).get('name', '')} ({(self.key or {}).get('prefix', '')}…)"
         return (self.user or {}).get("email") or ("console token" if self.kind == "token" else "console")
 
     def role(self, ws: str) -> str | None:
         """owner / admin of `ws`; the token and the open console act as owner everywhere."""
+        if self.kind == "key":                  # an API key acts as an admin of its own project only
+            return "admin" if ws == (self.key or {}).get("workspace_id") else None
         if not self.is_user:
             return "owner"
         m = self.memberships.get(ws)
@@ -113,8 +118,28 @@ async def create_user(store, email: str, name: str, password: str) -> dict:
     return await store.user(row["id"])
 
 
+KEY_PREFIX = "hmg_"
+
+
+def new_api_key() -> str:
+    return KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+async def resolve_key(store, bearer: str) -> Principal | None:
+    """The principal of a valid API key (not revoked, not expired); None otherwise. Last use is noted at most every 5 minutes."""
+    row = await store.api_key_by_hash(token_hash(bearer)) if store is not None else None
+    if row is None or row.get("revoked_at") or (row.get("expires_at") and row["expires_at"] <= now()):
+        return None
+    last = row.get("last_used_at")
+    if last is None or now() - last > timedelta(minutes=5):
+        await store.touch_api_key(row["id"])
+    return Principal("key", key=row)
+
+
 async def resolve(store, settings, bearer: str | None) -> Principal | None:
     """Who presents `bearer`; None = not allowed in."""
+    if bearer and bearer.startswith(KEY_PREFIX):                  # an API key is a key or nothing: it never falls through to "open"
+        return await resolve_key(store, bearer)
     token = settings.console_token.get_secret_value() if settings.console_token else None
     if token and bearer and hmac.compare_digest(bearer, token):
         return Principal("token")

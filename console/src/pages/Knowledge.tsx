@@ -14,7 +14,8 @@ const STATUS: [KbStatus, string, string][] = [
   ["completed_with_errors", "Completed with Errors", "bg-warn/15 text-warn"],
   ["failed", "Failed", "bg-bad/15 text-bad"],
 ];
-const TYPES: [string, string][] = [["text", "Text"], ["file", "File"]];
+const TYPES: [string, string][] = [["text", "Text"], ["file", "File"], ["url", "URL"]];
+const TYPE_LABEL: Record<string, string> = { text: "Text", file: "File", url: "URL" };
 const EXTS: [string, string][] = [["pdf", "PDF"], ["docx", "DOCX"], ["txt", "TXT"], ["md", "MD"], ["html", "HTML"], ["epub", "EPUB"]];
 const USED: [string, string][] = [["yes", "Yes"], ["no", "No"]];
 const COLUMNS = [
@@ -34,6 +35,8 @@ const ico = (d: ReactNode, cls = "h-5 w-5") => (
 const K = {
   doc: ico(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h5" /></>),
   text: ico(<path d="M4 7V4h16v3M9 20h6M12 4v16" />),
+  link: ico(<><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></>),
+  pen: ico(<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />, "h-4 w-4"),
   upload: ico(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M17 8l-5-5-5 5M12 3v12" /></>, "h-7 w-7"),
   sparkle: ico(<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6" />, "h-4 w-4"),
   eye: ico(<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></>, "h-4 w-4"),
@@ -141,6 +144,83 @@ function AddText({ max, onClose }: { max: number; onClose: () => void }) {
   );
 }
 
+function AddUrl({ max, onClose }: { max: number; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [pages, setPages] = useState<string[] | null>(null);          // what the site's sitemap lists
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
+  const discover = useMutation({
+    mutationFn: () => api.discoverKbUrl(url.trim()),
+    onSuccess: r => { setPages(r.urls); setPicked(new Set(r.urls.slice(0, 1))); },
+  });
+  const save = useMutation({
+    mutationFn: () => api.addKbUrl({ name: name.trim(), url: url.trim(), urls: pages?.length ? [...picked] : undefined }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["knowledge"] }); onClose(); },
+  });
+  const shown = (pages ?? []).filter(p => p.toLowerCase().includes(search.toLowerCase()));
+  const toggle = (p: string) => setPicked(s => { const n = new Set(s); if (n.has(p)) n.delete(p); else n.add(p); return n; });
+  const ready = name.trim() && url.trim().startsWith("https://") && (!pages?.length || picked.size > 0);
+  return (
+    <Modal title="Add Link" sub="Read a public web page — or pages of a site — into your knowledge base." onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (ready) save.mutate(); }}>
+        <label className="block"><div className="mb-1 text-sm font-medium">Link Name</div>
+          <input id="kb-url-name" autoFocus maxLength={200} className="w-full" placeholder="Enter a name" value={name} onChange={e => setName(e.target.value)} /></label>
+        <label className="block"><div className="mb-1 text-sm font-medium">Link</div>
+          <div className="flex gap-2">
+            <input id="kb-url" type="url" className="min-w-0 flex-1" placeholder="https://example.com/faq" value={url}
+              onChange={e => { setUrl(e.target.value); setPages(null); discover.reset(); }} />
+            <Button onClick={() => discover.mutate()} disabled={!url.trim().startsWith("https://") || discover.isPending}>{discover.isPending ? "Looking…" : "Find pages"}</Button>
+          </div>
+          <span className="mt-1 block text-[11px] text-muted">Public https pages only — no logins, no audio / video / image files. The page is read once; delete and add it again to refresh it.</span></label>
+        {pages && (pages.length === 0
+          ? <div className="rounded-lg bg-soft p-2.5 text-xs text-muted">No sitemap found — only this page will be added.</div>
+          : <div className="rounded-lg border border-line">
+            <div className="flex items-center gap-2 border-b border-line p-2">
+              <input aria-label="Search pages" className="min-w-0 flex-1 !py-1 text-xs" placeholder="Search pages…" value={search} onChange={e => setSearch(e.target.value)} />
+              <span className="text-[11px] text-muted">{picked.size} of {max} max</span>
+              <button type="button" className="text-[11px] text-accent-text" onClick={() => setPicked(new Set(pages.slice(0, max)))}>All</button>
+              <button type="button" className="text-[11px] text-accent-text" onClick={() => setPicked(new Set())}>None</button>
+            </div>
+            <div className="max-h-52 overflow-auto p-1">
+              {shown.map(p => (
+                <label key={p} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-soft">
+                  <input type="checkbox" checked={picked.has(p)} onChange={() => toggle(p)} /><span className="truncate" title={p}>{p}</span></label>
+              ))}
+            </div>
+          </div>)}
+        <ErrorBox error={discover.error ?? save.error} />
+        <div className="flex justify-end gap-2">
+          <Button kind="ghost" onClick={onClose}>Cancel</Button>
+          <Button kind="primary" type="submit" disabled={!ready || save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function Rename({ item, onClose }: { item: KbItem; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(item.name);
+  const save = useMutation({
+    mutationFn: () => api.renameKb(item.id, name.trim()),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["knowledge"] }); onClose(); },
+  });
+  return (
+    <Modal title="Rename item" sub="Only the name changes — the content can't be edited. Add a new item for updated content." onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (name.trim()) save.mutate(); }}>
+        <input id="kb-rename" autoFocus maxLength={200} className="w-full" aria-label="Name" value={name} onChange={e => setName(e.target.value)} />
+        <ErrorBox error={save.error} />
+        <div className="flex justify-end gap-2">
+          <Button kind="ghost" onClick={onClose}>Cancel</Button>
+          <Button kind="primary" type="submit" disabled={!name.trim() || name.trim() === item.name || save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 /** Adds the item to an agent's draft (its other items stay); live after Publish. */
 function UseInAgent({ item, onClose }: { item: KbItem; onClose: () => void }) {
   const qc = useQueryClient();
@@ -190,10 +270,11 @@ function ViewItem({ id, onClose }: { id: string; onClose: () => void }) {
       {!it ? <ErrorBox error={q.error} /> : (
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            <StatusBadge s={it.status} /><span>{it.type === "file" ? (it.extension ?? "").toUpperCase() : "Text"}</span>
+            <StatusBadge s={it.status} /><span>{it.type === "file" ? (it.extension ?? "").toUpperCase() : TYPE_LABEL[it.type]}</span>
             <span>· {fmtSize(it.size_bytes)}</span><span>· {it.words.toLocaleString()} words</span><span>· {it.chunks} parts</span>
             <span>· {fmtDate(it.created_at)}{it.created_by ? ` by ${it.created_by}` : ""}</span>
           </div>
+          {it.source_url && <div className="text-xs text-muted">Source: <a href={it.source_url} target="_blank" rel="noreferrer" className="text-accent-text underline">{it.source_url}</a></div>}
           {it.error && <div className="rounded-lg bg-warn/10 p-2.5 text-xs text-warn">{it.error}</div>}
           <div className="text-xs">Used by: {it.used_by.length ? it.used_by.map(u => u.name).join(", ") : "no published agent"}
             {it.draft_by.length > 0 && <> · in the draft of {it.draft_by.map(u => u.name).join(", ")}</>}</div>
@@ -250,7 +331,7 @@ export default function Knowledge() {
   const page = Math.max(0, Number(params.get("page") ?? 1) - 1) || 0;
   const [cols, setCols] = useState(() => loadColumns(COLS_KEY, COLUMNS.map(c => c.key)));
   const show = (k: string) => k === "name" || cols.includes(k);
-  const [dialog, setDialog] = useState<null | { kind: "doc" } | { kind: "text" } | { kind: "try" } | { kind: "view"; id: string }
+  const [dialog, setDialog] = useState<null | { kind: "doc" } | { kind: "text" } | { kind: "url" } | { kind: "rename"; item: KbItem } | { kind: "try" } | { kind: "view"; id: string }
     | { kind: "use"; item: KbItem } | { kind: "delete"; item: KbItem }>(null);
   const del = useMutation({ mutationFn: (id: string) => api.deleteKb(id), onSuccess: () => { qc.invalidateQueries({ queryKey: ["knowledge"] }); setDialog(null); } });
   const redo = useMutation({ mutationFn: (id: string) => api.reprocessKb(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["knowledge"] }) });
@@ -285,7 +366,7 @@ export default function Knowledge() {
           <p className="mt-1 text-sm text-muted">Documents and notes your agents search during calls.</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          {([["doc", K.doc, "Add Document"], ["text", K.text, "Add Free Text"]] as const).map(([k, icon, label]) => (
+          {([["doc", K.doc, "Add Document"], ["text", K.text, "Add Free Text"], ["url", K.link, "Add Link"]] as const).map(([k, icon, label]) => (
             <button key={k} id={`kb-add-${k}`} onClick={() => setDialog({ kind: k })}
               className="flex min-w-36 flex-col items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 text-left text-sm font-medium transition hover:border-accent hover:shadow-sm">
               <span className="text-accent-text">{icon}</span>{label}</button>
@@ -338,11 +419,11 @@ export default function Knowledge() {
             {shown.map(i => (
               <tr key={i.id} onClick={() => setDialog({ kind: "view", id: i.id })} className="cursor-pointer border-b border-line last:border-0 hover:bg-soft/60">
                 <td className={cx(cell, "max-w-72")}>
-                  <div className="flex items-center gap-2"><span className="shrink-0 text-muted">{i.type === "file" ? K.doc : K.text}</span>
+                  <div className="flex items-center gap-2"><span className="shrink-0 text-muted">{i.type === "file" ? K.doc : i.type === "url" ? K.link : K.text}</span>
                     <span className="truncate font-medium" title={i.name}>{i.name}</span></div>
                   {i.error && <div className="mt-0.5 line-clamp-1 text-[11px] text-warn" title={i.error}>{i.error}</div>}
                 </td>
-                {show("type") && <td className={cell}>{i.type === "file" ? "File" : "Text"}</td>}
+                {show("type") && <td className={cell}>{TYPE_LABEL[i.type]}</td>}
                 {show("status") && <td className={cell}><StatusBadge s={i.status} /></td>}
                 {show("size") && <td className={cx(cell, "tabular-nums text-muted")}>{fmtSize(i.size_bytes)}</td>}
                 {show("extension") && <td className={cell}>{i.extension ? <span className="rounded border border-line bg-soft px-1.5 py-0.5 text-[11px] uppercase">{i.extension}</span> : "—"}</td>}
@@ -356,6 +437,7 @@ export default function Knowledge() {
                 <td className={cx(cell, "w-10 text-right")}>
                   <RowMenu items={[
                     { label: "View", icon: K.eye, onClick: () => setDialog({ kind: "view", id: i.id }) },
+                    { label: "Rename…", icon: K.pen, onClick: () => setDialog({ kind: "rename", item: i }) },
                     { label: "Use in agent…", icon: K.bot, onClick: () => setDialog({ kind: "use", item: i }) },
                     { label: "Process again", icon: K.redo, onClick: () => redo.mutate(i.id) },
                     { label: "Delete", icon: K.trash, danger: true, onClick: () => setDialog({ kind: "delete", item: i }) },
@@ -380,17 +462,22 @@ export default function Knowledge() {
 
       {dialog?.kind === "doc" && d && <AddDocument limits={d.limits} onClose={() => setDialog(null)} />}
       {dialog?.kind === "text" && <AddText max={d?.limits.text_chars ?? 25000} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "url" && d && <AddUrl max={d.limits.urls} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "rename" && <Rename item={dialog.item} onClose={() => setDialog(null)} />}
       {dialog?.kind === "try" && <TrySearch onClose={() => setDialog(null)} />}
       {dialog?.kind === "view" && <ViewItem id={dialog.id} onClose={() => setDialog(null)} />}
       {dialog?.kind === "use" && <UseInAgent item={dialog.item} onClose={() => setDialog(null)} />}
       {dialog?.kind === "delete" && (
         <Modal title="Delete item" onClose={() => setDialog(null)}>
-          <p className="text-sm">Delete <b>{dialog.item.name}</b>? This can't be undone.</p>
-          {dialog.item.used_by.length > 0 && <p className="mt-2 text-xs text-warn">{dialog.item.used_by.map(u => u.name).join(", ")} search{dialog.item.used_by.length === 1 ? "es" : ""} it now — they simply won't find it any more.</p>}
+          {(() => {
+            const users = [...new Set([...dialog.item.used_by, ...dialog.item.draft_by].map(u => u.name))];
+            return users.length ? <p className="text-sm">Items used by an agent can't be deleted. <b>{dialog.item.name}</b> is used by <b>{users.join(", ")}</b> — remove it from the agent first (Use in agent…).</p>
+              : <p className="text-sm">Delete <b>{dialog.item.name}</b>? This can't be undone.</p>;
+          })()}
           <div className="mt-3"><ErrorBox error={del.error instanceof ApiError ? del.error : null} /></div>
           <div className="mt-4 flex justify-end gap-2">
             <Button kind="ghost" onClick={() => setDialog(null)}>Cancel</Button>
-            <Button kind="danger" onClick={() => del.mutate(dialog.item.id)} disabled={del.isPending}>{del.isPending ? "Deleting…" : "Delete"}</Button>
+            <Button kind="danger" onClick={() => del.mutate(dialog.item.id)} disabled={del.isPending || dialog.item.used_by.length + dialog.item.draft_by.length > 0}>{del.isPending ? "Deleting…" : "Delete"}</Button>
           </div>
         </Modal>
       )}

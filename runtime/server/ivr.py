@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 
 import asyncpg
@@ -102,7 +103,7 @@ def mask(number: str) -> str:
 
 
 @router.websocket("/ws/voice-pipeline")
-async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: str = "") -> None:
+async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: str = "", outbound_token: str = "") -> None:
     from runtime.server.app import state   # shared runtime + phrase cache
     await ws.accept()
     rt: Runtime = state["rt"]
@@ -111,10 +112,25 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
         await ws.close(code=1008, reason="Unauthorized")
         return
 
+    # an outbound (batch) call: the PBX placed it and connects the answered call with the token from our dial request
+    outbound = None
+    if outbound_token:
+        from runtime.platform import batch as batch_mod
+        ref = batch_mod.read_token(s, outbound_token)
+        dialer = getattr(rt, "batch", None)
+        row = batch_rec = None
+        if ref and dialer is not None and rt.platform is not None:
+            row, batch_rec = await rt.platform.batch(ref[0]), await rt.platform.recipient(ref[1])
+        if not row or not batch_rec or batch_rec["batch_id"] != row["id"]:
+            await ws.close(code=1008, reason="Unauthorized")
+            return
+        outbound = (dialer, row, batch_rec)
+        phone_number = batch_rec["phone"]
+
     phone = repair_phone(phone_number)
     digits = re.sub(r"\D", "", phone)
     branch = []
-    if 0 < len(digits) <= 8:
+    if outbound is None and 0 < len(digits) <= 8:
         try:
             branch = projects_by_extension(await get_reference(), digits)
         except Exception as e:
@@ -122,7 +138,14 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
 
     call_id = f"ivr-{uuid.uuid4().hex[:12]}"
     # which agent answers: the phone routes (number / extension prefix), else the default agent
-    agent = await rt.agent_for_call(number=digits) if hasattr(rt, "agent_for_call") else None
+    params = None
+    if outbound is not None:
+        from runtime.harness.variables import declared_variables
+        from runtime.platform import batch as batch_mod
+        agent = await rt.agent_for_call(agent_id=outbound[1]["agent_id"], draft=bool((outbound[1].get("config") or {}).get("draft")))
+        params = batch_mod.call_params(declared_variables(agent.bundle) if agent else {}, outbound[2])
+    else:
+        agent = await rt.agent_for_call(number=digits) if hasattr(rt, "agent_for_call") else None
     knobs = agent.settings if agent else s      # the agent's own knobs (chunk size, barge-in grace, transfer)
     lock = asyncio.Lock()
     in_fmt = AudioFormat("pcm16", s.ivr_inbound_rate)
@@ -140,9 +163,10 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
     async def send_event(msg: dict) -> None:
         kind = msg.get("event")
         if kind == "transfer":
-            dest = transfer_destination(call, knobs)
+            dest = msg.get("destination") or transfer_destination(call, knobs)      # a transfer node may name its own
+            extra = {k: msg[k] for k in ("timeout_s", "headers") if msg.get(k)}
             async with lock:
-                await ws.send_text(json.dumps({"action": "transfer", "destination": dest}))
+                await ws.send_text(json.dumps({"action": "transfer", "destination": dest, **extra}))
             rt.bus.bind(call_id=call_id).emit(EventType.HANDOFF, destination=dest, reason=msg.get("reason"))
         elif kind == "hangup":
             closing.set()
@@ -152,14 +176,19 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
     call = VoiceCall(rt, call_id=call_id, in_fmt=in_fmt, out_fmt=out_fmt, send_audio=send_audio,
                      send_event=send_event, ani=None if branch else (phone or None), phrases=state.get("phrases"),
                      chunk_ms=knobs.ivr_chunk_ms, aec=s.ivr_aec, barge_in_grace_ms=knobs.ivr_barge_in_grace_ms,
-                     min_suppression_ratio=s.ivr_min_suppression_ratio, agent=agent)
+                     min_suppression_ratio=s.ivr_min_suppression_ratio, agent=agent, params=params)
     rt.calls[call_id] = call
+    started = time.monotonic()
+    if outbound is not None:
+        call.session.direction = "outbound"
+        call.session.agent_number = outbound[1]["from_number"]
+        await outbound[0].on_connect(outbound[2]["id"], call_id)
     ev = rt.bus.bind(call_id=call_id)
     ev.emit(EventType.SLOT_SET, field="ivr_connect", number=mask(phone), extension_call=bool(branch))
     try:
         if branch:
             call.set_branch(branch)
-        elif phone and s.ivr_whitelist and not await is_whitelisted(phone, s):
+        elif outbound is None and phone and s.ivr_whitelist and not await is_whitelisted(phone, s):
             ev.emit(EventType.POLICY_BLOCK, reason="not_whitelisted")
             for lang in ("ar", "en"):
                 await call.player.say(REJECTION[lang], language=lang)
@@ -177,7 +206,14 @@ async def voice_pipeline(ws: WebSocket, phone_number: str = "", access_token: st
         log.exception("IVR call failed")
     finally:
         rt.calls.pop(call_id, None)
-        await call.stop()
+        try:
+            await call.stop()
+        finally:
+            if outbound is not None:
+                try:
+                    await outbound[0].on_end(outbound[2]["id"], call_id, started, call.end_reason)
+                except Exception:                      # noqa: BLE001 — the call is over; the ring / call timeouts clean up
+                    log.exception("outbound call %s: could not record its end", call_id)
         try:
             await ws.close()
         except Exception:

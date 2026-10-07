@@ -26,6 +26,7 @@ flow.yaml:
 
 import functools
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -126,10 +127,21 @@ def _eval(expr: Any, ctx: dict[str, Any]) -> Any:
         return expr
     if is_template(expr):
         return render(expr, ctx)
+    if _JSONPATH.match(expr):                                     # $.data.items[0].name → result.data.items.0.name
+        return _get(ctx, jsonpath_to_path(expr))
     if expr.startswith("="):
         literal = expr[1:]
         return {"true": True, "false": False}.get(literal, literal)
     return _get(ctx, expr)
+
+
+_JSONPATH = re.compile(r"^\$(\.|\[|$)")
+
+
+def jsonpath_to_path(expr: str) -> str:
+    """A JSONPath ($.a.b[0].c, $['a'], or $ alone) as one of our dotted paths on the tool result (result.a.b.0.c)."""
+    p = re.sub(r"\[\s*['\"]?([^\]'\"]+?)['\"]?\s*\]", r".\1", expr[1:])
+    return "result" + (p if p.startswith(".") or not p else "." + p)
 
 
 def _get(ctx: Any, path: str) -> Any:
@@ -171,11 +183,19 @@ def is_template(text: str) -> bool:
     return "{{" in text or "{%" in text
 
 
+_FALLBACK = re.compile(r"\{\{\s*([^{}|]+?)\s*\|\|\s*([^{}]+?)\s*\}\}")
+
+
+def _fallback_sugar(text: str) -> str:
+    """Hamsa's `{{ var || 'default' }}` as Jinja: the default applies when the value is missing or empty."""
+    return _FALLBACK.sub(lambda m: "{{ (" + m.group(1) + ") | default(" + m.group(2) + ", true) }}", text)
+
+
 @functools.lru_cache(maxsize=2048)
 def _template(text: str):
     from jinja2 import ChainableUndefined
     from jinja2.sandbox import SandboxedEnvironment
-    return SandboxedEnvironment(undefined=ChainableUndefined, autoescape=False).from_string(text)
+    return SandboxedEnvironment(undefined=ChainableUndefined, autoescape=False).from_string(_fallback_sugar(text))
 
 
 def render(text: str, ctx: dict[str, Any]) -> str:

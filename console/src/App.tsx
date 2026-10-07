@@ -21,9 +21,13 @@ import { cx } from "./ui";
 const Skills = lazy(() => import("./pages/Skills"));   // Monaco (~3.5 MB) only loads here
 const Agents = lazy(() => import("./pages/Agents"));
 const Studio = lazy(() => import("./pages/Studio"));   // the flow canvas (React Flow)
+const Share = lazy(() => import("./pages/Share"));     // public page / embed widget (Publishing)
 
 const Voices = lazy(() => import("./pages/Voices"));
 const Numbers = lazy(() => import("./pages/Numbers"));
+const BatchCalls = lazy(() => import("./pages/BatchCalls"));
+const ApiKeys = lazy(() => import("./pages/ApiKeys"));
+const BatchCall = lazy(() => import("./pages/BatchCall"));
 
 // Lucide-style line icons (Hamsa's sidebar), as path lists
 const I: Record<string, string[]> = {
@@ -62,7 +66,7 @@ const GROUPS: { title?: string; items: NavItem[] }[] = [
   { items: [
     { to: "/", label: "Dashboard", icon: "dashboard" }, { to: "/voices", label: "Voices", icon: "voices" },
     { to: "/calls", label: "Call history", icon: "calls" }, { to: "/live", label: "Live calls", icon: "live" },
-    { to: "/logs", label: "Logs", icon: "logs" }, { to: "/api-keys", label: "API keys", icon: "key", soon: true },
+    { to: "/logs", label: "Logs", icon: "logs" }, { to: "/api-keys", label: "API keys", icon: "key" },
     { to: "/secrets", label: "Secrets", icon: "lock" },
   ] },
   { title: "Agents", items: [
@@ -72,7 +76,7 @@ const GROUPS: { title?: string; items: NavItem[] }[] = [
     { to: "/evals", label: "Evals", icon: "evals" }, { to: "/playground", label: "Playground", icon: "play" },
   ] },
   { title: "Telephony", items: [
-    { to: "/numbers", label: "Phone numbers", icon: "plus" }, { to: "/batch-calls", label: "Batch calls", icon: "phone", soon: true },
+    { to: "/numbers", label: "Phone numbers", icon: "plus" }, { to: "/batch-calls", label: "Batch calls", icon: "phone" },
   ] },
 ];
 const NAV = GROUPS.flatMap(g => g.items).filter(i => !i.soon);
@@ -237,8 +241,12 @@ function Shell({ status }: { status: NonNullable<ReturnType<typeof useAuth>["dat
             <Route path="/agents" element={<Agents />} />
             <Route path="/voices" element={<Voices />} />
             <Route path="/numbers" element={<Numbers />} />
+            <Route path="/batch-calls" element={<BatchCalls />} />
+            <Route path="/api-keys" element={<ApiKeys />} />
+            <Route path="/batch-calls/:id" element={<BatchCall />} />
             <Route path="/project" element={<ProjectSettings />} />
             <Route path="/agents/:id" element={<Studio />} />
+            <Route path="/agents/:id/share" element={<Share />} />
             <Route path="/live" element={<Live />} />
             <Route path="/calls" element={<Calls />} />
             <Route path="/calls/:id" element={<Calls />} />

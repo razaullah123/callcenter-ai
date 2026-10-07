@@ -321,7 +321,7 @@ def test_hamsa_flow_converts():
     tool = n["lookup_patient"]
     assert tool.type == "tool" and tool.tool == "hmg_patient_lookup"
     assert tool.args == {"mobileNo": "{{search_mobile}}"} and tool.outputs == {"patient_count": "result.count"}
-    assert n["found_2"].instructions.startswith("Say exactly") and n["end_call"].type == "end"
+    assert n["found_2"].say == {"ar": "وجدنا ملفك", "en": "وجدنا ملفك"} and n["end_call"].type == "end"
     edges = {(e.source, e.target): e for e in g.edges}
     assert edges[("lookup_patient", "found")].on == "success" and edges[("lookup_patient", "end_call")].on == "failure"
     assert edges[("found", "found_2")].when == {"all": [{"equals": {"patient_count": "1"}}]}

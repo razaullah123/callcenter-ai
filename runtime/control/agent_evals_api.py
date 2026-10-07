@@ -112,8 +112,7 @@ async def run_cases(agent_id: str, body: RunBody) -> dict:
     pending: list[asyncio.Task] = []
 
     def progress(r: dict) -> None:
-        failed = [f"{c['check']}{': ' + c['detail'] if c.get('detail') else ''}"[:200]
-                  for c in r["checks"] if not c["passed"]]
+        failed = gate.failed_lines(r)
         pending.append(asyncio.create_task(JOBS.progress(job, {"case": r["case"], "passed": r["passed"],
                                                                "failed": failed, "turns": r["turns"]})))
 

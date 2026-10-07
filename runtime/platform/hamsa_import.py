@@ -25,8 +25,33 @@ import json
 import re
 from typing import Any
 
+from runtime.platform import analysis
+from runtime.skills.flow import jsonpath_to_path
+
 ENCRYPTED = re.compile(r"^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$")
-PATH = re.compile(r"^result(\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\])*$")
+PATH = re.compile(r"^result(\.[A-Za-z_][A-Za-z0-9_]*|\.\d+|\[\d+\])*$")
+
+# Hamsa router / equation operators (as the docs and exports name them) → our condition keys.
+_OPERATORS = {
+    "equals": "equals", "==": "equals", "eq": "equals", "not_equals": "ne", "notEquals": "ne", "!=": "ne", "ne": "ne",
+    "greater_than": "gt", "greaterThan": "gt", ">": "gt", "gt": "gt",
+    "greater_than_or_equal": "gte", "greater_than_or_equals": "gte", "greaterThanOrEqual": "gte", ">=": "gte", "gte": "gte",
+    "less_than": "lt", "lessThan": "lt", "<": "lt", "lt": "lt",
+    "less_than_or_equal": "lte", "less_than_or_equals": "lte", "lessThanOrEqual": "lte", "<=": "lte", "lte": "lte",
+    "contains": "contains", "not_contains": "not_contains", "notContains": "not_contains",
+    "regex": "regex", "matches": "regex",
+}
+_EXISTS = ("exists", "is_not_empty", "isNotEmpty")
+_NOT_EXISTS = ("not_exists", "notExists", "is_empty", "isEmpty")
+
+
+def _number(v: Any) -> Any:
+    """A condition's number as a number (Hamsa stores values as text); anything else stays as it is."""
+    try:
+        f = float(v)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return v
 SAFE_HEADERS = {"content-type", "accept"}
 JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array"}
 
@@ -152,9 +177,12 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
         node: dict[str, Any] = {"id": nid, "position": {"x": round(pos["x"]), "y": round(pos["y"])} if pos else None}
         if typ in ("start", "conversation"):
             text = (n.get("message") or "").strip()
-            if n.get("messageType") == "static":
-                text = "Say exactly the following, word for word, and nothing else:\n\n" + text
-            node.update(type="conversation", instructions=text)
+            if n.get("messageType") == "static" and text:
+                node.update(type="conversation", say={"ar": text, "en": text})        # said as is, no model
+                if n.get("skipResponse") and not n.get("isGlobal"):
+                    node["skip_response"] = True                                       # doesn't wait for the caller
+            else:
+                node.update(type="conversation", instructions=text)
             ex = (n.get("extractVariables") or {})
             if ex.get("enabled"):
                 node["extract"] = [declare(v) for v in ex.get("variables") or [] if v.get("name")]
@@ -188,15 +216,62 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
                         continue
                     args[p] = _value(v)
                 node["args"] = args
+                oeb = str(n.get("onErrorBehavior") or b.get("onErrorBehavior") or "").lower()
+                if oeb in ("retry", "fail"):
+                    node["on_error"] = oeb
+                wait = n.get("timeout") or b.get("timeout")
+                if isinstance(wait, (int, float)) and wait > 0:
+                    node["timeout_s"] = round(wait / 1000, 1) if wait >= 1000 else wait       # Hamsa: ms (or seconds)
                 outs = {}
                 for v in ((n.get("extractVariables") or {}).get("variables") or []):
                     path = (v.get("extractionPrompt") or "").strip()
+                    if path.startswith("$"):                      # a JSONPath ($.data.items[0].name)
+                        path = jsonpath_to_path(path)
                     if PATH.match(path):
                         outs[v["name"]] = path
                     else:
                         counts["outputs_skipped"] += 1
                 if outs:
                     node["outputs"] = outs
+        elif typ in ("transfer_call", "transferCall"):
+            msg = (n.get("message") or n.get("transferMessage") or "").strip()
+            node.update(type="transfer", reason=n.get("label") or "transfer",
+                        destination=str(n.get("phoneNumber") or "").strip(),
+                        transfer_type="cold" if str(n.get("transferType") or "").lower() == "cold" else "warm",
+                        timeout_s=n.get("timeout") or None,
+                        headers={h["name"]: str(h.get("value", "")) for h in n.get("sipHeaders") or [] if h.get("name")})
+            if msg and n.get("messageType", "static") == "static":
+                node["say"] = {"ar": msg, "en": msg}
+            elif msg:
+                report.append(f"Transfer node {n.get('label')}: its AI-written announcement became the standard hand-off line")
+        elif typ in ("change_agent_settings", "changeAgentSettings"):
+            src = n.get("agentSettings") or n.get("settings") or n
+            ov: dict[str, Any] = {}
+            if (text := (src.get("systemInstructions") or "").strip()):
+                ov["system_prompt"] = text
+            call: dict[str, Any] = {}
+            if src.get("interrupt") is not None:
+                call["interrupt"] = bool(src["interrupt"])
+            for hamsa_key, key, scale in (("responseDelay", "response_delay_ms", 1), ("userInactivityTimeout", "inactivity_s", 1),
+                                          ("minInterruptionDuration", "min_interruption_ms", 1000),
+                                          ("vadActivationThreshold", "vad_threshold", 1)):
+                if isinstance(src.get(hamsa_key), (int, float)):
+                    call[key] = round(src[hamsa_key] * scale, 2)
+            if call:
+                ov["call"] = call
+            skipped = [k for k in ("voiceId", "expressiveness", "preferredSttModel", "voiceDictionaryIds") if src.get(k)]
+            if skipped:
+                report.append(f"Settings node {n.get('label')}: {', '.join(skipped)} left out — they name Hamsa's voices / models; "
+                              "set this project's voice and models on the node")
+            node.update(type="settings", overrides=ov)
+        elif typ in ("transfer_agent", "transferAgent"):
+            msg = (n.get("transferMessage") or "").strip()
+            node.update(type="agent", agent=str(n.get("agentId") or ""), handoff_history=bool(n.get("handoffConversation")),
+                        handoff_variables=bool(n.get("handoffVariables")))
+            if msg and n.get("transferMessageType", "static") == "static":
+                node["say"] = {"ar": msg, "en": msg}
+            report.append(f"Transfer agent node {n.get('label')}: points to Hamsa's agent {node['agent'] or '(none)'} — choose the "
+                          "matching agent of this project on the node")
         elif typ == "end_call":
             node["type"] = "end"
         else:
@@ -224,12 +299,13 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
             elif ctype == "structured_equation":
                 parts = []
                 for x in c.get("conditions") or []:
-                    if x.get("operator") == "equals":
-                        parts.append({"equals": {x["variable"]: x.get("value")}})
-                    elif x.get("operator") in ("is_empty", "isEmpty"):
-                        parts.append({"empty": [x["variable"]]})
-                    elif x.get("operator") in ("is_not_empty", "isNotEmpty"):
-                        parts.append({"filled": [x["variable"]]})
+                    op, var, val = x.get("operator"), x.get("variable"), x.get("value")
+                    if op in _EXISTS:
+                        parts.append({"filled": [var]})
+                    elif op in _NOT_EXISTS:
+                        parts.append({"empty": [var]})
+                    elif kind := _OPERATORS.get(op):
+                        parts.append({kind: {var: _number(val) if kind in ("gt", "gte", "lt", "lte") else val}})
                     else:
                         counts["unsupported"] += 1
                         report.append(f"Node {n.get('label')}: condition operator {x.get('operator')!r} isn't "
@@ -239,6 +315,13 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
                 if parts is None:
                     continue
                 edge["when"] = {"any" if c.get("logic") == "any" else "all": parts}
+            elif ctype == "dtmf":
+                key = c.get("key") or c.get("dtmfKey") or c.get("digit")
+                if key in (None, ""):
+                    counts["unsupported"] += 1
+                    report.append(f"Node {n.get('label')}: a keypad transition has no key — skipped")
+                    continue
+                edge["when"] = {"dtmf": str(key)}
             elif ctype == "after_user_reply" or (ctype == "auto" and typ in ("start", "conversation")):
                 edge["when"] = {"replied": True}
                 counts["auto_reply"] += ctype == "auto"
@@ -250,8 +333,18 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
                 continue
             edges.append(edge)
         if n.get("isGlobal"):
-            cond = (n.get("globalCondition") or n.get("description") or n.get("label") or "").strip()
-            edges.append({"from": "*", "to": nid, "when": {"llm": cond}})
+            if str(n.get("globalConditionType") or "").lower() == "dtmf" and n.get("globalDtmfKey") not in (None, ""):
+                when: dict[str, Any] = {"dtmf": str(n["globalDtmfKey"])}
+            else:
+                when = {"llm": (n.get("globalCondition") or n.get("description") or n.get("label") or "").strip()}
+            glob: dict[str, Any] = {"from": "*", "to": nid, "when": when}
+            if n.get("globalReturnToSource"):
+                glob["back"] = True
+            if n.get("requiresDoubleConfirm"):
+                glob["confirm"] = True
+            if n.get("skipResponse"):
+                glob["silent"] = True
+            edges.append(glob)
 
     if start is None and nodes:
         start = nodes[0]["id"]
@@ -301,6 +394,7 @@ def convert(h: dict[str, Any], *, taken_tools: set[str] = frozenset()) -> dict[s
         "languages": langs, "default_language": lang,
         "flow": {"start": start, "variables": variables, "nodes": nodes, "edges": edges},
         "tools": tools, "knobs": knobs,
+        "analysis": analysis.settings_from_schema(h.get("outcomeResponseShape")),     # Hamsa's outcome schema → our outcome fields
         "temperature": llm.get("temperature"),
         "source": {"from": "hamsa", "id": h.get("id"), "name": h.get("name"), "type": h.get("type"),
                    "llm": {"provider": llm.get("provider"), "model": llm.get("model")},

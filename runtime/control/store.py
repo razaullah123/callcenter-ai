@@ -95,6 +95,10 @@ class EventStore:
                                    bool(d.get("extension_call")))
         elif e.type == EventType.SKILL_EXIT and d.get("reason") == "verified":
             await conn.execute("UPDATE calls SET verified = true WHERE call_id = $1", cid)
+        elif e.type == EventType.AGENT_TRANSFER:       # the call now belongs to the agent it moved to
+            await conn.execute("UPDATE calls SET agent_id = COALESCE($2, agent_id), release_id = $3, "
+                               "config_version = $4 WHERE call_id = $1", cid, d.get("agent_id"), d.get("release_id"),
+                               d.get("config_version"))
         elif e.type == EventType.HANDOFF:
             await conn.execute("UPDATE calls SET handoff = COALESCE($2, handoff, 'transfer') WHERE call_id = $1",
                                cid, d.get("reason"))
@@ -303,7 +307,7 @@ SORTS = {"time": "started_at", "duration": "duration_s"}
 async def list_calls(limit: int = 50, offset: int = 0, q: str | None = None, outcome: str | None = None,
                      channel: str | None = None, scope: Scope = None, *, channels: list[str] | None = None,
                      statuses: list[str] | None = None, start: datetime | None = None, end: datetime | None = None,
-                     sort: str = "time", desc: bool = True) -> dict[str, Any]:
+                     sort: str = "time", desc: bool = True, duration: tuple[str, int, int | None] | None = None) -> dict[str, Any]:
     pool = await get_pool()
     args: list = []
     where = [_scope_sql(scope, args)]
@@ -336,10 +340,19 @@ async def list_calls(limit: int = 50, offset: int = 0, q: str | None = None, out
     elif outcome == "unverified":
         where.append("NOT verified")
     rows_sql = f"SELECT *, {DURATION}, {STATUS} AS status FROM calls WHERE {' AND '.join(where)}"
-    outer = ""
+    conds: list[str] = []
     if statuses is not None:
         args.append([x for x in statuses if x in STATUSES])
-        outer = f"WHERE status = ANY(${len(args)}::text[])"
+        conds.append(f"status = ANY(${len(args)}::text[])")
+    if duration:                                  # seconds; a call without a duration (still running) never matches
+        op, a, b = duration
+        args.append(a)
+        if op == "between":
+            args.append(b)
+            conds.append(f"duration_s BETWEEN ${len(args) - 1} AND ${len(args)}")
+        else:
+            conds.append(f"duration_s {dict(gt='>', lt='<', eq='=')[op]} ${len(args)}")
+    outer = f"WHERE {' AND '.join(conds)}" if conds else ""
     order = f"{SORTS.get(sort, 'started_at')} {'DESC' if desc else 'ASC'} NULLS LAST, started_at DESC"
     async with pool.acquire() as c:
         total = await c.fetchval(f"SELECT count(*) FROM ({rows_sql}) x {outer}", *args)

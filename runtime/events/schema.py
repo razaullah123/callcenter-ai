@@ -44,6 +44,7 @@ class EventType(StrEnum):
     # policy / control
     POLICY_BLOCK = "policy.block"
     HANDOFF = "handoff"
+    AGENT_TRANSFER = "agent.transfer"   # the call moved to another agent (flow "transfer agent" node)
     ERROR = "error"
 
 

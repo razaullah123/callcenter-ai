@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type ActiveCall, type TurnLatency } from "../api";
+import { ListenCard } from "../listen";
 import { Badge, cx, fmtClock, fmtMs } from "../ui";
 
 export const LANG: Record<string, string> = { ar: "Arabic", en: "English", unknown: "Unknown" };
@@ -82,7 +83,7 @@ export default function LiveDrawer({ call, agentName, onClose }: { call: ActiveC
                   ))}
                 </div>
               </div>
-              <p className="text-xs text-muted">Listening in on the call's audio isn't available yet — this view follows the conversation as text.</p>
+              {!ended && <ListenCard callId={call.call_id} />}
             </div>
           )}
           {tab === "conversation" && (

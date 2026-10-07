@@ -52,7 +52,7 @@ class OpenAICompatSTT(STTProvider):
     settings: "OpenAICompatSTT.Settings"
 
     async def transcribe(self, audio: AudioInput, *, language: str | None = None,
-                         prompt: str | None = None) -> Transcript:
+                         prompt: str | None = None, model: str | None = None) -> Transcript:
         s = self.settings
         kwargs: dict[str, Any] = {}
         if language:
@@ -61,7 +61,7 @@ class OpenAICompatSTT(STTProvider):
             kwargs["prompt"] = hint
         result = await s.client().audio.transcriptions.create(
             file=("audio.wav", prepare_for_stt(audio)),
-            model=s.model, response_format="verbose_json", **kwargs)
+            model=model or s.model, response_format="verbose_json", **kwargs)
         raw = result.model_dump()
         lang = raw.get("language")
         lang = _LANG_NAMES.get(str(lang).lower(), lang) if lang else language

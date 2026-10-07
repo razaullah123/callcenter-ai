@@ -109,3 +109,20 @@ without code changes. Recommended: Postgres encryption at rest, TLS in front of 
 - Transfer destination defaults to the chosen branch's `base_extension` unless `IVR_TRANSFER_DESTINATION` is set.
 - Six skills (manage appointment, send info, insurance, medical reports, post-visit, complaints) are drafts pending flow specs.
 - Horizontal autoscaling is not built yet (processes / containers are added by configuration).
+
+## Public agent pages and the embed widget
+
+An agent can be shared (Studio → **Share**): a link `https://<host>/p/<token>` anyone can open and talk to without signing in, and a
+website widget `<script src="https://<host>/embed.js" data-token="<token>" async></script>`. These routes (`/p/*`, `/embed.js`,
+`/public/*`, `/ws/public/*`) are public by design: keep them reachable from the internet and keep `/api/*` and `/console` protected.
+
+- Every visitor call spends speech-recognition, language-model and voice credits. The limits on the Share screen (longest call, calls at once,
+  calls per visitor per hour, websites that may embed it) are per process; with several workers each counts on its own.
+- Behind a reverse proxy set `PUBLIC_TRUST_PROXY=true` so the per-visitor limit uses the address in `X-Forwarded-For` (otherwise every visitor
+  looks like the proxy). Only enable it when the proxy sets that header itself.
+- The page needs HTTPS in production (browsers only allow the microphone on secure pages); the WebSocket follows the page's scheme.
+- Unpublishing deletes the token: the page and widget stop at once and calls in progress on the link are ended.
+
+## Batch (outbound) calls
+
+Set `PUBLIC_BASE_URL` (how the IVR / PBX reaches this server) and, once the dial URL of an outbound number is real and tested, `BATCH_LIVE_DIAL=true`. Until then batch calls only simulate (nobody is called). `BATCH_MAX_CONCURRENT` and `BATCH_RING_TIMEOUT_S` tune the dialer; Every worker runs the dialer; a cluster-wide lock lets one tick run at a time, so no call is placed twice. Protocol: docs/ivr_protocol.md section 9.

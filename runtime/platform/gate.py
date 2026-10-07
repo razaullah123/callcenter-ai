@@ -73,6 +73,15 @@ def status(agent: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]
             "ok": h is not None and not failed and not not_run, "results": results}
 
 
+def failed_lines(result: dict[str, Any]) -> list[str]:
+    """The failed checks of a case result as short lines. When the model provider failed (timeouts, 5xx — `provider_problem`) that
+    is the only line: the missing tools and the unbooked appointment were just consequences of the conversation breaking off."""
+    checks = result.get("checks") or []
+    if result.get("provider_problem"):
+        checks = [c for c in checks if c.get("check") == "no_error"]
+    return [f"{c['check']}{': ' + c['detail'] if c.get('detail') else ''}"[:260] for c in checks if not c["passed"]]
+
+
 def merge_results(agent: dict[str, Any], run_hash: str, cases: dict[str, dict], run: dict[str, Any]) -> dict:
     """The agent's gate record after `run` (made on the draft with hash `run_hash`)."""
     rec = agent.get("gate") or {}
@@ -86,8 +95,7 @@ def merge_results(agent: dict[str, Any], run_hash: str, cases: dict[str, dict], 
         rec["cases"][r["case"]] = {
             "passed": bool(r["passed"]), "spec_hash": spec_hash(spec), "run_id": run["id"], "at": at,
             "turns": r.get("turns"), "duration_s": r.get("duration_s"),
-            "failed": [f"{c['check']}{': ' + c['detail'] if c.get('detail') else ''}"[:200]
-                       for c in r["checks"] if not c["passed"]]}
+            "failed": failed_lines(r)}
     return rec
 
 

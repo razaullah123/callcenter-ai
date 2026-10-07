@@ -8,7 +8,7 @@ Policy (in the tool library / an agent's release):
       method: GET | POST | PUT | PATCH | DELETE
       url: "https://api.example.com/shipments/{tracking_no}"      # {arg} placeholders are filled from the args
       headers: {X-Client: voice-agent}                             # values may be {secret: NAME}
-      auth: {type: bearer, token: {secret: COURIER_API_KEY}}       # or basic {username, password},
+      auth: {type: bearer, token: {secret: COURIER_API_KEY}}       # or token ("Authorization: Token ..."), basic {username, password},
                                                                    # or api_key {header, value}; secrets resolved
                                                                    # when the agent loads
       # remaining args: query string for GET / DELETE, JSON body otherwise
@@ -49,7 +49,7 @@ def build_request(spec: dict[str, Any], args: dict[str, Any]) -> tuple[str, str,
     return method, url, headers, None, rest
 
 
-AUTH_TYPES = ("none", "bearer", "basic", "api_key")
+AUTH_TYPES = ("none", "bearer", "token", "basic", "api_key")
 
 
 def auth_headers(auth: dict[str, Any] | None) -> dict[str, str]:
@@ -57,6 +57,8 @@ def auth_headers(auth: dict[str, Any] | None) -> dict[str, str]:
     kind = (auth or {}).get("type", "none")
     if kind == "bearer":
         return {"Authorization": f"Bearer {auth.get('token', '')}"}
+    if kind == "token":
+        return {"Authorization": f"Token {auth.get('token', '')}"}
     if kind == "basic":
         raw = f"{auth.get('username', '')}:{auth.get('password', '')}".encode()
         return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
@@ -70,7 +72,7 @@ def auth_errors(auth: Any) -> list[str]:
         return []
     if not isinstance(auth, dict) or auth.get("type", "none") not in AUTH_TYPES:
         return [f"http.auth.type must be one of {', '.join(AUTH_TYPES)}"]
-    need = {"bearer": ["token"], "basic": ["username", "password"], "api_key": ["header", "value"]}.get(auth["type"], [])
+    need = {"bearer": ["token"], "token": ["token"], "basic": ["username", "password"], "api_key": ["header", "value"]}.get(auth["type"], [])
     return [f"http.auth.{k} is required for {auth['type']}" for k in need if auth.get(k) in (None, "")]
 
 

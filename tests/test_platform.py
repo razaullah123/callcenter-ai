@@ -68,8 +68,10 @@ async def test_seed_moves_the_hmg_agent_into_the_platform():
     # .env model defaults are written into the release: the agent doesn't depend on .env any more
     assert b["models"]["llm"]["settings"]["model"] == get_settings().groq_llm_model
     assert b["models"]["tts"]["settings"]["voice_ar"] == get_settings().groq_tts_voice_ar
-    assert (await store.routes())[0] == {"workspace_id": WORKSPACE, "pattern": "*", "agent_id": "hmg-care",
-                                         "priority": 0}
+    route = (await store.routes())[0]
+    assert {k: route[k] for k in ("workspace_id", "pattern", "agent_id", "priority")} == {
+        "workspace_id": WORKSPACE, "pattern": "*", "agent_id": "hmg-care", "priority": 0}
+    assert route["label"] is None and route["created_at"]
     # idempotent: nothing new on the next start
     again = await seed(store, get_settings())
     assert not again["workspace_created"] and "agent_created" not in again and not again.get("releases")

@@ -26,6 +26,10 @@ class ToolDef:
     backs: str | None = None                  # the claim a success makes true: booked | confirmed | cancelled | sent
     success_line: str | None = None           # phrase the harness says when the confirmed call succeeds
     http: dict[str, Any] | None = None        # API-request tools: {url, method, headers, body}
+    enabled: bool = True                      # inactive tools are not offered to the model and refuse to run
+    run_async: bool = False                   # fire-and-forget: the agent gets {"queued": true} at once, the call runs on
+    say_start: dict[str, str] | None = None   # {ar, en} line spoken when the call starts (templated: {{args.x}})
+    say_done: dict[str, str] | None = None    # {ar, en} line spoken when it succeeds
 
 
 @dataclass

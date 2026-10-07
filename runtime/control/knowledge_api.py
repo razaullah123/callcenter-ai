@@ -6,7 +6,10 @@
                                                                          HTML, EPUB) — its text is extracted, the
                                                                          file itself isn't kept
     GET    /api/knowledge/{id}                one item with its text
-    DELETE /api/knowledge/{id}
+    DELETE /api/knowledge/{id}                refused (409) while an agent uses the item
+    POST   /api/knowledge/url/discover        {url}                     pages the site's sitemap lists (≤ 100)
+    POST   /api/knowledge/url                 {name, url, urls?}        add a web page (or the chosen sitemap pages)
+    PATCH  /api/knowledge/{id}                {name}                    rename (the text itself can't be edited)
     POST   /api/knowledge/{id}/reprocess      chunk + embed again (e.g. after the embedding service was down)
     POST   /api/knowledge/search              {query, items?}           what an agent would find
     POST   /api/knowledge/use                 {agent, items}            the agent's DRAFT searches these items (live
@@ -79,7 +82,8 @@ async def list_items() -> dict:
     usage = await _usage(store, ws)
     items = [{**i, **usage.get(i["id"], {"used_by": [], "draft_by": []})} for i in await store.kb_items(ws)]
     return {"items": items, "usage_bytes": await store.kb_usage(ws), "quota_bytes": kb.QUOTA_BYTES,
-            "limits": {"file_bytes": kb.MAX_FILE_BYTES, "text_chars": kb.MAX_TEXT_CHARS, "extensions": kb.EXTENSIONS}}
+            "limits": {"file_bytes": kb.MAX_FILE_BYTES, "text_chars": kb.MAX_TEXT_CHARS, "extensions": kb.EXTENSIONS,
+                       "urls": kb.MAX_URLS}}
 
 
 class TextBody(BaseModel):
@@ -138,6 +142,64 @@ async def add_file(body: FileBody) -> dict:
     return {"id": item_id, "status": "processing", "words": kb.words(text)}
 
 
+class UrlBody(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+@router.post("/knowledge/url/discover", dependencies=auth)
+async def discover_url(body: UrlBody) -> dict:
+    _store()
+    try:
+        return {"urls": await kb.discover_urls(body.url)}
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+class AddUrlBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=1, max_length=2048)
+    urls: list[str] | None = Field(default=None, max_length=kb.MAX_URLS)    # pages picked from the sitemap
+
+
+@router.post("/knowledge/url", dependencies=auth)
+@audited("knowledge.added")
+async def add_url(body: AddUrlBody) -> dict:
+    rt, store = _store()
+    ws = current_project()
+    try:
+        pages = [await kb.check_url(u) for u in (body.urls or [body.url])]
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    await _check_quota(store, ws, 0)
+    item_id = "kb_" + secrets.token_hex(6)
+    await store.put_kb_item({"id": item_id, "workspace_id": ws, "name": body.name.strip(), "type": "url",
+                             "extension": None, "source_url": body.url.strip(), "size_bytes": 0, "words": 0,
+                             "status": "processing", "content": None, "created_by": principal().actor})
+
+    async def run():
+        try:
+            text, errors = await kb.fetch_site_text(pages)
+        except Exception as e:                               # noqa: BLE001
+            await store.put_kb_item({"id": item_id, "status": "failed", "error": str(e)[:500]})
+            return
+        size = len(text.encode("utf-8"))
+        if await store.kb_usage(ws) + size > kb.QUOTA_BYTES:
+            await store.put_kb_item({"id": item_id, "status": "failed", "error": "the project's knowledge base is full"})
+            return
+        await store.put_kb_item({"id": item_id, "content": text, "size_bytes": size, "words": kb.words(text)})
+        embed = await rt.loader.embedder(ws) if getattr(rt, "loader", None) is not None else None
+        await kb.ingest(store, item_id, ws, text, embed)
+        if errors:                                           # some pages failed: usable, but say which
+            item = await store.kb_item(item_id) or {}
+            note = f"{len(errors)} of {len(pages)} pages could not be read: " + "; ".join(errors)[:400]
+            await store.put_kb_item({"id": item_id, "error": ((item.get("error") or "") + " " + note).strip(),
+                                     "status": "completed_with_errors" if item.get("status") == "completed" else item.get("status", "failed")})
+    task = asyncio.create_task(run(), name=f"kb-url-{item_id}")
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return {"id": item_id, "status": "processing", "pages": len(pages)}
+
+
 async def _check_quota(store, ws: str, size: int) -> None:
     used = await store.kb_usage(ws)
     if used + size > kb.QUOTA_BYTES:
@@ -157,8 +219,27 @@ async def get_item(item_id: str) -> dict:
 async def delete_item(item_id: str) -> dict:
     rt, store = _store()
     item = await _item(store, item_id)
+    use = (await _usage(store, current_project())).get(item_id, {})
+    if agents := [a["name"] for a in use.get("used_by", []) + use.get("draft_by", [])]:
+        raise HTTPException(409, f"{item['name']} is used by {', '.join(dict.fromkeys(agents))} — remove it from "
+                                 "the agent(s) first")
     await store.delete_kb_item(item_id)
     return {"deleted": item_id, "name": item["name"]}
+
+
+class RenameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+@router.patch("/knowledge/{item_id}", dependencies=auth)
+@audited("knowledge.renamed")
+async def rename_item(item_id: str, body: RenameBody) -> dict:
+    rt, store = _store()
+    await _item(store, item_id)
+    if not body.name.strip():
+        raise HTTPException(422, "the name is empty")
+    await store.put_kb_item({"id": item_id, "name": body.name.strip()})
+    return {"id": item_id, "name": body.name.strip()}
 
 
 @router.post("/knowledge/{item_id}/reprocess", dependencies=auth)

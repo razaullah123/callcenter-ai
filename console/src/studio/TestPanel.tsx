@@ -116,7 +116,7 @@ function summary(e: LiveEvent): string {
 }
 
 export default function TestPanel({ call, tab, onTab, follow, onFollow, onLocate, onEvent, onClose, presetNode }: {
-  call: ReturnType<typeof useTestCall>; tab: "chat" | "logs"; onTab: (t: "chat" | "logs") => void;
+  call: ReturnType<typeof useTestCall>; tab: "chat" | "logs" | "vars"; onTab: (t: "chat" | "logs" | "vars") => void;
   follow: boolean; onFollow: (v: boolean) => void; onLocate: (step: string) => void;
   onEvent: (e: LiveEvent) => void; onClose: () => void;
   /** A node's ⋯ → View logs: show only that node's lines ("Filtered by node · Show all"). */
@@ -152,6 +152,16 @@ export default function TestPanel({ call, tab, onTab, follow, onFollow, onLocate
   }, [call.callId]);
   useEffect(() => { chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight }); }, [call.lines]);
 
+  // the variables the call has collected so far: the latest slot.set per field (the flow's own bookkeeping excluded)
+  const vars = useMemo(() => {
+    const latest = new Map<string, { value: unknown; source?: string; ts: string }>();
+    for (const e of events) {
+      if (e.type !== "slot.set" || typeof e.data.field !== "string" || e.data.field.startsWith("flow:")) continue;
+      latest.set(e.data.field, { value: e.data.value, source: e.data.source as string | undefined, ts: e.ts });
+    }
+    return [...latest.entries()].map(([name, v]) => ({ name, ...v }));
+  }, [events]);
+
   const t0 = events.length ? new Date(events[0].ts).getTime() : 0;
   const ofNode = (e: LiveEvent) => { const st = eventStep(e); return !!st && (st === node || st.endsWith(`/${node}`)); };
   const shown = useMemo(() => events.map((e, i) => ({ e, i })).filter(({ e }) =>
@@ -173,7 +183,7 @@ export default function TestPanel({ call, tab, onTab, follow, onFollow, onLocate
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-line px-3 py-2">
-        <div className="text-base font-semibold">{tab === "logs" ? "Live Call Logs" : call.mode === "voice" ? "Browser call" : "Chat"}</div>
+        <div className="text-base font-semibold">{tab === "logs" ? "Live Call Logs" : tab === "vars" ? "Variables" : call.mode === "voice" ? "Browser call" : "Chat"}</div>
         <div className="flex items-center gap-2">
           {call.callId && <span className="font-mono text-[10px] text-muted">{call.callId}</span>}
           <button className="text-muted hover:text-ink" onClick={onClose} aria-label="Close panel"><Icon d={ICONS.close} /></button>
@@ -183,10 +193,25 @@ export default function TestPanel({ call, tab, onTab, follow, onFollow, onLocate
         <div className="flex gap-1 px-3 pt-2">
           <Button kind={tab === "chat" ? "default" : "ghost"} onClick={() => onTab("chat")}>💬 {call.mode === "voice" ? "Call" : "Chat"}</Button>
           <Button kind={tab === "logs" ? "default" : "ghost"} onClick={() => onTab("logs")}>Logs{events.length ? ` (${events.length})` : ""}</Button>
+          <Button kind={tab === "vars" ? "default" : "ghost"} onClick={() => onTab("vars")}>(x) Variables{vars.length ? ` (${vars.length})` : ""}</Button>
         </div>
       )}
 
-      {tab === "chat" ? (
+      {tab === "vars" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+          <div className="mb-2 text-[11px] text-muted">Values collected during this call, updated live (the latest value of each).</div>
+          {vars.length === 0 && <div className="py-10 text-center text-sm text-muted">{call.callId ? "Nothing collected yet." : "Start a call to see its variables."}</div>}
+          <div className="space-y-1.5">
+            {vars.map(v => (
+              <div key={v.name} className="rounded-lg border border-line px-2.5 py-1.5">
+                <div className="flex items-center gap-2"><span className="font-mono text-xs font-semibold">{v.name}</span>
+                  {v.source && <span className="rounded bg-soft px-1.5 text-[10px] text-muted">{v.source}</span>}
+                  <span className="ml-auto text-[10px] tabular-nums text-muted">{new Date(v.ts).toLocaleTimeString()}</span></div>
+                <div dir="auto" className="mt-0.5 break-words text-xs">{typeof v.value === "string" ? v.value : JSON.stringify(v.value)}</div>
+              </div>))}
+          </div>
+        </div>
+      ) : tab === "chat" ? (
         <>
           <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted">
             <Badge tone={call.state === "speaking" ? "warn" : call.state === "listening" ? "good" : "neutral"}>{call.state}</Badge>

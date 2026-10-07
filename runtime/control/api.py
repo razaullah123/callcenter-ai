@@ -4,6 +4,7 @@ Auth: if CONSOLE_TOKEN is set, every request needs `Authorization: Bearer <token
 """
 
 import asyncio
+import json
 import logging
 import functools
 import time
@@ -37,17 +38,63 @@ async def changed(rt, kind: str, **detail) -> None:
 
 
 def bearer_of(request: Request) -> str | None:
+    """The credential: `Authorization: Bearer <x>` or Hamsa's `Authorization: Token <x>`, or `X-API-Key: <x>` (API keys only)."""
     h = request.headers.get("authorization", "")
-    return h[7:].strip() if h.lower().startswith("bearer ") else None
+    low = h.lower()
+    if low.startswith("bearer "):
+        return h[7:].strip()
+    if low.startswith("token "):
+        return h[6:].strip()
+    k = request.headers.get("x-api-key", "").strip()
+    return k if k.startswith("hmg_") else None
+
+
+# what an API key may never do, whatever its scope: manage keys, people, projects or secrets, or change who is signed in
+KEY_FORBIDDEN = (("/api/api-keys", None), ("/api/auth", None), ("/api/me", None), ("/api/invitations", None),
+                 ("/api/projects", "write"), ("/api/secrets", "write"))
+_RATE: dict[str, list[float]] = {}
+
+
+def key_refusal(request: Request, key: dict) -> str | None:
+    """Why this API key may not make this request (None: it may)."""
+    write = request.method not in ("GET", "HEAD", "OPTIONS")
+    path = request.url.path
+    for prefix, when in KEY_FORBIDDEN:
+        if path == prefix or path.startswith(prefix + "/"):
+            if when is None or write or "/members" in path or "/invitations" in path:
+                return "an API key can't manage keys, people, projects or secrets — use the console"
+    if write and key.get("scope") == "read":
+        return "this API key is read-only"
+    return None
+
+
+def rate_limited(key: dict, limit: int) -> int:
+    """Seconds to wait when the key made more than `limit` requests in the last minute (0: fine)."""
+    now_s = time.monotonic()
+    hits = _RATE.setdefault(key["id"], [])
+    hits[:] = [t for t in hits if now_s - t < 60]
+    if len(hits) >= limit:
+        return max(1, int(60 - (now_s - hits[0])))
+    hits.append(now_s)
+    return 0
 
 
 async def require_console(request: Request) -> None:
-    """A signed-in user, the CONSOLE_TOKEN, or (no accounts and no token yet) anyone — see control/accounts.py."""
+    """A signed-in user, an API key, the CONSOLE_TOKEN, or (no accounts and no token yet) anyone — see control/accounts.py."""
     from runtime.control.accounts import resolve, set_principal
     rt = _rt()
-    who = await resolve(rt.platform, rt.settings, bearer_of(request))
+    bearer = bearer_of(request)
+    who = await resolve(rt.platform, rt.settings, bearer)
     if who is None:
+        if bearer and bearer.startswith("hmg_"):
+            raise HTTPException(401, {"message": "this API key is not valid (revoked, expired or unknown)"})
         raise HTTPException(401, {"message": "sign in required", "login": True})
+    if who.kind == "key":
+        if why := key_refusal(request, who.key):
+            raise HTTPException(403, {"message": why})
+        if wait := rate_limited(who.key, rt.settings.api_key_rate_per_min):
+            raise HTTPException(429, {"message": f"too many requests — this key may make {rt.settings.api_key_rate_per_min} a minute"},
+                                headers={"Retry-After": str(wait)})
     set_principal(who)
 
 
@@ -58,13 +105,18 @@ async def use_project(request: Request) -> None:
     rt = _rt()
     who = principal()
     ws = request.headers.get("x-project")
-    if who.is_user:
+    if who.kind == "key":                                     # a key belongs to one project; it never sees another
+        own = who.key["workspace_id"]
+        if ws and ws != own:
+            raise HTTPException(403, {"message": f"this API key belongs to project {own!r}"})
+        ws = own
+    elif who.is_user:
         if not ws:
             ws = who.user.get("default_project") if who.role(who.user.get("default_project") or "") else None
             ws = ws or (WORKSPACE if who.role(WORKSPACE) else next(iter(sorted(who.memberships)), None))
         if ws is None or who.role(ws) is None:
             raise HTTPException(404, {"message": f"project {ws!r} not found", "project": True})
-    else:
+    if who.kind != "key" and not who.is_user:
         ws = ws or WORKSPACE
         if ws != WORKSPACE and rt.platform is not None and not any(
                 w["id"] == ws for w in await rt.platform.list_workspaces()):
@@ -138,6 +190,13 @@ async def primary_agent(agent: str | None = None):
     return rt.agent if agent == rt.agent.agent_id else await rt.loader.for_call(agent_id=scope[0])
 
 
+@router.get("/variables/system", dependencies=auth)
+async def system_variables() -> list[dict]:
+    """The variables the platform fills in on every call ({{ call_id }}, {{ current_time }} …), for the console."""
+    from runtime.harness.variables import SYSTEM_VARIABLES
+    return [{"group": g, "name": n, "description": d} for g, n, d in SYSTEM_VARIABLES]
+
+
 @router.get("/stats", dependencies=auth)
 async def get_stats(hours: int = 24, agent: str | None = None) -> dict:
     scope = await project_scope(agent)
@@ -175,7 +234,8 @@ def _aware(t: datetime) -> datetime:
 async def get_calls(limit: int = 50, offset: int = 0, q: str | None = None, outcome: str | None = None,
                     channel: str | None = None, agent: str | None = None, channels: str | None = None,
                     status: str | None = None, start: datetime | None = None, end: datetime | None = None,
-                    sort: str = "time", desc: bool = True) -> dict:
+                    sort: str = "time", desc: bool = True, duration_op: str | None = None,
+                    duration_a: int | None = None, duration_b: int | None = None) -> dict:
     """Call history. `channels` / `status`: comma lists (status: in_progress, completed, failed, forwarded,
     terminated; an empty `status=` matches nothing); `start` / `end`: started in [start, end); sort: time | duration."""
     def split(v: str) -> list[str]:
@@ -184,7 +244,16 @@ async def get_calls(limit: int = 50, offset: int = 0, q: str | None = None, outc
                                   channels=split(channels) if channels else None,
                                   statuses=split(status) if status is not None else None,
                                   start=_aware(start) if start else None, end=_aware(end) if end else None,
-                                  sort=sort, desc=desc)
+                                  sort=sort, desc=desc, duration=_duration(duration_op, duration_a, duration_b))
+
+
+def _duration(op: str | None, a: int | None, b: int | None) -> tuple[str, int, int | None] | None:
+    """The duration filter (seconds): between a and b, greater than a, less than a, equal to a."""
+    if not op:
+        return None
+    if op not in ("between", "gt", "lt", "eq") or a is None or a < 0 or (op == "between" and (b is None or b < a)):
+        raise HTTPException(422, "duration_op must be between (duration_a ≤ duration_b), gt, lt or eq, in seconds")
+    return op, a, b
 
 
 @router.post("/calls/{call_id}/end", dependencies=auth)
@@ -206,6 +275,27 @@ async def end_call(call_id: str) -> dict:
     return {"call_id": call_id, "ended": True}
 
 
+class InstructionBody(BaseModel):
+    text: str
+
+
+@router.post("/calls/{call_id}/instruction", dependencies=auth)
+async def instruct_call(call_id: str, body: InstructionBody) -> dict:
+    """Hamsa's real-time instructions: tell the agent something during a live call (it follows it from its next reply)."""
+    rt = _rt()
+    text = " ".join(body.text.split())
+    if not text:
+        raise HTTPException(422, "the instruction is empty")
+    if len(text) > 500:
+        raise HTTPException(422, "an instruction is at most 500 characters")
+    if rt.live is not None and call_id in rt.live.active and not rt.live.visible(call_id, await project_scope()):
+        raise HTTPException(404, "this call is not running (it may have just ended)")
+    sender = getattr(rt, "instruct_call", None)
+    if sender is None or not await sender(call_id, text):
+        raise HTTPException(404, "this call is not running (it may have just ended)")
+    return {"call_id": call_id, "sent": True}
+
+
 @router.get("/calls/{call_id}", dependencies=auth)
 async def get_call(call_id: str) -> dict:
     await _rt().store.flush()
@@ -213,7 +303,62 @@ async def get_call(call_id: str) -> dict:
     if data is None:
         raise HTTPException(404, "call not found")
     data["agent"] = await _call_agent(data["call"])
+    rt = _rt()
+    from runtime.platform.analysis import public
+    data["analysis"] = public(await rt.platform.call_analysis(call_id)) if rt.platform is not None else None
+    data["analysis_setup"] = await _analysis_setup(data["call"])
     return data
+
+
+async def _analysis_setup(call: dict) -> dict | None:
+    """Was post-call analysis on for the version this call ran on, and is it on in the agent's draft? (explains an empty card)"""
+    from runtime.platform.analysis import enabled
+    rt = _rt()
+    if rt.platform is None or not call.get("agent_id"):
+        return None
+    rel = await rt.platform.release(call["release_id"]) if call.get("release_id") else None
+    agent = await rt.platform.agent(call["agent_id"])
+    return {"agent_id": call["agent_id"], "release_version": (rel or {}).get("version"),
+            "in_release": enabled(((rel or {}).get("bundle") or {}).get("analysis")),
+            "in_draft": enabled(((agent or {}).get("draft") or {}).get("analysis"))}
+
+
+@router.post("/calls/{call_id}/analyze", dependencies=auth)
+async def analyze_call(call_id: str) -> dict:
+    """Run the post-call analysis on an ended call (again): the release's own settings, else summary + sentiment + satisfaction."""
+    from runtime.platform import analysis
+    rt = _rt()
+    if rt.platform is None:
+        raise HTTPException(503, "the platform database is not available")
+    await rt.store.flush()
+    found = await store.get_call(call_id, await project_scope())
+    if found is None:
+        raise HTTPException(404, "call not found")
+    call = found["call"]
+    if not call.get("ended_at"):
+        raise HTTPException(409, "the call is still running")
+    release = await rt.platform.release(call["release_id"]) if call.get("release_id") else None
+    agent = await rt.platform.agent(call["agent_id"]) if call.get("agent_id") else None
+    # the settings the call ran with; else what the agent has now (draft) — so fields you just defined are used
+    cfg = ((release or {}).get("bundle") or {}).get("analysis") or ((agent or {}).get("draft") or {}).get("analysis") or {}
+    row = await analysis.run_for_call(rt, call_id, cfg, release_id=call.get("release_id"), force=True)
+    if row is None:
+        raise HTTPException(404, "this call can't be analysed (it has no agent)")
+    return analysis.public(row) | {"call_id": call_id}
+
+
+@router.get("/analytics/satisfaction", dependencies=auth)
+async def satisfaction(start: datetime | None = None, end: datetime | None = None, agent: str | None = None) -> dict:
+    """Hamsa's satisfaction numbers over the analysed calls of the project (CSAT, NPS and the sentiment split are estimates read
+    from transcripts; `analyzed` says how many calls they rest on)."""
+    from runtime.platform import analysis
+    rt = _rt()
+    if rt.platform is None:
+        raise HTTPException(503, "the platform database is not available")
+    end = _aware(end) if end else datetime.now(timezone.utc)
+    start = _aware(start) if start else end - timedelta(hours=24)
+    rows = await rt.platform.call_analyses(current_project(), start, end, agent)
+    return analysis.satisfaction_summary(rows)
 
 
 async def _call_agent(call: dict) -> dict | None:
@@ -255,6 +400,8 @@ async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None =
     from runtime.control.accounts import resolve
     rt = _rt()
     who = await resolve(rt.platform, rt.settings, token)
+    if who is not None and who.kind == "key":
+        project = who.key["workspace_id"]
     if who is not None and who.is_user and not project:          # a user's own default / first project
         d = who.user.get("default_project")
         project = d if who.role(d or "") else (WORKSPACE if who.role(WORKSPACE) else next(iter(sorted(who.memberships)), None))
@@ -283,6 +430,65 @@ async def live_ws(ws: WebSocket, call_id: str | None = None, token: str | None =
         pass
     finally:
         rt.live.unsubscribe(q)
+
+
+@router.websocket("/live/listen")
+async def listen_ws(ws: WebSocket, call_id: str, token: str | None = None, project: str | None = None) -> None:
+    """Listen in on a running call (listen-only, like Hamsa's live monitoring). Binary frames: 1 byte source (0 caller, 1 agent),
+    2 bytes sample rate (big endian), then PCM16 little-endian mono. Text frames: {"type": "ended" | "error", ...}. Only
+    owners / admins of the call's project; every listener is written to the agent's audit log. The call must run on this worker."""
+    import struct
+
+    from runtime.control.accounts import resolve
+    rt = _rt()
+    who = await resolve(rt.platform, rt.settings, token)
+    if who is not None and who.is_user and not project:
+        d = who.user.get("default_project")
+        project = d if who.role(d or "") else (WORKSPACE if who.role(WORKSPACE) else next(iter(sorted(who.memberships)), None))
+    if who is None or who.kind == "key" or (who.is_user and project is None) or (project and who.role(project) is None):
+        await ws.close(code=1008)                              # listening in is for people in the console, not for API keys
+        return
+    await ws.accept()
+
+    async def refuse(message: str) -> None:
+        await ws.send_text(json.dumps({"type": "error", "message": message}))
+        await ws.close()
+
+    call = rt.calls.get(call_id)
+    visible = rt.live is None or call_id not in rt.live.active or rt.live.visible(call_id, await project_scope(ws=project or WORKSPACE))
+    if call is None or not visible:
+        return await refuse("This call is not running here (it may have ended, or run on another server worker).")
+    q = call.add_listener()
+    if q is None:
+        return await refuse("Too many people are already listening to this call.")
+    agent_id = getattr(call.session, "agent_id", "") or ""
+    try:
+        if rt.platform is not None:
+            await rt.platform.audit(agent_id, "call.listen", who.actor, {"call_id": call_id})
+    except Exception as e:                                    # noqa: BLE001 — the log must not block, but it should be seen
+        log.warning("listen audit not recorded: %r", e)
+    gone = asyncio.create_task(ws.receive())                   # any message or a disconnect ends the session
+    try:
+        while not gone.done():
+            if getattr(call, "_stopped", False):
+                await ws.send_text(json.dumps({"type": "ended"}))
+                break
+            getter = asyncio.create_task(q.get())
+            done, _ = await asyncio.wait({getter, gone}, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
+            if getter in done:
+                source, rate, pcm = getter.result()
+                await ws.send_bytes(struct.pack(">BH", source, rate) + pcm)
+            else:
+                getter.cancel()
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        gone.cancel()
+        call.remove_listener(q)
+        try:
+            await ws.close()
+        except Exception:                                      # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------- providers / agent config

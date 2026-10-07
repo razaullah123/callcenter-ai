@@ -13,6 +13,9 @@ Policy fields (all optional except kind):
   hooks         named hooks from a pack (runtime.tools.hooks)
   backs         booked | confirmed | cancelled | sent — the claim a success makes true
   success_line  phrase said when the confirmed call succeeds (e.g. BOOKED_LINE)
+  enabled       false = inactive: not offered to the agent, refuses to run (default true)
+  async         write / send only: the agent gets {queued: true} at once and the call finishes in the background
+  say_start, say_done   {ar, en} lines (templated, {{args.x}}) spoken when the call starts / succeeds
   source        mcp | local | http;  http tools also: description, input_schema, http {method, url, headers}
 """
 
@@ -31,7 +34,7 @@ CLAIMS = ("booked", "confirmed", "cancelled", "sent")
 SOURCES = ("mcp", "local", "http")
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 FIELDS = {"kind", "confirm", "timeout_s", "cache_ttl", "idempotent", "role", "args", "hooks", "backs",
-          "success_line", "source", "description", "input_schema", "http"}
+          "success_line", "source", "description", "input_schema", "http", "enabled", "async", "say_start", "say_done"}
 
 
 def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], local_tools: set[str]) -> list[str]:
@@ -51,6 +54,15 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
     for k in ("timeout_s", "cache_ttl"):
         if k in policy and not (isinstance(policy[k], (int, float)) and policy[k] >= 0):
             e.append(f"{k} must be a number ≥ 0")
+    for k in ("enabled", "async"):
+        if k in policy and not isinstance(policy[k], bool):
+            e.append(f"{k} must be true or false")
+    if policy.get("async") and kind == "read":
+        e.append("read tools return data the agent needs, so they cannot be async")
+    for k in ("say_start", "say_done"):
+        v = policy.get(k)
+        if v is not None and not (isinstance(v, dict) and set(v) <= {"ar", "en"} and all(isinstance(x, str) for x in v.values())):
+            e.append(f"{k} must be {{ar, en}} text lines")
     if policy.get("role") and policy["role"] not in ROLES:
         e.append(f"role must be one of {', '.join(ROLES)}")
     if policy.get("backs") and policy["backs"] not in CLAIMS:

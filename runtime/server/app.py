@@ -58,10 +58,23 @@ async def lifespan(app: FastAPI):
     state.update(rt=rt, phrases=None, loop_lag_ms=0.0)   # calls take phrases from their agent
     lag_task = asyncio.create_task(_measure_loop_lag())
     maint_task = asyncio.create_task(maintenance_loop(s))
+    from runtime.platform.batch import BatchDialer
+    rt.batch = BatchDialer(rt)
+    batch_task = asyncio.create_task(rt.batch.run())
+    from runtime.platform.analysis import AnalysisSink
+    from runtime.platform.webhook import WebhookSink
+    rt.analysis = AnalysisSink(rt)                      # before the webhook: call.ended waits for the analysis
+    rt.bus.subscribe(rt.analysis)
+    rt.webhooks = WebhookSink(rt)
+    rt.bus.subscribe(rt.webhooks)
     log.info("voice agent ready (tools_mode=%s)", rt.settings.tools_mode)
     yield
     lag_task.cancel()
     maint_task.cancel()
+    batch_task.cancel()
+    await rt.batch.close()
+    await rt.webhooks.close()
+    await rt.analysis.close()
     from runtime.control.audit import AUDIT
     await AUDIT.flush()
     await rt.close()
@@ -91,7 +104,11 @@ from runtime.control import projects_api as control_projects  # noqa: E402 — p
 from runtime.control import accounts_api as control_accounts  # noqa: E402 — sign-in, members, invitations
 from runtime.control import voices_api as control_voices  # noqa: E402 — Voices page
 from runtime.control import knowledge_api as control_knowledge  # noqa: E402 — Knowledge base
+from runtime.control import batch_api as control_batch  # noqa: E402
+from runtime.control import keys_api as control_keys  # noqa: E402
+from runtime.control import share_api as control_share  # noqa: E402 — public page / embed (Publishing)
 from runtime.server import chat as chat_ws  # noqa: E402 — text test channel /ws/chat (Agent Studio)
+from runtime.server import public  # noqa: E402 — public page, embed script and voice socket (no sign-in)
 from runtime.server import ivr  # noqa: E402 — IVR endpoint /ws/voice-pipeline
 
 app.include_router(ivr.router)
@@ -105,6 +122,10 @@ app.include_router(control_projects.router)
 app.include_router(control_accounts.router)
 app.include_router(control_voices.router)
 app.include_router(control_knowledge.router)
+app.include_router(control_share.router)
+app.include_router(control_batch.router)
+app.include_router(control_keys.router)
+app.include_router(public.router)
 
 # Console (React build in console/dist, served at /console with SPA fallback)
 from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
@@ -188,8 +209,14 @@ async def call_ws(ws: WebSocket) -> None:
                 await send_event({"event": "error", "message": str(e)})
                 await ws.close(code=1008, reason="unknown agent")
                 return
-        call = VoiceCall(rt, call_id=call_id, in_fmt=in_fmt, out_fmt=out_fmt, send_audio=send_audio,
-                         send_event=send_event, ani=first.get("ani"), phrases=state.get("phrases"), agent=agent)
+        try:
+            call = VoiceCall(rt, call_id=call_id, in_fmt=in_fmt, out_fmt=out_fmt, send_audio=send_audio,
+                             send_event=send_event, ani=first.get("ani"), phrases=state.get("phrases"), agent=agent,
+                             params=first.get("params"))
+        except ValueError as e:                  # params that don't fit the agent's custom variables
+            await send_event({"event": "error", "message": str(e)})
+            await ws.close(code=1008, reason="bad params")
+            return
         rt.calls[call_id] = call
 
         async def close_transport() -> None:

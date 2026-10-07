@@ -269,6 +269,9 @@ CREATE TABLE IF NOT EXISTS phone_routes (
     UNIQUE (workspace_id, pattern)
 );
 
+ALTER TABLE phone_routes ADD COLUMN IF NOT EXISTS label text;
+ALTER TABLE phone_routes ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS platform_meta (
     key    text PRIMARY KEY,
     value  jsonb NOT NULL
@@ -360,7 +363,7 @@ CREATE TABLE IF NOT EXISTS kb_items (
     id            text PRIMARY KEY,
     workspace_id  text NOT NULL REFERENCES workspaces (id),
     name          text NOT NULL,
-    type          text NOT NULL,                  -- text | file
+    type          text NOT NULL,                  -- text | file | url
     extension     text,                           -- pdf | docx | txt | html | epub | md (files)
     size_bytes    integer NOT NULL DEFAULT 0,
     words         integer NOT NULL DEFAULT 0,
@@ -372,6 +375,7 @@ CREATE TABLE IF NOT EXISTS kb_items (
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE kb_items ADD COLUMN IF NOT EXISTS source_url text;   -- url items: the page (or the site) the text came from
 CREATE INDEX IF NOT EXISTS kb_items_ws_idx ON kb_items (workspace_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS kb_chunks (
     id            bigserial PRIMARY KEY,
@@ -385,3 +389,107 @@ CREATE INDEX IF NOT EXISTS kb_chunks_item_idx ON kb_chunks (item_id, seq);
 CREATE INDEX IF NOT EXISTS kb_chunks_embedding_idx ON kb_chunks USING hnsw (embedding vector_cosine_ops)
     WHERE embedding IS NOT NULL;
 CREATE INDEX IF NOT EXISTS kb_chunks_text_idx ON kb_chunks USING gin (to_tsvector('simple', text));
+
+-- ---------------------------------------------------------------- public page / embed (Publishing)
+-- One link per agent anyone can open and talk to; deleting the row unpublishes. The link only starts the published release.
+CREATE TABLE IF NOT EXISTS agent_shares (
+    agent_id      text PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    token         text NOT NULL UNIQUE,
+    settings      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_by    text,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------- batch (outbound) calls
+-- Numbers an agent may dial from: each has a "dial URL" — the platform POSTs every call to it, the IVR / PBX places the
+-- call and connects its audio to our IVR socket once the callee answers.
+CREATE TABLE IF NOT EXISTS outbound_numbers (
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    number        text NOT NULL,
+    label         text,
+    dial_url      text NOT NULL,
+    dial_auth     jsonb,                                  -- {"secret": NAME}: bearer token for the dial URL
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, number)
+);
+CREATE TABLE IF NOT EXISTS batch_calls (
+    id            text PRIMARY KEY,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,
+    agent_id      text NOT NULL,
+    from_number   text NOT NULL,
+    status        text NOT NULL DEFAULT 'scheduled',     -- scheduled | running | paused | completed | failed | cancelled
+    config        jsonb NOT NULL DEFAULT '{}'::jsonb,    -- send_type, scheduled_at, timezone, window_start / _end, days
+    created_by    text,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    started_at    timestamptz,
+    finished_at   timestamptz,
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS batch_calls_ws_idx ON batch_calls (workspace_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS batch_recipients (
+    id            bigserial PRIMARY KEY,
+    batch_id      text NOT NULL REFERENCES batch_calls (id) ON DELETE CASCADE,
+    phone         text NOT NULL,
+    name          text,
+    variables     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status        text NOT NULL DEFAULT 'pending',       -- pending | queued | in_progress | completed | failed | no_answer
+    call_id       text,
+    error         text,
+    attempts      integer NOT NULL DEFAULT 0,
+    dialed_at     timestamptz,
+    ended_at      timestamptz,
+    duration_s    real
+);
+CREATE INDEX IF NOT EXISTS batch_recipients_idx ON batch_recipients (batch_id, status, id);
+
+-- ---------------------------------------------------------------- call webhook delivery history (latest 200 per agent)
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id            bigserial PRIMARY KEY,
+    agent_id      text NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+    workspace_id  text NOT NULL,
+    call_id       text,
+    event         text NOT NULL,
+    ok            boolean NOT NULL,
+    detail        text,
+    attempts      integer NOT NULL DEFAULT 1,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_agent_idx ON webhook_deliveries (agent_id, id DESC);
+
+-- ---------------------------------------------------------------- post-call analysis (summary, sentiment, satisfaction estimates, outcome fields)
+CREATE TABLE IF NOT EXISTS call_analysis (
+    call_id       text PRIMARY KEY,
+    workspace_id  text NOT NULL,
+    agent_id      text,
+    started_at    timestamptz,                    -- the call's start (for date ranges)
+    status        text NOT NULL,                  -- ok | skipped | failed
+    error         text,
+    summary       text,
+    sentiment     text,                           -- positive | neutral | negative
+    csat          smallint,                       -- 1-5, estimated from the transcript
+    nps           smallint,                       -- 0-10, estimated from the transcript
+    resolved      boolean,
+    outcome       jsonb NOT NULL DEFAULT '{}'::jsonb,   -- the agent's own fields
+    model         text,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS call_analysis_ws_idx ON call_analysis (workspace_id, started_at DESC);
+
+-- ---------------------------------------------------------------- API keys (per project; only the hash is stored)
+CREATE TABLE IF NOT EXISTS api_keys (
+    id            text PRIMARY KEY,
+    workspace_id  text NOT NULL REFERENCES workspaces (id),
+    name          text NOT NULL,
+    prefix        text NOT NULL,                 -- the first characters, to recognise a key in the list
+    key_hash      text NOT NULL UNIQUE,          -- sha256 of the key; the key itself is shown once, when it is made
+    scope         text NOT NULL DEFAULT 'full',  -- read | full
+    created_by    text,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    last_used_at  timestamptz,
+    expires_at    timestamptz,
+    revoked_at    timestamptz
+);
+CREATE INDEX IF NOT EXISTS api_keys_ws_idx ON api_keys (workspace_id, created_at DESC);

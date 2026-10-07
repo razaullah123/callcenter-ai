@@ -84,6 +84,7 @@ SLOW_TOOL_FILLER = {
 }
 STILL_WORKING = {"ar": "ثواني بس، قربنا.", "en": "Just a few more seconds."}
 # The caller has been silent for the agent's inactivity timeout / the call reached its maximum length.
+CONFIRM_GLOBAL = {"ar": "للتأكيد، تبغى أكمل؟", "en": "Just to confirm — would you like me to go ahead with that?"}
 STILL_THERE = {"ar": "معي على الخط؟", "en": "Are you still there?"}
 CALL_TIME_LIMIT = {"ar": "نعتذر، وصلنا للحد الأقصى لمدة المكالمة. شكراً لاتصالك.",
                    "en": "We've reached the maximum length for this call. Thank you for calling."}
@@ -141,7 +142,7 @@ PHRASE_NAMES = ("GREETING", "PERSONA", "READBACK_REASK", "READBACK_UNCLEAR_NOTE"
                 "GREETING_NOTE", "RED_FLAG_NOTE", "SLOW_TOOL_FILLER", "STILL_WORKING", "FILLER", "FALLBACK",
                 "OTP_CODE_QUESTION", "BOOKED_LINE", "IDENTITY_CONFIRMED_NOTE", "IDENTITY_QUESTION", "IDENTITY_STEP",
                 "TRANSLITERATE", "NOT_THE_PATIENT", "HANDOFF_SHORT", "HANDOFF", "NOT_REGISTERED", "STILL_THERE",
-                "CALL_TIME_LIMIT")
+                "CALL_TIME_LIMIT", "CONFIRM_GLOBAL")
 
 
 class Phrases:

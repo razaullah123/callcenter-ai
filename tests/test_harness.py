@@ -845,3 +845,62 @@ async def test_a_yes_before_the_read_back_does_not_book():
         await p.pre(book, dict(args), ctx)            # same turn, same "yes": still not confirmed
     s.turn_id, s.last_reply = 6, "yes"                # the answer to the read-back
     assert (await p.pre(book, dict(args), ctx))["StartTime"] == "08:30"
+
+
+# ---------------------------------------------------------------- Hamsa parity: prompt variables, greeting, first speaker
+
+
+def test_template_variables_are_hamsa_system_variables():
+    from runtime.skills.loader import area_code, template_vars
+    s = Session(call_id="call-9", ani="+966548802968", agent_name="HMG Care", agent_number="8001")
+    v = template_vars(s)
+    assert v["call_id"] == "call-9" and v["direction"] == "inbound"
+    assert v["user_number"] == v["userNumber"] == "+966548802968" and v["user_number_area_code"] == "54"
+    assert v["agent_name"] == "HMG Care" and v["agent_number"] == "8001"
+    assert len(v["current_time"]) == 5 and len(v["current_date"]) == 10 and v["current_weekday"]
+    assert area_code("0112345678") == "11" and area_code("00966112345678") == "11" and area_code("+14155550123") == ""
+    assert template_vars(Session(call_id="x"))["user_number_area_code"] == ""
+
+
+async def test_dynamic_greeting_is_rendered(rig):
+    from runtime.harness.prompts import Phrases
+    agent, llm, mock, out, _ = rig
+    agent.s.agent_name = "Sara"
+    agent.ph = Phrases({"GREETING": {"ar": "أهلاً، أنا {{ agent_name }}", "en": "Hi, this is {{ agent_name }} ({{ call_id }})"}})
+    await agent.start()
+    lang = agent.s.language.language
+    assert out.said == [("أهلاً، أنا Sara" if lang == "ar" else "Hi, this is Sara (call-1)")]
+    assert agent.s.history[-1]["content"] == out.said[0]
+
+
+async def test_plain_greeting_is_unchanged(rig):
+    agent, llm, mock, out, _ = rig
+    await agent.start()
+    assert out.said == [agent.ph.GREETING[agent.s.language.language]]
+
+
+async def test_wait_for_user_to_speak_first(rig):
+    agent, llm, mock, out, _ = rig
+    agent.settings = agent.settings.model_copy(update={"voice_wait_for_user": "always"})
+    await agent.start()
+    assert out.said == [] and agent.s.history == []                       # silent until the caller speaks
+    llm.then("Hello, how can I help?")
+    await agent.handle("hello")
+    assert out.said                                                       # then the agent answers normally
+
+
+async def test_wait_for_user_outbound_only(rig):
+    agent, llm, mock, out, _ = rig
+    agent.settings = agent.settings.model_copy(update={"voice_wait_for_user": "outbound"})
+    await agent.start()
+    assert len(out.said) == 1                                             # inbound: greets as usual
+    agent.s.direction = "outbound"
+    out.said.clear()
+    await agent.start()
+    assert out.said == []
+
+
+def test_wait_for_user_knob_is_validated():
+    from runtime.platform.bundle import knob_errors
+    assert not knob_errors({"voice_wait_for_user": "always"})
+    assert knob_errors({"voice_wait_for_user": "sometimes"})

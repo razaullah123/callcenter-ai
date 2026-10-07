@@ -51,9 +51,9 @@ class CustomHttpSTT(STTProvider):
     settings: "CustomHttpSTT.Settings"
 
     async def transcribe(self, audio: AudioInput, *, language: str | None = None,
-                         prompt: str | None = None) -> Transcript:
+                         prompt: str | None = None, model: str | None = None) -> Transcript:
         s = self.settings
-        data = {k: v for k, v in (("language", language), ("prompt", prompt)) if v}
+        data = {k: v for k, v in (("language", language), ("prompt", prompt), ("model", model)) if v}
         resp = await _http(s.timeout_s).post(
             s.url, headers=s.headers, data=data,
             files={"file": ("audio.wav", prepare_for_stt(audio), "audio/wav")})

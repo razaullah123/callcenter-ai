@@ -127,6 +127,138 @@ def words(text: str) -> int:
     return len(text.split())
 
 
+# ---------------------------------------------------------------- web pages (url items)
+
+MAX_URLS = 100                              # pages per url item (a sitemap), as Hamsa
+MAX_PAGE_BYTES = 5 * 1024 * 1024
+FETCH_TIMEOUT_S = 15.0
+MEDIA_EXT = (".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".zip")
+_client: Any = None
+
+
+def _http():
+    global _client
+    if _client is None:
+        import httpx
+        _client = httpx.AsyncClient(timeout=FETCH_TIMEOUT_S, follow_redirects=False,
+                                    headers={"User-Agent": "Mozilla/5.0 (compatible; VoiceAgentKB/1.0)"})
+    return _client
+
+
+async def _public_host(host: str) -> bool:
+    """True when `host` resolves only to public addresses (nothing on our own network is fetched)."""
+    import ipaddress
+    import socket
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global:
+            return False
+    return bool(infos)
+
+
+async def check_url(url: str) -> str:
+    """The URL normalised, or ValueError when we must not fetch it (not https, a media file, a private address)."""
+    from urllib.parse import urlsplit
+    u = urlsplit((url or "").strip())
+    if u.scheme != "https" or not u.hostname or "." not in u.hostname:
+        raise ValueError("only public https:// links are supported")
+    if u.username or u.password:
+        raise ValueError("links with a user name or password are not supported")
+    if len(url) > 2048:
+        raise ValueError("the link is too long")
+    if u.path.lower().endswith(MEDIA_EXT):
+        raise ValueError("media files (audio, video, images) are not supported")
+    if not await _public_host(u.hostname):
+        raise ValueError(f"{u.hostname} is not a public website")
+    return u.geturl()
+
+
+async def _get(url: str, hops: int = 3) -> tuple[str, str]:
+    """(content type, text) of a public page; follows up to `hops` redirects, checking every hop."""
+    from urllib.parse import urljoin
+    for _ in range(hops + 1):
+        url = await check_url(url)
+        async with _http().stream("GET", url) as r:
+            if r.is_redirect and r.headers.get("location"):
+                url = urljoin(url, r.headers["location"])
+                continue
+            if r.status_code in (401, 403):
+                raise ValueError(f"the site refused access (HTTP {r.status_code}) — it needs a login or blocks scraping")
+            if not r.is_success:
+                raise ValueError(f"the page answered HTTP {r.status_code}")
+            kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
+            body = b""
+            async for part in r.aiter_bytes():
+                body += part
+                if len(body) > MAX_PAGE_BYTES:
+                    raise ValueError(f"the page is larger than {MAX_PAGE_BYTES // (1024 * 1024)} MB")
+            return kind, _decode(body)
+    raise ValueError("too many redirects")
+
+
+async def fetch_page_text(url: str) -> str:
+    kind, body = await _get(url)
+    if kind and not (kind.startswith("text/") or "html" in kind or "xml" in kind):
+        raise ValueError(f"unsupported content type {kind}")
+    text = normalize(body if kind == "text/plain" else html_text(body))
+    if not text:
+        raise ValueError("no text found on the page (it may be built by JavaScript)")
+    return text
+
+
+async def discover_urls(url: str) -> list[str]:
+    """Pages the site's sitemap lists (same host, https, at most MAX_URLS); [] when it has none."""
+    from urllib.parse import urlsplit
+    start = urlsplit(await check_url(url))
+    origin = f"https://{start.netloc}"
+    found: list[str] = []
+    queue = [f"{origin}/sitemap.xml"]
+    seen_maps: set[str] = set()
+    while queue and len(found) < MAX_URLS and len(seen_maps) < 5:
+        sm = queue.pop(0)
+        if sm in seen_maps:
+            continue
+        seen_maps.add(sm)
+        try:
+            _, xml = await _get(sm)
+        except Exception:                                    # noqa: BLE001 — no sitemap here
+            continue
+        for loc in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml):
+            loc = html.unescape(loc)
+            if urlsplit(loc).netloc != start.netloc or not loc.startswith("https://"):
+                continue
+            if loc.lower().endswith(".xml"):
+                queue.append(loc)
+            elif not loc.lower().endswith(MEDIA_EXT) and loc not in found:
+                found.append(loc)
+                if len(found) >= MAX_URLS:
+                    break
+    return found
+
+
+async def fetch_site_text(urls: list[str]) -> tuple[str, list[str]]:
+    """(text of the pages that could be read, one error line per page that couldn't). ValueError if none could."""
+    sem = asyncio.Semaphore(4)
+
+    async def one(u: str):
+        async with sem:
+            try:
+                return u, await fetch_page_text(u), None
+            except Exception as e:                           # noqa: BLE001
+                return u, None, str(e) or e.__class__.__name__
+    got = await asyncio.gather(*(one(u) for u in urls))
+    ok = [(u, t) for u, t, _ in got if t]
+    errors = [f"{u}: {e}" for u, _, e in got if e]
+    if not ok:
+        raise ValueError(errors[0].split(": ", 1)[1] if len(urls) == 1 else "none of the pages could be read — " + errors[0])
+    text = "\n\n".join(f"Source: {u}\n{t}" if len(urls) > 1 else t for u, t in ok)
+    return text, errors
+
+
 # ---------------------------------------------------------------- chunks
 
 _SENTENCE = re.compile(r"(?<=[.!?؟。])\s+")
@@ -224,5 +356,5 @@ def embedder_from(provider) -> Embedder | None:
     return embed
 
 
-__all__ = ["EXTENSIONS", "MAX_FILE_BYTES", "MAX_TEXT_CHARS", "QUOTA_BYTES", "chunk", "embedder_from",
+__all__ = ["MAX_URLS", "check_url", "discover_urls", "fetch_page_text", "fetch_site_text", "EXTENSIONS", "MAX_FILE_BYTES", "MAX_TEXT_CHARS", "QUOTA_BYTES", "chunk", "embedder_from",
            "extract_text", "ingest", "normalize", "search", "words"]

@@ -9,7 +9,7 @@ import { PRESETS, RangePicker, addDays, midnight, presetLabel, rangeOf, ymd, typ
 import { api, type ActiveCall, type Count, type DashboardData } from "../api";
 import { useLive } from "../live";
 import { ErrorBox, cx, fmtMs } from "../ui";
-import { asrBand, errorBand, escalationBand, fcrBand, latencyBand, llmBand, shortCallsBand, ttsBand, wordsBand, type Band } from "../thresholds";
+import { asrBand, csatBand, errorBand, escalationBand, fcrBand, latencyBand, llmBand, npsBand, shortCallsBand, ttsBand, wordsBand, type Band } from "../thresholds";
 import LiveDrawer, { CHANNEL, LANG, channelOf } from "./LiveDrawer";
 
 const TABS = [["overview", "Overview"], ["performance", "Performance"], ["outcome", "Satisfaction & Outcome"],
@@ -285,7 +285,44 @@ function Breakdown({ title, rows, label }: { title: string; rows: Count[]; label
   );
 }
 
-function Outcome({ d }: { d: DashboardData }) {
+function Satisfaction({ range, agent }: { range: { start: Date; end: Date }; agent: string }) {
+  const q = useQuery({
+    queryKey: ["satisfaction", range.start.toISOString(), range.end.toISOString(), agent],
+    queryFn: () => api.satisfaction({ start: range.start.toISOString(), end: range.end.toISOString(), agent: agent || undefined }),
+    refetchInterval: 30_000,
+  });
+  const s = q.data;
+  const none = !s || s.analyzed === 0;
+  const dash = (v: number | null | undefined, suffix = "%") => (v == null ? "—" : `${v}${suffix}`);
+  const sentiment = [
+    { name: "Positive", value: s?.sentiment.positive ?? 0, color: "#f59e0b" },
+    { name: "Neutral", value: s?.sentiment.neutral ?? 0, color: "#3b82f6" },
+    { name: "Negative", value: s?.sentiment.negative ?? 0, color: "#9ca3af" },
+  ];
+  return (
+    <Section icon={I.heart} title="Caller Satisfaction (estimated)">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="CSAT" value={dash(s?.csat.score)} hint={s?.csat.average != null ? `Average ${s.csat.average} / 5 · ${s.csat.calls} calls` : "Calls rated 4-5 of 5"} band={csatBand(s?.csat.score)} />
+        <Metric label="NPS" value={dash(s?.nps.score, "")} hint={s?.nps.calls ? `Promoters minus detractors · ${s.nps.calls} calls` : "Promoters minus detractors"} band={npsBand(s?.nps.score)} />
+        <Metric label="Resolved by the agent" value={dash(s?.resolved.score)} hint={s?.resolved.calls ? `${s.resolved.calls} calls` : "Request handled without a person"} />
+        <div className="rounded-xl border border-line bg-panel p-5">
+          <div className="mb-2 text-sm font-medium">Sentiment</div>
+          {sentiment.map(x => (
+            <div key={x.name} className="flex items-center justify-between py-0.5 text-sm">
+              <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ background: x.color }} />{x.name}</span>
+              <span className="font-semibold tabular-nums">{none ? "—" : `${x.value}%`}</span></div>))}
+        </div>
+      </div>
+      <p className="text-xs text-muted">
+        {none ? <>No analysed calls in this window. Turn on <b>Outcome</b> in an agent's Global Settings and the model reads each finished call; you can also open a call in Call history and press “Analyze”.</>
+          : <>Estimated by the agent's own model from each call's (masked) transcript — not survey answers — over {s!.analyzed} analysed call{s!.analyzed === 1 ? "" : "s"}
+            {s!.skipped ? ` · ${s!.skipped} too short` : ""}{s!.failed ? ` · ${s!.failed} failed` : ""}. Sentiment analysis isn't perfect: sarcasm and dialect can be misread.</>}
+      </p>
+    </Section>
+  );
+}
+
+function Outcome({ d, range, agent }: { d: DashboardData; range: { start: Date; end: Date }; agent: string }) {
   const t = d.totals;
   const dist = [
     { name: "Booked", value: t.booked, color: "#e63a40" },
@@ -295,6 +332,7 @@ function Outcome({ d }: { d: DashboardData }) {
   ];
   return (
     <div className="space-y-8">
+      <Satisfaction range={range} agent={agent} />
       <Section icon={I.heart} title="Outcome Metrics">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <Metric label="Booking Rate" value={pct(t.booked, t.calls)} hint={`${plural(t.booked, "appointment", "appointments")} booked`} band={t.booked ? { tone: "good" } : undefined} />
@@ -312,8 +350,7 @@ function Outcome({ d }: { d: DashboardData }) {
             ))}
           </div>
         </div>
-        <p className="text-xs text-muted">Caller satisfaction (CSAT, NPS, sentiment) needs a post-call analysis step, which isn't built yet
-          (PLAN 12.9). Until then these come from what the agent actually did on each call.</p>
+        <p className="text-xs text-muted">These come from what the agent actually did on each call (booked, verified, handed to a person).</p>
       </Section>
       <Section icon={I.bars} title="Outcome Analysis">
         <div className="grid gap-4 lg:grid-cols-2">
@@ -477,7 +514,7 @@ export default function Dashboard() {
           <ErrorBox error={q.error} />
           {!q.data ? <div className="grid h-60 place-items-center text-sm text-muted">{q.isLoading ? "Loading…" : null}</div>
             : tab === "performance" ? <Performance d={q.data} />
-            : tab === "outcome" ? <Outcome d={q.data} />
+            : tab === "outcome" ? <Outcome d={q.data} range={range} agent={agent} />
             : <Overview d={q.data} start={range.start} end={range.end} />}
         </>
       )}

@@ -38,3 +38,16 @@ export function wordsBand(w: number | null | undefined): Band {
 /** share of calls under 30 s in percent: those often mean connection problems */
 export const shortCallsBand = (pct: number | null | undefined): Band =>
   pct == null ? {} : pct > 30 ? { tone: "warn", note: "many calls under 30 s — check for connection problems" } : {};
+
+/** CSAT in percent (higher is better): > 85 excellent, 75-85 good, 65-75 needs work, < 65 investigate */
+export function csatBand(pct: number | null | undefined): Band {
+  if (pct == null) return {};
+  return pct > 85 ? { tone: "good", note: "excellent" } : pct >= 75 ? { tone: "good", note: "good" }
+    : pct >= 65 ? { tone: "warn", note: "needs work" } : { tone: "bad", note: "investigate" };
+}
+/** NPS, -100..100: > 50 excellent, 30-50 good, 0-30 acceptable, < 0 investigate */
+export function npsBand(n: number | null | undefined): Band {
+  if (n == null) return {};
+  return n > 50 ? { tone: "good", note: "excellent" } : n >= 30 ? { tone: "good", note: "good" }
+    : n >= 0 ? { tone: "warn", note: "acceptable" } : { tone: "bad", note: "investigate" };
+}

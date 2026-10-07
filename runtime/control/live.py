@@ -76,7 +76,7 @@ class LiveHub:
         if not cid:
             return
         now = time.time()
-        if e.type == EventType.CALL_START:
+        if e.type in (EventType.CALL_START, EventType.AGENT_TRANSFER):
             self._call_agent[cid] = e.data.get("agent_id")
         if e.type == EventType.CALL_END:
             self.active.pop(cid, None)
@@ -113,6 +113,8 @@ class LiveHub:
         elif e.type == EventType.CALL_START:
             c.language = d.get("language")
             c.agent_id = d.get("agent_id")
+        elif e.type == EventType.AGENT_TRANSFER:
+            c.agent_id = d.get("agent_id") or c.agent_id
         # forget calls that went silent without a call.end (e.g. crashed client)
         now = time.time()
         for stale in [k for k, v in self.active.items() if now - v.last_event > ACTIVE_TTL_S]:

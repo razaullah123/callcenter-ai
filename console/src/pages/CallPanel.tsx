@@ -1,10 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type CallDetail, type EventRow } from "../api";
+import { api, type CallAnalysis, type CallDetail, type EventRow } from "../api";
 import { ErrorBox, cx, fmtMs } from "../ui";
 import { Timeline, Waterfall } from "./CallDetail";
 import { CopyButton } from "../table";
+import { ListenCard } from "../listen";
 import { ChannelBadge, StatusBadge, fmtDuration, fmtWhen } from "./Calls";
 
 const TABS = [["overview", "Overview"], ["conversation", "Conversation"], ["outcome", "Outcome"], ["logs", "Logs"]] as const;
@@ -143,6 +144,56 @@ function Conversation({ d }: { d: CallDetail }) {
   );
 }
 
+const SENTIMENT_TONE = { positive: "bg-amber-500/15 text-amber-700 dark:text-amber-300", neutral: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+  negative: "bg-soft text-muted" } as const;
+
+/** The model's reading of the call: summary, sentiment, satisfaction estimates, the agent's own outcome fields. */
+function Analysis({ d }: { d: CallDetail }) {
+  const qc = useQueryClient();
+  const a: CallAnalysis | null | undefined = d.analysis;
+  const setup = d.analysis_setup;
+  const run = useMutation({ mutationFn: () => api.analyzeCall(d.call.call_id), onSuccess: () => qc.invalidateQueries({ queryKey: ["call", d.call.call_id] }) });
+  const ended = !!d.call.ended_at;
+  const fields = Object.entries(a?.outcome ?? {});
+  return (
+    <section>
+      <div className="mb-2.5 flex items-center justify-between gap-3">
+        <h3 className="font-semibold">Call analysis</h3>
+        {ended && <button id="analyze-call" onClick={() => run.mutate()} disabled={run.isPending}
+          className="rounded-lg border border-line px-3 py-1 text-xs hover:bg-soft disabled:opacity-50">{run.isPending ? "Analysing…" : a ? "Analyze again" : "Analyze"}</button>}
+      </div>
+      <ErrorBox error={run.error} />
+      {!a ? <div className="space-y-1.5 rounded-lg bg-soft/60 p-3 text-sm text-muted">
+          {!ended ? <p>The analysis is made when the call has ended.</p>
+            : setup?.in_release ? <p>This call hasn't been analysed (it may have ended before the analysis could run). Press <b>Analyze</b> to run it now.</p>
+            : setup?.in_draft ? <p><b className="text-ink">Not published yet.</b> Outcome is switched on in this agent's draft, but this call ran on {setup.release_version ? `version ${setup.release_version}` : "a published version"}, which has no analysis.
+              {" "}<Link className="underline" to={`/agents/${setup.agent_id}`}>Publish the agent</Link> and new calls get a summary; press <b>Analyze</b> to get one for this call now.</p>
+            : <p><b className="text-ink">Analysis is off for this agent.</b> Open <Link className="underline" to={setup ? `/agents/${setup.agent_id}` : "/agents"}>the agent</Link> → Global Settings → Outcome, switch it on, Save to draft and Publish; new calls then get a summary,
+              sentiment and your own fields. Press <b>Analyze</b> to try it on this call.</p>}
+        </div>
+        : a.status !== "ok" ? <p className="rounded-lg bg-warn/10 p-3 text-sm text-warn">{a.status === "skipped" ? "Skipped" : "Failed"}: {a.error}</p> : (
+          <div className="space-y-3">
+            {a.summary && <div className="group rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2"><span className="text-xs text-muted">Summary</span>
+                <span className="opacity-0 group-hover:opacity-100"><CopyButton text={a.summary} label="Copy summary" /></span></div>
+              <div dir="auto" className="mt-0.5 text-sm">{a.summary}</div></div>}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {a.sentiment && <span className={cx("rounded-full px-2.5 py-0.5 font-medium capitalize", SENTIMENT_TONE[a.sentiment])}>{a.sentiment}</span>}
+              {a.csat != null && <span className="rounded-full bg-soft px-2.5 py-0.5">CSAT <b>{a.csat}</b> / 5</span>}
+              {a.nps != null && <span className="rounded-full bg-soft px-2.5 py-0.5">NPS <b>{a.nps}</b> / 10</span>}
+              {a.resolved != null && <span className="rounded-full bg-soft px-2.5 py-0.5">{a.resolved ? "Resolved by the agent" : "Not resolved"}</span>}
+            </div>
+            {fields.length > 0 && <div className="grid gap-2.5 sm:grid-cols-2">{fields.map(([k, v]) => (
+              <div key={k} className="group rounded-lg border border-line p-3"><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted">{humanize(k)}</span>
+                <span className="opacity-0 group-hover:opacity-100"><CopyButton text={v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)} label={`Copy ${humanize(k)}`} /></span></div>
+                <div dir="auto" className="mt-0.5 break-words text-sm font-medium">{v == null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</div></div>))}</div>}
+            <p className="text-[11px] text-muted">Read from the masked transcript by {a.model ?? "the agent's model"}. CSAT and NPS are estimates, not survey answers.</p>
+          </div>
+        )}
+    </section>
+  );
+}
+
 /** What the call produced: the outcome flags + the last value of every variable the agent collected. */
 function Outcome({ d }: { d: CallDetail }) {
   const c = d.call;
@@ -177,6 +228,7 @@ function Outcome({ d }: { d: CallDetail }) {
   );
   return (
     <div className="space-y-6">
+      <Analysis d={d} />
       <section>
         <h3 className="mb-2.5 font-semibold">Outcome Details</h3>
         <div className="grid gap-2.5 sm:grid-cols-2">{facts.map(([k, v]) => <Card key={k} k={k} v={v} />)}</div>
@@ -185,10 +237,29 @@ function Outcome({ d }: { d: CallDetail }) {
         <h3 className="mb-2.5 font-semibold">Collected during the call</h3>
         {collected.length ? <div className="grid gap-2.5 sm:grid-cols-2">{collected.map(([k, v]) => <Card key={k} k={humanize(k)} v={v} />)}</div>
           : <p className="text-sm text-muted">The agent collected no variables on this call.</p>}
-        <p className="mt-2 text-xs text-muted">Values as logged (personal data is masked in logs). A written summary and caller sentiment
-          need the post-call analysis step (PLAN 12.9).</p>
+        <p className="mt-2 text-xs text-muted">Values as logged (personal data is masked in logs).</p>
       </section>
     </div>
+  );
+}
+
+/** Hamsa's "send real-time instructions": tell the agent something while the call is running. */
+function LiveInstructions({ id, sent }: { id: string; sent: string[] }) {
+  const [text, setText] = useState("");
+  const [mine, setMine] = useState<string[]>([]);
+  const send = useMutation({ mutationFn: () => api.instructCall(id, text.trim()), onSuccess: () => { setMine([...mine, text.trim()]); setText(""); } });
+  const shown = [...new Set([...sent, ...mine])];
+  return (
+    <section className="mt-6 rounded-xl border border-accent/40 bg-accent/5 p-4">
+      <h3 className="flex items-center gap-2 font-semibold"><span className="h-2 w-2 animate-pulse rounded-full bg-good" />Live call — instruct the agent</h3>
+      <p className="mt-1 text-xs text-muted">The agent follows your instruction from its next reply on and never reads it out. It stays in force for the rest of the call.</p>
+      <form className="mt-3 flex gap-2" onSubmit={e => { e.preventDefault(); if (text.trim()) send.mutate(); }}>
+        <input id="call-instruction" aria-label="Instruction for the agent" maxLength={500} className="min-w-0 flex-1 text-sm" placeholder="Send instruction to agent…" value={text} onChange={e => setText(e.target.value)} />
+        <button type="submit" disabled={!text.trim() || send.isPending} className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50">{send.isPending ? "Sending…" : "Send"}</button>
+      </form>
+      <div className="mt-2"><ErrorBox error={send.error} /></div>
+      {shown.length > 0 && <ul className="mt-3 space-y-1 text-xs">{shown.map((s, i) => <li key={i} className="rounded bg-panel px-2 py-1">{s}</li>)}</ul>}
+    </section>
   );
 }
 
@@ -227,7 +298,7 @@ export default function CallPanel({ id, onClose, agentName }: { id: string; onCl
       <div className="flex-1 overflow-y-auto px-5 py-5">
         <ErrorBox error={q.error} />
         {!d ? <div className="py-16 text-center text-sm text-muted">{q.isLoading ? "Loading…" : null}</div>
-          : tab === "overview" ? <Overview d={d} agentName={name} />
+          : tab === "overview" ? <><Overview d={d} agentName={name} />{!d.call.ended_at && d.call.status === "in_progress" && <div className="mt-6"><ListenCard callId={id} /></div>}{!d.call.ended_at && d.call.status === "in_progress" && <LiveInstructions id={id} sent={d.events.filter(e => e.type === "slot.set" && e.data?.field === "supervisor_instruction").map(e => String(e.data.value))} />}</>
           : tab === "conversation" ? <Conversation d={d} />
           : tab === "outcome" ? <Outcome d={d} />
           : <Timeline events={d.events} />}

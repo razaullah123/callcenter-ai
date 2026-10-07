@@ -24,6 +24,7 @@ from runtime.tools.factory import build_tooling
 from runtime.tools.summarizers import doctor_rows
 
 from .caller import END, LLMCaller, ScriptCaller
+from .errors import is_provider_error
 from .checks import check_all
 from .fixtures import PATIENTS, fixture_backend
 
@@ -84,8 +85,28 @@ class _Collect:
         pass
 
 
-async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvider | None, mode: str = "auto",
-                   judge_llm: LLMProvider | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+TOOLING_TIMEOUT_S = 60.0                         # the simulated caller / judge wait this long for a reply (a live call: 10 s)
+ATTEMPTS = 3                                     # a case that dies on a provider error is played again, up to this many times
+async def run_case(case: Case, *, attempts: int = ATTEMPTS, **kw: Any) -> dict[str, Any]:
+    """Play a case. When the model provider fails mid-conversation (a slow answer, a timeout, a 5xx) the whole case is played
+    again — up to `attempts` times — because that says nothing about the agent; if it never gets through, the result says the
+    provider failed (`provider_problem`) so it isn't mistaken for the agent's mistake. Other errors and failed checks count at once."""
+    result: dict[str, Any] = {}
+    for n in range(1, max(1, attempts) + 1):
+        result = await _run_case_once(case, **kw)
+        result["attempts"] = n
+        if not is_provider_error(result.get("error")):
+            return result
+    result["provider_problem"] = True
+    for ch in result["checks"]:
+        if ch["check"] == "no_error":
+            ch["detail"] = (f"the model provider failed on all {result['attempts']} attempts ({result['error']}) — this is not a verdict "
+                            "on the agent; run the case again")
+    return result
+
+
+async def _run_case_once(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvider | None, mode: str = "auto",
+                         judge_llm: LLMProvider | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     """`bundle`: an agent release with inline skill files (LoadedAgent.inline_bundle()); None → the repo copy."""
     t0 = time.perf_counter()
     calls: list[tuple[str, dict]] = []
@@ -224,9 +245,11 @@ async def run_suite(cases: list[Case], *, mode: str = "auto", concurrency: int =
                     progress=None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     agent_llm = agent_llm or create("llm", "groq")
     # gpt-oss spends part of max_tokens on hidden reasoning: give the caller / judge room for it
-    caller_cfg = {"temperature": 0.7, "max_tokens": 1500, **({"model": caller_model} if caller_model else {})}
+    # the simulated caller and the judge are test tooling: a slow answer (gpt-oss sometimes takes 6+ s to start) is fine, so
+    # they wait much longer than a live call would
+    caller_cfg = {"temperature": 0.7, "max_tokens": 1500, "timeout_s": TOOLING_TIMEOUT_S, **({"model": caller_model} if caller_model else {})}
     caller_llm = create("llm", "groq", caller_cfg)
-    judge_llm = create("llm", "groq", {"temperature": 0.0, "max_tokens": 2000}) if use_judge else None
+    judge_llm = create("llm", "groq", {"temperature": 0.0, "max_tokens": 2000, "timeout_s": TOOLING_TIMEOUT_S}) if use_judge else None
     sem = asyncio.Semaphore(concurrency)
     started = datetime.now(timezone.utc)
 

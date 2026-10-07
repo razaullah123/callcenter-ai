@@ -55,10 +55,11 @@ const CONFIRM_HELP: Record<string, string> = {
 const AUTH_HELP: Record<string, string> = {
   none: "No authentication required. Use this for public APIs that don't require credentials.",
   bearer: "Sends Authorization: Bearer <token>. Keep the token in a secret.",
+  token: "Sends Authorization: Token <token> (Django REST framework style). Keep the token in a secret.",
   basic: "Sends Authorization: Basic with a username and password.",
   api_key: "Sends the key in a header of your choice (e.g. X-API-Key).",
 };
-const AUTH_LABEL: Record<string, string> = { none: "No Authentication", bearer: "Bearer Token", basic: "Basic Authentication", api_key: "API Key" };
+const AUTH_LABEL: Record<string, string> = { none: "No Authentication", bearer: "Bearer Token", token: "Token", basic: "Basic Authentication", api_key: "API Key" };
 const icon = (source: string) => (source === "http" ? TI.code : source === "mcp" ? TI.bolt : TI.cube);
 const label = (cls = "") => cx("mb-1 block text-sm font-medium", cls);
 
@@ -243,9 +244,11 @@ function ToolCard({ t, active, onClick, menu }: { t: LibraryTool; active: boolea
           <div className="mt-1.5 flex flex-wrap gap-1">
             <span className="rounded border border-line bg-soft px-1.5 py-0.5 text-[10px]">{SOURCE[t.source] ?? t.source}</span>
             {!t.available ? <span className="rounded bg-bad/15 px-1.5 py-0.5 text-[10px] text-bad">Not connected</span>
-              : live ? <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-fg">Active</span>
+              : live ? <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-fg">In use</span>
               : <span className="rounded bg-soft px-1.5 py-0.5 text-[10px] text-muted">Unused</span>}
             {t.policy.kind !== "read" && <Badge tone={kindTone(t.policy.kind)}>{t.policy.kind}</Badge>}
+            {t.policy.enabled === false && <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] text-warn">Inactive</span>}
+            {t.policy.async && <span className="rounded border border-line bg-soft px-1.5 py-0.5 text-[10px]">Async</span>}
           </div>
         </div>
       </div>
@@ -280,7 +283,7 @@ function headerValue(v: unknown) {
 function authOf(p: ToolPolicy) {
   const a = p.http?.auth;
   if (a && a.type !== "none") {
-    const part = a.type === "bearer" ? a.token : a.type === "basic" ? a.password : a.value;
+    const part = a.type === "bearer" || a.type === "token" ? a.token : a.type === "basic" ? a.password : a.value;
     return `${AUTH_LABEL[a.type]}${isSecretRef(part) ? ` · secret ${part.secret}` : ""}${a.type === "api_key" ? ` · ${a.header}` : ""}`;
   }
   const h = Object.entries(p.http?.headers ?? {}).find(([k]) => k.toLowerCase() === "authorization");
@@ -605,7 +608,7 @@ function ToolDetail({ t, lib, startRemoving, onEdit, onChanged }: {
             <h2 className="truncate text-lg font-semibold">{t.name}</h2>
             <div className="mt-1 flex flex-wrap gap-1">
               {!t.available ? <Badge tone="bad">Not connected</Badge> : t.used_by.length
-                ? <span className="rounded bg-accent px-1.5 py-0.5 text-[11px] font-medium text-accent-fg">Active</span>
+                ? <span className="rounded bg-accent px-1.5 py-0.5 text-[11px] font-medium text-accent-fg">In use</span>
                 : <Badge>Unused</Badge>}
               <Badge tone={kindTone(p.kind)}>{p.kind}</Badge>
             </div>
@@ -770,6 +773,7 @@ export default function Tools() {
   const [params, setParams] = useSearchParams();
   const [filter, setFilter] = useState("");
   const [collection, setCollection] = useState("");
+  const [status, setStatus] = useState<"all" | "active" | "inactive">("all");
   const [browsing, setBrowsing] = useState(false);          // the collections list instead of the tools
   const [newCollection, setNewCollection] = useState<string | null>(null);
   const [extraCollections, setExtraCollections] = useState<string[]>(() => store.get(collectionsKey(), []));
@@ -781,8 +785,9 @@ export default function Tools() {
   const lib = q.data;
   const groups = useMemo(() => [...new Set([...(lib?.tools ?? []).map(t => t.group), ...extraCollections])].sort(), [lib, extraCollections]);
   const tools = useMemo(() => (lib?.tools ?? []).filter(t => (!collection || t.group === collection)
+    && (status === "all" || (status === "inactive") === (t.policy.enabled === false))
     && (!filter || `${t.name} ${t.group} ${t.description}`.toLowerCase().includes(filter.toLowerCase())))
-    .sort((a, b) => a.name.localeCompare(b.name)), [lib, filter, collection]);
+    .sort((a, b) => a.name.localeCompare(b.name)), [lib, filter, collection, status]);
   if (!lib) return <ErrorBox error={q.error} />;
   const selectedName = pane?.kind === "tool" ? pane.name : params.get("tool");
   const selected = lib.tools.find(t => t.name === selectedName) ?? (pane === null ? tools[0] : undefined);
@@ -810,6 +815,8 @@ export default function Tools() {
           <span className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted">{CI.search}</span>
           <input id="tool-filter" placeholder="Search tools…" value={filter} onChange={e => setFilter(e.target.value)} style={{ paddingLeft: "2rem" }} className="w-full !py-2 text-sm" />
         </div>
+        <select id="tool-status" aria-label="Status" className="!py-2 text-sm" value={status} onChange={e => setStatus(e.target.value as typeof status)}>
+          <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
         <AddMenu onApi={newDraft} onMcp={() => setPane({ kind: "servers", add: true })} />
       </div>
 
@@ -915,6 +922,7 @@ export default function Tools() {
 type HeaderRow = { k: string; v: unknown };
 const AUTH_DEFAULT: Record<string, ToolAuth> = {
   none: { type: "none" }, bearer: { type: "bearer", token: { newSecret: { name: "", value: "" } } },
+  token: { type: "token", token: { newSecret: { name: "", value: "" } } },
   basic: { type: "basic", username: "", password: { newSecret: { name: "", value: "" } } },
   api_key: { type: "api_key", header: "X-API-Key", value: { newSecret: { name: "", value: "" } } },
 };
@@ -1010,7 +1018,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
               <span className="mt-1 block text-[11px] text-muted">{AUTH_HELP[auth.type]}</span>
               {auth.type !== "none" && (
                 <div className="mt-3 grid gap-3 rounded-lg bg-soft/50 p-3 sm:grid-cols-2">
-                  {auth.type === "bearer" && <div className="sm:col-span-2"><span className={label()}>Token</span>
+                  {(auth.type === "bearer" || auth.type === "token") && <div className="sm:col-span-2"><span className={label()}>Token</span>
                     <SecretInput id="auth-token" preferSecret value={auth.token} secrets={secrets} onChange={v => setAuth({ ...auth, token: v })} /></div>}
                   {auth.type === "basic" && <>
                     <div><span className={label()}>Username</span><SecretInput id="auth-user" value={auth.username} secrets={secrets} onChange={v => setAuth({ ...auth, username: v })} /></div>
@@ -1039,6 +1047,38 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
               </div>
             </div>
           </>}
+          <label className="flex items-start gap-2.5 rounded-lg border border-line p-3">
+            <input id="tool-enabled" type="checkbox" className="mt-0.5" checked={p.enabled !== false}
+              onChange={e => setP({ ...p, enabled: e.target.checked ? undefined : false })} />
+            <span><span className="block text-sm font-medium">Active</span>
+              <span className="text-[11px] text-muted">Inactive tools stay in the library but are not offered to agents, and refuse to run (a flow's tool node takes its failure path).</span></span>
+          </label>
+          {p.kind !== "read" && <label className="flex items-start gap-2.5 rounded-lg border border-line p-3">
+            <input id="tool-async" type="checkbox" className="mt-0.5" checked={!!p.async}
+              onChange={e => setP({ ...p, async: e.target.checked ? true : undefined })} />
+            <span><span className="block text-sm font-medium">Async</span>
+              <span className="text-[11px] text-muted">Fire and forget: the agent gets “queued” at once and carries on while the request finishes in the background. Its result is only logged — don't use it when the agent needs the answer.</span></span>
+          </label>}
+          <div>
+            <span className="text-sm font-medium">Messages while the tool runs</span>
+            <p className="mb-2 text-[11px] text-muted">Optional lines the agent says itself. “Start” replaces the generic “one moment”; “Done” is said when the call succeeds. {"{{args.name}}"} fills in an argument.</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["say_start", "say_done"] as const).map(k => (
+                <div key={k} className="rounded-lg bg-soft/50 p-3">
+                  <span className={label()}>{k === "say_start" ? "Request start" : "Request complete"}</span>
+                  {(["en", "ar"] as const).map(l => (
+                    <input key={l} id={`tool-${k}-${l}`} aria-label={`${k === "say_start" ? "Start" : "Done"} message (${l})`} dir={l === "ar" ? "rtl" : undefined}
+                      className="mb-1.5 w-full text-sm" placeholder={l === "en" ? "English" : "العربية"} value={p[k]?.[l] ?? ""}
+                      onChange={e => {
+                        const next = { ...(p[k] ?? {}), [l]: e.target.value };
+                        if (!next[l]) delete next[l];
+                        setP({ ...p, [k]: Object.keys(next).length ? next : undefined });
+                      }} />
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
           {p.kind === "read" && <label className="block sm:w-1/2"><span className={label()}>Cache <span className="text-xs font-normal text-muted">(seconds, read tools)</span></span>
             <input id="tool-cache" type="number" min={0} className="w-full" value={p.cache_ttl ?? ""} onChange={e => set("cache_ttl", e.target.value === "" ? undefined : Number(e.target.value))} /></label>}
         </div>
@@ -1073,7 +1113,7 @@ function ToolForm({ lib, init, secrets, groups, serverDescription, serverSchema,
             <span className="mt-1 block text-[11px] text-muted">Usually the skill that uses it; skills without a flow get their collection's tools.</span></label>
           <label className="block"><span className={label()}>Kind</span>
             <select id="tool-kind" className="w-full" value={p.kind} onChange={e => setP({ ...p, kind: e.target.value as ToolPolicy["kind"],
-              confirm: e.target.value === "read" ? undefined : p.confirm, backs: e.target.value === "read" ? undefined : p.backs })}>
+              confirm: e.target.value === "read" ? undefined : p.confirm, backs: e.target.value === "read" ? undefined : p.backs, async: e.target.value === "read" ? undefined : p.async })}>
               {c.kinds.map(k => <option key={k}>{k}</option>)}</select>
             <span className="mt-1 block text-[11px] text-muted">write / send tools change or send something.</span></label>
           <label className="block"><span className={label()}>Confirmation</span>

@@ -6,6 +6,8 @@ from typing import Any
 
 from runtime.providers import LLMProvider, TextDelta
 
+from .errors import is_provider_error
+
 END = "[END]"
 
 CALLER_SYSTEM = {
@@ -118,9 +120,10 @@ class LLMCaller:
                     if isinstance(ev, TextDelta):
                         text += ev.text
             except Exception as e:
-                if ("arsing failed" not in str(e) and "failed_generation" not in str(e)) or attempt == 2:
+                parse = "arsing failed" in str(e) or "failed_generation" in str(e)
+                if not (parse or is_provider_error(repr(e))) or attempt == 2:      # a parse error, or a slow / failed call: try again
                     raise
-                self.raw.append(f"<groq parse error: {str(e)[:80]}>")
+                self.raw.append(f"<groq parse error: {str(e)[:80]}>" if parse else f"<retrying after: {repr(e)[:80]}>")
                 continue
             text = re.sub(r"\s+", " ", text).strip().strip('"')
             self.raw.append(text)

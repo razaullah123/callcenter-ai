@@ -4,8 +4,13 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { FlowEdge, FlowGraph, FlowNode } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { api, type FlowEdge, type FlowGraph, type FlowNode } from "../api";
 import { Badge, Button, cx } from "../ui";
+import { NodeIcon } from "./nodeIcons";
+import { validateGraph, type Issue, type VarContext } from "./validate";
+import VariablePicker from "./VariablePicker";
+import { availableAt, nameProblem, type SysVar, type VarGroup } from "./variables";
 
 // Flow canvas (Hamsa-style): a floating toolbar (+ add node · (x) variables · ⊞ auto-layout · ⚙ global settings),
 // nodes drawn by type with their transitions as rows — each row has its own handle, in the order they are tried —
@@ -14,14 +19,16 @@ import { Badge, Button, cx } from "../ui";
 const ANY = "__any__";            // the "Anywhere" node: edges from "*" (reachable from any step)
 const DONE = "__done__";
 
-export const TYPES: Record<string, { label: string; icon: string; color: string; hint: string }> = {
-  conversation: { label: "Conversation", icon: "💬", color: "bg-sky-600", hint: "The agent talks: instructions, tools, values to collect" },
-  tool: { label: "Tool", icon: "🛠", color: "bg-violet-600", hint: "The platform calls a tool, then follows success or failure" },
-  router: { label: "Router", icon: "⑂", color: "bg-indigo-600", hint: "Logic split: picks the next step by conditions" },
-  set: { label: "Set variables", icon: "(x)", color: "bg-emerald-600", hint: "Sets values for later steps, then moves on" },
-  transfer: { label: "Transfer call", icon: "☎", color: "bg-orange-600", hint: "Hands the call to a person" },
-  skill: { label: "Go to skill", icon: "↪", color: "bg-teal-600", hint: "Continues in another skill of this agent" },
-  end: { label: "End call", icon: "⏹", color: "bg-rose-600", hint: "Optional closing line, then hang up" },
+export const TYPES: Record<string, { label: string; color: string; tint: string; hint: string; edge: string }> = {
+  conversation: { label: "Conversation", color: "bg-blue-600", tint: "text-blue-600", hint: "Interactive dialog with the user", edge: "border-blue-300/60" },
+  tool: { label: "Tool", color: "bg-purple-600", tint: "text-purple-600", hint: "Execute pre-configured tools", edge: "border-purple-300/60" },
+  transfer: { label: "Transfer Call", color: "bg-orange-600", tint: "text-orange-600", hint: "Transfer call to another number", edge: "border-orange-300/60" },
+  agent: { label: "Transfer to Agent", color: "bg-green-600", tint: "text-green-600", hint: "Transfer conversation to another agent", edge: "border-green-300/60" },
+  router: { label: "Router", color: "bg-indigo-600", tint: "text-indigo-600", hint: "Logic splitting node with conditional routing", edge: "border-indigo-300/60" },
+  set: { label: "Set Local Variables", color: "bg-green-600", tint: "text-green-600", hint: "Set local variables for use in subsequent nodes", edge: "border-green-300/60" },
+  skill: { label: "Go to Skill", color: "bg-teal-600", tint: "text-teal-600", hint: "Continue in another skill of this agent", edge: "border-teal-300/60" },
+  settings: { label: "Change Agent Settings", color: "bg-amber-600", tint: "text-amber-600", hint: "Override agent settings mid-flow", edge: "border-amber-300/60" },
+  end: { label: "End Call", color: "bg-red-600", tint: "text-red-600", hint: "End the conversation", edge: "border-red-300/60" },
 };
 
 /** Values the platform knows about the call, usable in edge conditions next to the collected variables. */
@@ -32,7 +39,19 @@ const CALL_FACTS: [string, string][] = [
   ["awaiting_confirmation", "a booking / change waits for the caller's yes"],
 ];
 
+/** Comparison operators of a transition: key, label in the picker, short form on the canvas. */
+const CMP: [string, string, string][] = [
+  ["ne", "is not", "≠"], ["gt", "is greater than", ">"], ["gte", "is at least", "≥"], ["lt", "is less than", "<"],
+  ["lte", "is at most", "≤"], ["contains", "contains", "contains"], ["not_contains", "does not contain", "does not contain"],
+  ["regex", "matches the pattern", "matches"],
+];
+
 export function conditionLabel(e: FlowEdge): string {
+  const flags = [e.back && "returns", e.confirm && "asks first", e.silent && "silent"].filter(Boolean).join(", ");
+  const label = conditionText(e);
+  return flags ? `${label} · ${flags}` : label;
+}
+function conditionText(e: FlowEdge): string {
   if (e.on) {
     const base = e.on === "success" ? "On success" : "On failure";
     return e.when && Object.keys(e.when).length ? `${base} · ${describe(e.when)}` : base;
@@ -48,11 +67,37 @@ function describe(w: Record<string, unknown> | undefined): string {
     if (k === "not_all_filled") return `not done: ${(v as string[]).join(", ")}`;
     if (k === "equals") return Object.entries(v as object).map(([a, b]) => `${a} = ${b}`).join(", ");
     if (k === "stage") return `stage ${v}`;
+    if (k === "dtmf") return `key ${v}`;
+    const cmp = CMP.find(([key]) => key === k);
+    if (cmp) return Object.entries(v as object).map(([a, b]) => `${a} ${cmp[2]} ${b}`).join(", ");
+    if (k === "exists") return `has ${(v as string[]).join(", ")}`;
+    if (k === "not_exists") return `no ${(v as string[]).join(", ")}`;
     if (k === "llm") return `“${String(v)}”`;
     if (k === "replied") return v ? "after the caller replies" : "before the caller replies";
     return `${k}: ${JSON.stringify(v)}`;
   }).join(" and ");
 }
+
+/** How a transition row is drawn on a card: its kind (Hamsa's labels) and its text. */
+export function rowInfo(e: FlowEdge, srcType: string): { kind: string; text: string } {
+  const flags = [e.back && "returns", e.confirm && "asks first", e.silent && "silent"].filter(Boolean).join(", ");
+  const tail = flags ? ` · ${flags}` : "";
+  const w = e.when ?? {}, keys = Object.keys(w);
+  if (e.on) return { kind: "", text: (e.on === "success" ? "On Success" : "On Failure") + (keys.length ? ` · ${describe(w)}` : "") + tail };
+  if (!keys.length) {
+    if (srcType === "router") return { kind: "else", text: `Else${tail}` };
+    return srcType === "set" || srcType === "settings" ? { kind: "auto", text: `Auto-advance${tail}` } : { kind: "always", text: `Always${tail}` };
+  }
+  if (keys.length === 1 && keys[0] === "llm") return { kind: "prompt", text: `${String(w.llm || "…")}${tail}` };
+  if (keys.length === 1 && keys[0] === "dtmf") return { kind: "keypad", text: `Press ${w.dtmf}${tail}` };
+  if (keys.length === 1 && keys[0] === "replied") return { kind: "reply", text: `${describe(w)}${tail}` };
+  return { kind: "equation", text: `${describe(w)}${tail}` };
+}
+const ROW_KIND: Record<string, { icon: string; label?: string }> = {
+  prompt: { icon: "sparkles", label: "Prompt" }, equation: { icon: "sigma", label: "Equation" }, keypad: { icon: "hash", label: "Keypad" },
+  reply: { icon: "skill", label: "Reply" }, auto: { icon: "zap" }, always: { icon: "zap" }, else: { icon: "router" },
+  "": { icon: "sparkles" },
+};
 
 // ---------------------------------------------------------------- layout
 
@@ -78,12 +123,14 @@ function layout(nodes: FlowNode[], edges: FlowEdge[], start: string, dir: "horiz
 
 // ---------------------------------------------------------------- node view
 
-type RowInfo = { gi: number; label: string };
+type RowInfo = { gi: number; kind: string; text: string };
 type NodeData = { node: FlowNode; start: boolean; active: boolean; rows: RowInfo[]; selectedEdge: number | null };
 
 type CanvasActions = {
   open: (id: string) => void; menu: (id: string, action: "rename" | "logs" | "duplicate" | "delete") => void;
   pickTool: (id: string) => void; selectEdge: (gi: number) => void; moveEdge: (gi: number, dir: -1 | 1) => void;
+  /** Conversation card: switch between a prompt the agent follows and a message it says as written. */
+  setMode: (id: string, mode: "prompt" | "static") => void;
 };
 const Actions = createContext<CanvasActions | null>(null);
 
@@ -92,46 +139,73 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
   const [menu, setMenu] = useState(false);
   const n = data.node;
   const anywhere = id === ANY;
-  const t = anywhere ? { label: "Anywhere", icon: "✳", color: "bg-slate-500", hint: "" } : TYPES[n.type] ?? TYPES.conversation;
+  const t = anywhere ? { label: "Anywhere", color: "bg-slate-500", hint: "", edge: "border-slate-300/60" } : TYPES[n.type] ?? TYPES.conversation;
+  const chip = "rounded-md bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent-text";
   const body = (() => {
     if (anywhere) return <div className="text-[11px] text-muted">Edges here are checked from every step.</div>;
     if (n.id === DONE) return <div className="text-[11px] text-muted">Quiet end of the old step flow.</div>;
     switch (n.type) {
       case "tool": return (
-        <button className="w-full rounded-md border border-line bg-soft/60 px-2 py-1 text-left" onClick={e => { e.stopPropagation(); act.pickTool(id); }}>
-          <div className="text-[10px] text-muted">● Tool · click to change</div>
-          <div className="truncate text-[11px] font-semibold">{n.tool || "choose a tool…"}</div>
-          {n.args && Object.keys(n.args).length > 0 && <div className="truncate font-mono text-[10px] text-muted">{JSON.stringify(n.args)}</div>}
-        </button>);
+        <>
+          <button className="w-full rounded-lg border border-line bg-soft/60 px-2 py-1.5 text-left" onClick={e => { e.stopPropagation(); act.pickTool(id); }}>
+            <div className="flex items-center gap-1 text-[10px] text-muted"><NodeIcon type="tool" size={10} />Tool · click to change</div>
+            <div className="mt-0.5 truncate text-xs font-semibold">{n.tool || "choose a tool…"}</div>
+            {n.args && Object.keys(n.args).length > 0 && <div className="truncate font-mono text-[10px] text-muted">{JSON.stringify(n.args)}</div>}
+          </button>
+          {Object.keys(n.outputs ?? {}).length > 0 && <div className="flex flex-wrap items-center gap-1"><span className="text-[10px] text-muted">Extracting:</span>
+            {Object.keys(n.outputs ?? {}).map(v => <span key={v} className={chip}>{v}</span>)}</div>}
+        </>);
       case "router": return <div className="text-[11px] text-muted">Logic splitting node with conditional routing</div>;
-      case "set": return <div className="flex flex-wrap gap-1"><span className="text-[10px] text-muted">{Object.keys(n.set ?? {}).length} variables</span>
-        {Object.keys(n.set ?? {}).slice(0, 4).map(k => <span key={k} className="rounded bg-emerald-100 px-1 text-[10px] text-emerald-800">{k}</span>)}</div>;
-      case "transfer": return <div className="line-clamp-2 text-[11px] text-muted">{n.reason || "Transfer to a person"}</div>;
+      case "set": return (
+        <>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted"><span className="text-[10px] font-semibold text-green-600">(x)</span>{Object.keys(n.set ?? {}).length} variables</div>
+          <div className="flex flex-wrap gap-1">{Object.keys(n.set ?? {}).slice(0, 6).map(k => <span key={k} className="rounded-md bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-800">{k}</span>)}</div>
+        </>);
+      case "transfer": return <div className="line-clamp-2 text-[11px] text-muted">{n.reason || "Transfer to a person"}{n.destination ? ` · ${n.destination}` : ""}{n.transfer_type === "cold" ? " · cold" : ""}</div>;
       case "end": return <div className="line-clamp-2 text-[11px] text-muted" dir="auto">{n.say?.en || n.say?.ar || "Silent end"}</div>;
       case "skill": return <div className="text-[11px] text-muted">→ {n.skill || "choose a skill…"}</div>;
-      default: return (
-        <>
-          <div className="line-clamp-3 rounded-md bg-soft/60 px-2 py-1 text-[11px] text-muted" dir="auto">{n.instructions || "No instructions yet"}</div>
-          {(n.extract?.length ?? 0) > 0 && <div className="mt-1 flex flex-wrap items-center gap-1"><span className="text-[10px] text-muted">Collecting:</span>
-            {n.extract!.map(v => <span key={v} className="rounded bg-red-50 px-1 text-[10px] text-red-800">{v}</span>)}</div>}
-          {(n.tools?.length ?? 0) > 0 && <div className="mt-1 text-[10px] text-muted">🛠 {n.tools!.length} tools</div>}
-        </>);
+      case "settings": return <div className="flex flex-wrap gap-1">{Object.keys(n.overrides ?? {}).length ? Object.keys(n.overrides ?? {}).map(k =>
+        <span key={k} className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">{k.replace("_", " ")}</span>) : <span className="text-[11px] text-muted">Nothing changed yet</span>}</div>;
+      case "agent": return <div className="text-[11px] text-muted">→ {n.agent || "choose an agent…"}{n.handoff_history ? " · with the conversation" : ""}</div>;
+      default: {
+        const stat = !!n.say;
+        return (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted">{stat ? "Message:" : "Prompt:"}</span>
+              <div role="tablist" className="flex gap-0.5 rounded-lg bg-soft p-0.5 text-[11px]">
+                {([["prompt", "code", "Prompt"], ["static", "chat", "Static"]] as const).map(([m, icon, label]) => (
+                  <button key={m} role="tab" aria-selected={(m === "static") === stat} onClick={e => { e.stopPropagation(); act.setMode(id, m); }}
+                    className={cx("flex items-center gap-1 rounded-md px-2 py-0.5 font-medium transition", (m === "static") === stat ? "bg-brand text-white shadow-sm" : "text-ink hover:bg-panel")}>
+                    <NodeIcon type={icon} size={11} />{label}</button>))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-soft/60 px-2 py-1.5">
+              <div className="mb-0.5 flex items-center gap-1 text-[10px] text-muted"><NodeIcon type={stat ? "chat" : "code"} size={10} />{stat ? "Static message" : "Prompt"}</div>
+              <div className="line-clamp-4 whitespace-pre-line text-[11px]" dir="auto">{stat ? (n.say?.en || n.say?.ar || "Empty message") : (n.instructions || "No instructions yet")}</div>
+            </div>
+            {(n.extract?.length ?? 0) > 0 && <div className="flex flex-wrap items-center gap-1"><span className="text-[10px] text-muted">Extracting:</span>
+              {n.extract!.map(v => <span key={v} className={chip}>{v}</span>)}</div>}
+            {n.dtmf_capture && <div className="flex items-center gap-1 text-[10px] text-muted"><NodeIcon type="hash" size={10} />Keypad → <span className="font-mono">{n.dtmf_capture.variable || "?"}</span></div>}
+            {(n.tools?.length ?? 0) > 0 && <div className="flex items-center gap-1 text-[10px] text-muted"><NodeIcon type="tool" size={10} />{n.tools!.length} tools</div>}
+          </>);
+      }
     }
   })();
   const auto = !anywhere && ["set", "router"].includes(n.type) === false && data.rows.length === 0 && n.type !== "end" && n.type !== "transfer";
   return (
-    <div className={cx("w-64 rounded-xl border bg-panel text-left shadow-sm",
-      selected ? "border-accent ring-2 ring-accent/30" : "border-line",
+    <div className={cx("w-64 rounded-2xl border bg-panel text-left shadow-sm", t.edge,
+      selected && "!border-accent ring-2 ring-accent/30",
       data.active && "!border-brand shadow-[0_0_0_4px_rgba(230,58,64,0.3)]")}>
       {!anywhere && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-400" />}
-      <div className="flex items-center gap-2 border-b border-line px-2 py-1.5">
-        <span className={cx("flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] text-white", t.color)}>{t.icon}</span>
-        <button className="min-w-0 flex-1 truncate text-left text-xs font-semibold" onClick={e => { e.stopPropagation(); act.open(id); }}>
+      <div className="flex items-center gap-2.5 px-3 pb-2 pt-3">
+        <span className={cx("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white", t.color)}><NodeIcon type={anywhere ? "anywhere" : n.type} size={16} /></span>
+        <button className="min-w-0 flex-1 truncate text-left text-[13px] font-semibold" onClick={e => { e.stopPropagation(); act.open(id); }}>
           {n.id === DONE ? "Done" : anywhere ? "Anywhere" : n.id}</button>
         {data.start && <span className="rounded bg-accent/15 px-1 text-[9px] font-semibold text-accent-text">START</span>}
-        {!anywhere && <button title="Settings" className="text-muted hover:text-ink" onClick={e => { e.stopPropagation(); act.open(id); }}>⚙</button>}
+        {!anywhere && <button title="Settings" aria-label="Settings" className="text-muted hover:text-ink" onClick={e => { e.stopPropagation(); act.open(id); }}><NodeIcon type="settings" size={14} stroke={1.8} /></button>}
         {!anywhere && <div className="relative">
-          <button title="More" className="px-1 text-muted hover:text-ink" onClick={e => { e.stopPropagation(); setMenu(m => !m); }}>⋯</button>
+          <button title="More" aria-label="More" className="px-1 text-muted hover:text-ink" onClick={e => { e.stopPropagation(); setMenu(m => !m); }}>⋯</button>
           {menu && <div className="absolute right-0 z-30 mt-1 w-36 rounded-lg border border-line bg-panel p-1 text-xs shadow-lg" onMouseLeave={() => setMenu(false)}>
             {([["rename", "✎ Rename"], ["logs", "📜 View logs"], ["duplicate", "⧉ Duplicate"], ["delete", "🗑 Delete"]] as const).map(([a, l]) => (
               <button key={a} className={cx("block w-full rounded px-2 py-1 text-left hover:bg-soft", a === "delete" && "text-bad")}
@@ -139,28 +213,33 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
           </div>}
         </div>}
       </div>
-      {data.active && <div className="bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-800">● active in the test call</div>}
-      <div className="space-y-1 px-2 py-1.5">{body}</div>
+      {data.active && <div className="mx-3 mb-1 rounded-md bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-800">● active in the test call</div>}
+      <div className="space-y-2 px-3 pb-2.5">{body}</div>
       {!(n.type === "end" || n.type === "transfer") && (
-        <div className="border-t border-line px-2 py-1.5">
-          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted">Transitions</div>
-          <div className="space-y-1">
-            {data.rows.map((r, i) => (
-              <div key={r.gi} className={cx("group relative flex items-center gap-1 rounded-md border px-1.5 py-1",
-                data.selectedEdge === r.gi ? "border-accent bg-accent/5" : "border-line bg-soft/40")}
-                onClick={e => { e.stopPropagation(); act.selectEdge(r.gi); }}>
-                <span className="text-[10px] text-muted">{i + 1}.</span>
-                <span className="min-w-0 flex-1 truncate text-[11px]" dir="auto" title={r.label}>{r.label}</span>
-                <span className="hidden gap-0.5 group-hover:flex">
-                  <button className="text-[10px] text-muted hover:text-ink" title="Try earlier" onClick={e => { e.stopPropagation(); act.moveEdge(r.gi, -1); }}>▲</button>
-                  <button className="text-[10px] text-muted hover:text-ink" title="Try later" onClick={e => { e.stopPropagation(); act.moveEdge(r.gi, 1); }}>▼</button>
-                </span>
-                <Handle id={`h-${r.gi}`} type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-accent" />
-              </div>
-            ))}
+        <div className="px-3 pb-3">
+          <div className="mb-1.5 text-xs font-semibold">Transitions</div>
+          <div className="space-y-1.5">
+            {data.rows.map(r => {
+              const k = ROW_KIND[r.kind] ?? ROW_KIND[""];
+              return (
+                <div key={r.gi} className={cx("group relative flex items-start gap-2 rounded-lg border px-2 py-1.5",
+                  data.selectedEdge === r.gi ? "border-accent bg-accent/5" : "border-line bg-soft/50")}
+                  onClick={e => { e.stopPropagation(); act.selectEdge(r.gi); }}>
+                  <span className="mt-0.5 text-ink"><NodeIcon type={k.icon} size={12} /></span>
+                  <span className="min-w-0 flex-1">
+                    {k.label && <span className="block text-[10px] font-semibold text-muted">{k.label}</span>}
+                    <span className="line-clamp-2 block text-[11px]" dir="auto" title={r.text}>{r.text}</span>
+                  </span>
+                  <span className="hidden gap-0.5 group-hover:flex">
+                    <button className="text-[10px] text-muted hover:text-ink" title="Try earlier" onClick={e => { e.stopPropagation(); act.moveEdge(r.gi, -1); }}>▲</button>
+                    <button className="text-[10px] text-muted hover:text-ink" title="Try later" onClick={e => { e.stopPropagation(); act.moveEdge(r.gi, 1); }}>▼</button>
+                  </span>
+                  <Handle id={`h-${r.gi}`} type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-accent" />
+                </div>);
+            })}
             {auto && <div className="text-[10px] text-muted">No transitions — the call stays here.</div>}
-            <div className="relative rounded-md border border-dashed border-line px-1.5 py-1 text-[10px] text-muted">
-              + drag from ● to add a transition
+            <div className="relative flex items-center gap-1 rounded-lg border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-accent-text">
+              <span className="text-sm leading-none">+</span> Add — drag from ● to connect
               <Handle id="new" type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-slate-400" />
             </div>
           </div>
@@ -191,6 +270,8 @@ type CanvasProps = {
   onViewLogs?: (nodeId: string) => void;
   /** A node or transition was opened: the side panel must show the inspector (closes the test panel). */
   onInspect?: () => void;
+  /** The agent's custom variables (Global Settings → Variables). */
+  customVars?: Record<string, { type?: string; default?: unknown; description?: string }>;
 };
 
 export default function FlowCanvas(props: CanvasProps) {
@@ -200,7 +281,7 @@ export default function FlowCanvas(props: CanvasProps) {
 type Panel = "inspector" | "variables" | "global";
 
 function Canvas({ graph, converted, tools, skills, onSave, saving, aside, globalPanel, toolInfo, activeNode, follow, locate,
-  onDirty, onViewLogs, onInspect }: CanvasProps) {
+  onDirty, onViewLogs, onInspect, customVars }: CanvasProps) {
   const [g, setG] = useState(() => ({ nodes: graph.nodes, edges: graph.edges, start: graph.start, variables: graph.variables ?? {} }));
   const [sel, setSel] = useState<{ kind: "node"; id: string } | { kind: "edge"; gi: number } | null>(null);
   // like Hamsa: Global Settings is the panel you see; clicking a node / transition shows its inspector, closing it goes back
@@ -215,12 +296,28 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
   const [focusNew, setFocusNew] = useState<string | null>(null);
   const rf = useReactFlow();
   const touch = () => setDirty(true);
+  const stash = useRef<Record<string, Record<string, string>>>({});     // a static message set aside while the node is in prompt mode
+  const systemQ = useQuery({ queryKey: ["system-variables"], queryFn: api.systemVariables, staleTime: Infinity });
+  const system: SysVar[] = systemQ.data ?? [];
+  const custom = customVars ?? {};
+  const inferred = useMemo(() => [...new Set(Object.values(graph.infer ?? {}).flatMap(r => Object.keys(((r as { set?: object }).set) ?? {})))], [graph.infer]);
+  const ctx: VarContext = useMemo(() => ({ system: system.map(v => v.name), custom: Object.keys(custom), infer: inferred,
+    facts: CALL_FACTS.map(f => f[0]) }), [system, custom, inferred]);
+  const issues = useMemo(() => validateGraph(g, ctx), [g, ctx]);
+  /** The picker's lists for a step: system, custom, and what the steps before it collect. */
+  const varGroups = (nodeId?: string): VarGroup[] => [
+    { label: "System", items: system.filter(v => !v.name.startsWith("_")).map(v => ({ name: v.name, hint: v.description })) },
+    { label: "Custom", items: Object.entries(custom).map(([name, v]) => ({ name, hint: v.type ?? "string" })) },
+    { label: "Collected before this step", items: nodeId ? availableAt(g.nodes, g.edges, nodeId).map(name => ({ name })) : [] },
+  ].filter(grp => grp.items.length);
+  const [issuesOpen, setIssuesOpen] = useState(false);
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
 
   // React Flow nodes: positions live here while editing; everything else comes from `g`
   const build = useCallback((prev: Node<NodeData>[]) => {
     const auto = layout(g.nodes, g.edges, g.start, "horizontal");
-    const rows = (src: string) => g.edges.map((e, gi) => ({ e, gi })).filter(x => x.e.from === src).map(x => ({ gi: x.gi, label: conditionLabel(x.e) }));
+    const rows = (src: string) => g.edges.map((e, gi) => ({ e, gi })).filter(x => x.e.from === src)
+      .map(x => ({ gi: x.gi, ...rowInfo(x.e, src === "*" ? "any" : g.nodes.find(nd => nd.id === src)?.type ?? "") }));
     const selectedEdge = sel?.kind === "edge" ? sel.gi : null;
     const out: Node<NodeData>[] = g.nodes.map(n => {
       const old = prev.find(p => p.id === n.id);
@@ -336,6 +433,12 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
       else deleteNode(id);
     },
     pickTool: id => setPicker(id), selectEdge: gi => inspect({ kind: "edge", gi }), moveEdge,
+    setMode: (id, mode) => {
+      const cur = g.nodes.find(nd => nd.id === id);
+      if (!cur || (mode === "static") === !!cur.say) return;
+      if (mode === "static") patchNode(id, { say: stash.current[id] ?? { ar: "", en: "" } });
+      else { if (cur.say) stash.current[id] = cur.say; patchNode(id, { say: undefined }); }
+    },
   };
 
   const node = sel?.kind === "node" ? g.nodes.find(n => n.id === sel.id) : undefined;
@@ -347,19 +450,19 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
         <div className="text-sm font-semibold">{panel === "variables" ? "Variables" : node ? "Node inspector" : edge ? "Transition" : "Inspector"}</div>
         {(panel !== "inspector" || sel) && <button className="text-muted hover:text-ink" onClick={() => { setSel(null); setPanel(home); }}>✕</button>}
       </div>
-      {panel === "variables" ? <Variables vars={g.variables} infer={graph.infer} onChange={v => { setG(x => ({ ...x, variables: v })); touch(); }} />
+      {panel === "variables" ? <Variables vars={g.variables} infer={graph.infer} system={system} custom={custom} onChange={v => { setG(x => ({ ...x, variables: v })); touch(); }} />
         : node ? <NodeInspector key={node.id} node={node} isStart={node.id === g.start} tools={tools} skills={skills}
             others={g.nodes.map(n => n.id).filter(id => id !== node.id && id !== DONE)}
             onConnectFrom={src => { setG(x => ({ ...x, edges: [...x.edges, { from: src, to: node.id }] })); inspect({ kind: "edge", gi: g.edges.length }); touch(); }}
             onConnectTo={dst => { setG(x => ({ ...x, edges: [...x.edges, { from: node.id, to: dst }] })); inspect({ kind: "edge", gi: g.edges.length }); touch(); }}
-            variables={Object.keys(g.variables)} renameRef={renameRef} toolInfo={toolInfo}
+            variables={Object.keys(g.variables)} renameRef={renameRef} toolInfo={toolInfo} varGroups={varGroups(node.id)}
             globalEdges={g.edges.map((e, gi) => ({ e, gi })).filter(x => x.e.from === "*" && x.e.to === node.id)}
             onChange={p => patchNode(node.id, p)} onRename={next => renameNode(node.id, next)} onPickTool={() => setPicker(node.id)}
             onStart={() => { setG(x => ({ ...x, start: node.id })); touch(); }} onDelete={() => deleteNode(node.id)}
             onAddGlobal={() => { setG(x => ({ ...x, edges: [...x.edges, { from: "*", to: node.id, when: { llm: "" } }] })); setSel({ kind: "edge", gi: g.edges.length }); touch(); }}
             onOpenEdge={gi => setSel({ kind: "edge", gi })} />
         : edge && sel?.kind === "edge" ? <EdgeInspector key={sel.gi} edge={edge} order={g.edges.filter(e => e.from === edge.from).indexOf(edge) + 1}
-            fromTool={g.nodes.find(n => n.id === edge.from)?.type === "tool"} targets={g.nodes.map(n => n.id)}
+            fromTool={["tool", "agent"].includes(g.nodes.find(n => n.id === edge.from)?.type ?? "")} targets={g.nodes.map(n => n.id)}
             onChange={e => setEdge(sel.gi, e)} onDelete={() => deleteEdge(sel.gi)} />
         : <div className="space-y-2 text-sm text-muted">
             <p>Click a node's ⚙ or title to edit it, or a transition row to edit its condition.</p>
@@ -384,20 +487,25 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
           </Actions.Provider>
           {/* floating toolbar, like Hamsa: add node · variables · auto-layout · global settings */}
           <div className="absolute left-3 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-2">
-            <ToolButton label="Add node" active={addOpen} accent onClick={() => { setAddOpen(o => !o); setLayoutOpen(false); }}>＋</ToolButton>
-            <ToolButton label="Variables" active={panel === "variables" && !aside} onClick={() => { setPanel(p => (p === "variables" ? home : "variables")); setSel(null); }}>(x)</ToolButton>
-            <ToolButton label="Auto layout" active={layoutOpen} onClick={() => { setLayoutOpen(o => !o); setAddOpen(false); }}>⊞</ToolButton>
-            <ToolButton label="Global settings" active={showGlobal && !aside} onClick={() => { setSel(null); setPanel("global"); }}>⚙</ToolButton>
+            <ToolButton label="Add node" active={addOpen} accent onClick={() => { setAddOpen(o => !o); setLayoutOpen(false); }}><NodeIcon type="plus" size={20} stroke={2.2} /></ToolButton>
+            <ToolButton label="Variables" active={panel === "variables" && !aside} onClick={() => { setPanel(p => (p === "variables" ? home : "variables")); setSel(null); }}><span className="text-[15px] font-semibold">(x)</span></ToolButton>
+            <ToolButton label="Auto layout" active={layoutOpen} onClick={() => { setLayoutOpen(o => !o); setAddOpen(false); }}><NodeIcon type="layout" size={18} /></ToolButton>
+            <ToolButton label="Global settings" active={showGlobal && !aside} onClick={() => { setSel(null); setPanel("global"); }}><NodeIcon type="settings" size={18} /></ToolButton>
           </div>
           {addOpen && (
-            <div className="absolute left-16 top-1/2 z-20 w-72 -translate-y-1/2 rounded-xl border border-line bg-panel p-2 shadow-xl">
-              <div className="px-2 pb-1 text-sm font-semibold">Add node</div>
-              <div className="px-2 pb-2 text-[11px] text-muted">Choose a node type to add to your flow</div>
-              {Object.entries(TYPES).map(([type, t]) => (
-                <button key={type} className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-soft" onClick={() => addNode(type)}>
-                  <span className={cx("mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] text-white", t.color)}>{t.icon}</span>
-                  <span><span className="block text-sm font-medium">{t.label}</span><span className="block text-[11px] text-muted">{t.hint}</span></span>
-                </button>))}
+            <div className="absolute left-[4.75rem] top-3 z-20 flex max-h-[calc(100%-1.5rem)] w-[22.5rem] flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-xl" role="menu" aria-label="Add node">
+              <div className="px-5 pb-3 pt-4">
+                <div className="text-sm font-semibold">Add Node</div>
+                <div className="mt-0.5 text-xs text-muted">Choose a node type to add to your workflow</div>
+              </div>
+              <div className="mx-5 border-t border-line" />
+              <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+                {Object.entries(TYPES).map(([type, t]) => (
+                  <button key={type} role="menuitem" className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-soft" onClick={() => addNode(type)}>
+                    <span className={cx("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line bg-soft/70", t.tint)}><NodeIcon type={type} size={17} stroke={1.8} /></span>
+                    <span className="min-w-0"><span className="block text-sm font-medium">{t.label}</span><span className="block text-xs text-muted">{t.hint}</span></span>
+                  </button>))}
+              </div>
             </div>
           )}
           {layoutOpen && (
@@ -407,6 +515,8 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
             </div>
           )}
           <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+            <ValidationBadge issues={issues} open={issuesOpen} onToggle={() => setIssuesOpen(o => !o)}
+              onFocus={id => { inspect({ kind: "node", id }); centre(id); setIssuesOpen(false); }} />
             {dirty && <Badge tone="warn">unsaved</Badge>}
             <Button kind="primary" disabled={!dirty || saving} onClick={save}>{saving ? "Saving…" : "Save flow to draft"}</Button>
           </div>
@@ -421,8 +531,8 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
 
 function ToolButton({ label, active, accent, onClick, children }: { label: string; active?: boolean; accent?: boolean; onClick: () => void; children: ReactNode }) {
   return <button title={label} aria-label={label} onClick={onClick}
-    className={cx("flex h-11 w-11 items-center justify-center rounded-xl border text-base shadow-sm transition",
-      accent ? "border-transparent bg-brand text-white hover:opacity-90" : active ? "border-accent bg-accent/10" : "border-line bg-panel hover:bg-soft")}>{children}</button>;
+    className={cx("flex h-12 w-12 items-center justify-center rounded-xl text-base transition",
+      accent ? "bg-brand text-white hover:opacity-90" : cx("border-2 border-line text-ink", active ? "bg-soft" : "bg-panel hover:bg-soft"))}>{children}</button>;
 }
 
 function ToolPicker({ tools, info, current, onPick, onClose }: {
@@ -469,9 +579,158 @@ function JsonField({ value, onChange, rows = 3, id }: { value: unknown; onChange
     onChange={e => { setText(e.target.value); try { onChange(e.target.value.trim() ? JSON.parse(e.target.value) : undefined); setBad(false); } catch { setBad(true); } }} />;
 }
 
+/** Number field that stores nothing when emptied. */
+function NumField({ id, value, min, max, step, onChange }: { id: string; value: number | undefined; min?: number; max?: number; step?: number; onChange: (v: number | undefined) => void }) {
+  return <input id={id} type="number" className="w-full" min={min} max={max} step={step} value={value ?? ""}
+    onChange={e => onChange(e.target.value === "" ? undefined : Number(e.target.value))} />;
+}
+
+/** A line the agent says, in both languages. */
+function LangFields({ id, value, onChange }: { id: string; value: Record<string, string> | undefined; onChange: (v: Record<string, string> | undefined) => void }) {
+  const put = (lang: string, text: string) => { const next = { ...value, [lang]: text }; onChange(Object.values(next).some(x => x) ? next : undefined); };
+  return (
+    <div className="space-y-1.5">
+      <input id={`${id}-ar`} dir="rtl" className="w-full text-sm" placeholder="العربية" value={value?.ar ?? ""} onChange={e => put("ar", e.target.value)} />
+      <input id={`${id}-en`} className="w-full text-sm" placeholder="English" value={value?.en ?? ""} onChange={e => put("en", e.target.value)} />
+    </div>
+  );
+}
+
+/** Conversation node: collect keypad digits (DTMF) into a variable. */
+function CaptureFields({ node, onChange }: { node: FlowNode; onChange: (p: Partial<FlowNode>) => void }) {
+  const c = node.dtmf_capture;
+  const set = (patch: NonNullable<FlowNode["dtmf_capture"]>) => onChange({ dtmf_capture: { ...c, ...patch } });
+  const ends = c?.end_keys ?? ["#"];
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-2">
+      <label className="flex items-center gap-2 text-xs font-medium"><input id="node-dtmf-on" type="checkbox" checked={!!c}
+        onChange={e => onChange({ dtmf_capture: e.target.checked ? { variable: "", max_digits: 10, end_keys: ["#"], timeout_s: 5 } : undefined })} />
+        Collect keypad digits (DTMF) on this step</label>
+      {c && <>
+        {lbl("Variable", <input id="node-dtmf-var" className="w-full font-mono" placeholder="account_number" value={c.variable ?? ""} onChange={e => set({ variable: e.target.value })} />,
+          "snake_case. The digits are saved here and the flow moves on (use “has account_number” as the next transition). On phone calls only.")}
+        <div className="grid grid-cols-2 gap-2">
+          {lbl("Max digits (1-20)", <NumField id="node-dtmf-max" min={1} max={20} value={c.max_digits} onChange={v => set({ max_digits: v })} />)}
+          {lbl("Pause that ends it (s)", <NumField id="node-dtmf-timeout" min={1} max={30} value={c.timeout_s} onChange={v => set({ timeout_s: v })} />)}
+        </div>
+        <div className="flex items-center gap-3 text-xs"><span className="font-medium">Ends with</span>
+          {["#", "*"].map(k => <label key={k} className="flex items-center gap-1"><input type="checkbox" checked={ends.includes(k)}
+            onChange={e => set({ end_keys: e.target.checked ? [...ends, k] : ends.filter(x => x !== k) })} />{k}</label>)}</div>
+      </>}
+    </div>
+  );
+}
+
+/** Tool node: error behaviour, longest wait, the "one moment" line and the spoken result. */
+function ToolOptions({ node, onChange }: { node: FlowNode; onChange: (p: Partial<FlowNode>) => void }) {
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-2">
+      {lbl("If the tool fails", <select id="node-on-error" className="w-full" value={node.on_error ?? "continue"}
+        onChange={e => onChange({ on_error: e.target.value === "continue" ? undefined : e.target.value })}>
+        <option value="continue">Continue — follow the “On failure” transition</option>
+        <option value="retry">Retry, then follow “On failure”</option>
+        <option value="fail">Fail — hand the call to a person</option></select>)}
+      <div className="grid grid-cols-2 gap-2">
+        {node.on_error === "retry" && lbl("Extra attempts (1-5)", <NumField id="node-retries" min={1} max={5} value={node.retries} onChange={v => onChange({ retries: v })} />)}
+        {lbl("Longest wait (s)", <NumField id="node-tool-timeout" min={0.1} max={120} step={0.5} value={node.timeout_s} onChange={v => onChange({ timeout_s: v })} />, "Empty: no limit")}
+      </div>
+      {lbl("While it runs, say", <LangFields id="node-processing" value={node.processing} onChange={v => onChange({ processing: v })} />, "Instead of the standard “one moment”. Empty: standard.")}
+      {lbl("When it succeeds, say", <LangFields id="node-tool-say" value={node.say} onChange={v => onChange({ say: v })} />,
+        "Optional. Use {{ variable }} for values saved from the result. Empty: say nothing (the next step talks).")}
+    </div>
+  );
+}
+
+/** Settings node: what changes from this step on. An empty field keeps what is already in force. */
+function SettingsOptions({ node, onChange }: { node: FlowNode; onChange: (p: Partial<FlowNode>) => void }) {
+  const ov = (node.overrides ?? {}) as Record<string, unknown>;
+  const section = (k: string) => (ov[k] ?? {}) as Record<string, unknown>;
+  const put = (k: string, v: unknown) => { const next = { ...ov }; if (v === undefined || v === "") delete next[k]; else next[k] = v; onChange({ overrides: next }); };
+  const putIn = (k: string, f: string, v: unknown) => {
+    const sec = { ...section(k) }; if (v === undefined || v === "") delete sec[f]; else sec[f] = v;
+    put(k, Object.keys(sec).length ? sec : undefined);
+  };
+  const catalog = useQuery({ queryKey: ["voice-catalog"], queryFn: api.voiceCatalog });
+  const call = section("call"), llm = section("llm"), voice = section("voice");
+  const num = (k: string) => call[k] as number | undefined;
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-muted">These apply from this step until another “Change settings” step changes them again. Leave a field empty to keep what is in force.</p>
+      {lbl("System prompt", <textarea id="node-ov-prompt" rows={5} dir="auto" className="w-full text-xs" value={String(ov.system_prompt ?? "")}
+        onChange={e => put("system_prompt", e.target.value)} />, "Replaces the agent's system prompt for the steps after this one.")}
+      <div className="rounded-lg border border-line p-2"><div className="mb-1 text-xs font-semibold">Voice & speech recognition</div>
+        {(["ar", "en"] as const).map(l => (
+          <label key={l} className="mb-1.5 block text-[11px]"><span className="text-muted">Voice · {l === "ar" ? "Arabic" : "English"}</span>
+            <select id={`node-ov-voice-${l}`} className="mt-0.5 w-full text-xs" value={String(voice[l] ?? "")} onChange={e => putIn("voice", l, e.target.value)}>
+              <option value="">keep the current voice</option>
+              {(catalog.data ?? []).filter(v => v.language === l).map(v => <option key={`${v.provider}-${v.voice}`} value={v.voice}>{v.voice} · {v.gender}{v.dialect ? ` · ${v.dialect}` : ""}</option>)}
+            </select></label>))}
+        {lbl("Speech-to-text model", <input id="node-ov-stt" className="w-full font-mono text-xs" placeholder="e.g. whisper-large-v3-turbo" value={String(ov.stt_model ?? "")}
+          onChange={e => put("stt_model", e.target.value)} />, "A model of the agent's speech-to-text connection.")}</div>
+      <div className="rounded-lg border border-line p-2"><div className="mb-1 text-xs font-semibold">Language model</div>
+        <div className="grid grid-cols-2 gap-2">
+          {lbl("Model", <input id="node-ov-model" className="w-full font-mono text-xs" value={String(llm.model ?? "")} onChange={e => putIn("llm", "model", e.target.value)} />)}
+          {lbl("Temperature (0-2)", <NumField id="node-ov-temp" min={0} max={2} step={0.05} value={llm.temperature as number | undefined} onChange={v => putIn("llm", "temperature", v)} />)}
+        </div><div className="text-[11px] text-muted">A model of the agent's language-model connection.</div></div>
+      <div className="rounded-lg border border-line p-2"><div className="mb-1 text-xs font-semibold">Call settings</div>
+        <label className="mb-2 block text-[11px]"><span className="text-muted">Interruptions</span>
+          <select id="node-ov-interrupt" className="mt-0.5 w-full text-xs" value={call.interrupt === undefined ? "" : String(call.interrupt)}
+            onChange={e => putIn("call", "interrupt", e.target.value === "" ? undefined : e.target.value === "true")}>
+            <option value="">keep</option><option value="true">allowed</option><option value="false">not allowed</option></select></label>
+        <div className="grid grid-cols-2 gap-2">
+          {lbl("Response delay (ms, 100-1500)", <NumField id="node-ov-delay" min={100} max={1500} step={50} value={num("response_delay_ms")} onChange={v => putIn("call", "response_delay_ms", v)} />)}
+          {lbl("Inactivity timeout (s, 5-60)", <NumField id="node-ov-inactive" min={5} max={60} value={num("inactivity_s")} onChange={v => putIn("call", "inactivity_s", v)} />)}
+          {lbl("Min. interruption (ms, 200-1500)", <NumField id="node-ov-minint" min={200} max={1500} step={50} value={num("min_interruption_ms")} onChange={v => putIn("call", "min_interruption_ms", v)} />)}
+          {lbl("VAD threshold (0.2-0.9)", <NumField id="node-ov-vad" min={0.2} max={0.9} step={0.05} value={num("vad_threshold")} onChange={v => putIn("call", "vad_threshold", v)} />)}
+        </div></div>
+    </div>
+  );
+}
+
+/** Agent node: which agent takes the call, what it inherits, what is said first. */
+function AgentOptions({ node, onChange }: { node: FlowNode; onChange: (p: Partial<FlowNode>) => void }) {
+  const agents = useQuery({ queryKey: ["agents"], queryFn: api.agents, staleTime: 30_000 });
+  const known = (agents.data ?? []).some(a => a.id === node.agent);
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-2">
+      {lbl("Agent that takes the call", <select id="node-agent" className="w-full" value={known ? node.agent : node.agent ? "__other" : ""}
+        onChange={e => onChange({ agent: e.target.value === "__other" ? node.agent : e.target.value })}>
+        <option value="">choose an agent…</option>
+        {(agents.data ?? []).map(a => <option key={a.id} value={a.id}>{a.name} · {a.id}</option>)}
+        {node.agent && !known && <option value="__other">{node.agent} (not in this project)</option>}</select>,
+        "The agent must be published. It answers with its own voice, models, skills and tools.")}
+      {lbl("Or an agent id / template", <input id="node-agent-id" className="w-full font-mono text-xs" placeholder="{{ team_agent }}" value={node.agent ?? ""} onChange={e => onChange({ agent: e.target.value })} />)}
+      <label className="flex items-start gap-2 text-xs"><input id="node-handoff-history" type="checkbox" className="mt-0.5" checked={!!node.handoff_history}
+        onChange={e => onChange({ handoff_history: e.target.checked || undefined })} /><span>Pass the conversation so far
+        <span className="block text-[11px] text-muted">The next agent continues without a new greeting.</span></span></label>
+      <label className="flex items-start gap-2 text-xs"><input id="node-handoff-vars" type="checkbox" className="mt-0.5" checked={!!node.handoff_variables}
+        onChange={e => onChange({ handoff_variables: e.target.checked || undefined })} /><span>Pass the collected variables</span></label>
+      {lbl("Say before the hand-off", <LangFields id="node-agent-say" value={node.say} onChange={v => onChange({ say: v })} />, "Optional. {{ variable }} allowed.")}
+      <p className="text-[11px] text-muted">If the agent can't take the call (unknown, not published, or too many hand-offs), the “On failure” transition runs — without one, a person takes over.</p>
+    </div>
+  );
+}
+
+/** Transfer node: its own destination, warm / cold, announcement, ring timeout, SIP headers. */
+function TransferOptions({ node, onChange }: { node: FlowNode; onChange: (p: Partial<FlowNode>) => void }) {
+  const cold = node.transfer_type === "cold";
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-2">
+      {lbl("Transfer to", <input id="node-destination" className="w-full font-mono" placeholder="+966112345678 or an extension" value={node.destination ?? ""}
+        onChange={e => onChange({ destination: e.target.value || undefined })} />, "Empty: the agent's human-transfer destination (Settings). {{ variable }} allowed.")}
+      {lbl("Type", <select id="node-transfer-type" className="w-full" value={cold ? "cold" : "warm"}
+        onChange={e => onChange({ transfer_type: e.target.value === "cold" ? "cold" : undefined })}>
+        <option value="warm">Warm — say a line first, then connect</option><option value="cold">Cold — connect at once, silently</option></select>)}
+      {!cold && lbl("Announcement", <LangFields id="node-transfer-say" value={node.say} onChange={v => onChange({ say: v })} />, "Empty: the standard hand-off line. {{ variable }} allowed.")}
+      {lbl("Ring timeout (s)", <NumField id="node-transfer-timeout" min={1} max={60} value={node.timeout_s} onChange={v => onChange({ timeout_s: v })} />, "1-60. Sent to the phone system with the transfer.")}
+      {lbl("SIP headers (JSON)", <JsonField id="node-headers" rows={3} value={node.headers ?? {}} onChange={v => onChange({ headers: v as FlowNode["headers"] })} />, '{"X-Customer-Id": "{{ customer_id }}"}')}
+    </div>
+  );
+}
+
 function NodeInspector({ node, isStart, tools, skills, variables, renameRef, toolInfo, globalEdges, onChange, onRename, onPickTool, onStart,
-  onDelete, onAddGlobal, onOpenEdge, others, onConnectFrom, onConnectTo }: {
-  node: FlowNode; isStart: boolean; tools: string[]; skills: string[]; variables: string[];
+  onDelete, onAddGlobal, onOpenEdge, others, onConnectFrom, onConnectTo, varGroups }: {
+  node: FlowNode; isStart: boolean; tools: string[]; skills: string[]; variables: string[]; varGroups: VarGroup[];
   others: string[]; onConnectFrom: (src: string) => void; onConnectTo: (dst: string) => void;
   renameRef: React.MutableRefObject<HTMLInputElement | null>; toolInfo?: CanvasProps["toolInfo"];
   globalEdges: { e: FlowEdge; gi: number }[];
@@ -484,7 +743,7 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <span className={cx("flex h-7 w-7 items-center justify-center rounded-md text-xs text-white", t.color)}>{t.icon}</span>
+        <span className={cx("flex h-7 w-7 items-center justify-center rounded-md text-white", t.color)}><NodeIcon type={node.type} size={15} /></span>
         <div><div className="text-sm font-semibold">{t.label}</div><div className="text-[11px] text-muted">{t.hint}</div></div>
       </div>
       {lbl("Name", <div className="flex gap-2"><input ref={renameRef} id="node-id" className="min-w-0 flex-1 font-mono" value={id}
@@ -505,10 +764,28 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
         <div className="mt-1 text-[10px] text-muted">Or drag from a transition row's ● on the canvas. Then set the condition.</div>
       </div>
       {node.type === "conversation" && <>
-        {lbl("Prompt (what the agent does at this step)", <textarea id="node-instr" rows={9} className={cx("w-full text-xs", !node.instructions && "border-warn")}
+        <div role="tablist" className="grid grid-cols-2 gap-1 rounded-lg bg-soft p-1 text-xs">
+          {([["prompt", "Prompt — the agent writes it"], ["static", "Static — said exactly"]] as const).map(([m, label]) => (
+            <button key={m} role="tab" aria-selected={(m === "static") === !!node.say} id={`node-mode-${m}`}
+              onClick={() => onChange({ say: m === "static" ? { ar: "", en: "" } : undefined })}
+              className={cx("rounded-md px-2 py-1.5", (m === "static") === !!node.say ? "bg-panel font-medium shadow-sm" : "text-muted hover:text-ink")}>{label}</button>))}
+        </div>
+        {node.say && <>
+          <VariablePicker groups={varGroups} fields={[
+            { id: "node-say-ar", value: node.say.ar ?? "", onChange: v => onChange({ say: { ...node.say, ar: v } }) },
+            { id: "node-say-en", value: node.say.en ?? "", onChange: v => onChange({ say: { ...node.say, en: v } }) }]} />
+          {lbl("Message (Arabic)", <textarea id="node-say-ar" rows={2} dir="rtl" className="w-full text-sm" value={node.say.ar ?? ""} onChange={e => onChange({ say: { ...node.say, ar: e.target.value } })} />)}
+          {lbl("Message (English)", <textarea id="node-say-en" rows={2} className="w-full text-sm" value={node.say.en ?? ""} onChange={e => onChange({ say: { ...node.say, en: e.target.value } })} />,
+            "Said word for word when the flow reaches this step — no model call. Use {{ variable }} to fill in values.")}
+          <label className="flex items-center gap-2 text-xs"><input id="node-skip" type="checkbox" checked={!!node.skip_response}
+            onChange={e => onChange({ skip_response: e.target.checked || undefined })} />Don't wait for the caller — go straight to the next step</label>
+        </>}
+        <VariablePicker groups={varGroups} fields={[{ id: "node-instr", value: node.instructions ?? "", onChange: v => onChange({ instructions: v }) }]} />
+        {lbl(node.say ? "Prompt for the caller's reply (optional)" : "Prompt (what the agent does at this step)", <textarea id="node-instr" rows={node.say ? 4 : 9} className={cx("w-full text-xs", !node.instructions && !node.say && "border-warn")}
           dir="auto" value={node.instructions ?? ""} placeholder={'e.g. Ask exactly: "Would you like the earliest available appointment, or a specific date?"'}
           onChange={e => onChange({ instructions: e.target.value })} />,
-          node.instructions ? "Rules for the whole call belong in Global settings (⚙)." : "A prompt is required — what should the agent say or do here?")}
+          node.say ? "If the caller replies and no transition fires, the agent follows this prompt. Empty: the message is said again."
+          : node.instructions ? "Rules for the whole call belong in Global settings (⚙)." : "A prompt is required — what should the agent say or do here?")}
         <div><div className="mb-1 text-xs font-medium">Variables to collect from the caller's words</div>
           {variables.map(v => (
             <label key={v} className="flex items-center gap-1.5 text-[11px]"><input type="checkbox" checked={(node.extract ?? []).includes(v)}
@@ -518,6 +795,17 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
           <div className="max-h-40 space-y-0.5 overflow-y-auto">{tools.map(tl => (
             <label key={tl} className="flex items-center gap-1.5 text-[11px]"><input type="checkbox" checked={(node.tools ?? []).includes(tl)}
               onChange={() => onChange({ tools: toggle(node.tools, tl) })} /><span className="font-mono">{tl}</span></label>))}</div></div>
+        <CaptureFields node={node} onChange={onChange} />
+        <details className="rounded-lg border border-line p-2" open={!!node.llm?.model || node.llm?.temperature != null}>
+          <summary className="cursor-pointer text-xs font-medium">Model for this step</summary>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {lbl("Model", <input id="node-llm-model" className="w-full font-mono text-xs" placeholder="the agent's model" value={node.llm?.model ?? ""}
+              onChange={e => onChange({ llm: { ...node.llm, model: e.target.value || undefined } })} />)}
+            {lbl("Temperature (0-2)", <NumField id="node-llm-temp" min={0} max={2} step={0.05} value={node.llm?.temperature}
+              onChange={v => onChange({ llm: { ...node.llm, temperature: v } })} />)}
+          </div>
+          <div className="mt-1 text-[11px] text-muted">Replies at this step use this model of the agent's language-model connection. Empty: the agent's own.</div>
+        </details>
         {lbl("Tools the platform calls on arrival (JSON)", <JsonField id="node-auto" value={node.auto_call} onChange={v => onChange({ auto_call: v as FlowNode["auto_call"] })} />,
           '[{"tool": "name", "args": {"id": "slots.order_id"}, "blocking": true}]')}
       </>}
@@ -532,14 +820,20 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
           'Values: "slots.x" (collected), "parsed.mobile", "=text" (literal), "{{ var }}" (template)')}
         {lbl("Outputs (JSON)", <JsonField id="node-outputs" rows={3} value={node.outputs ?? {}} onChange={v => onChange({ outputs: v as FlowNode["outputs"] })} />,
           '{"patient_count": "result.count"} — values from the tool\'s result saved as variables on success')}
+        <ToolOptions node={node} onChange={onChange} />
       </>}
       {node.type === "set" && lbl("Values (JSON) · \"=text\" literal, \"slots.x\" a value, \"{{ … }}\" a template", <JsonField id="node-set" rows={5} value={node.set} onChange={v => onChange({ set: v as FlowNode["set"] })} />,
         '{"tries": "=1", "old_value": null}  — null forgets a value')}
-      {node.type === "transfer" && lbl("Reason (logged)", <input id="node-reason" className="w-full" value={node.reason ?? ""} onChange={e => onChange({ reason: e.target.value })} />)}
+      {node.type === "transfer" && <>
+        {lbl("Reason (logged)", <input id="node-reason" className="w-full" value={node.reason ?? ""} onChange={e => onChange({ reason: e.target.value })} />)}
+        <TransferOptions node={node} onChange={onChange} />
+      </>}
       {node.type === "end" && <>
         {lbl("Final message (Arabic)", <input id="node-say-ar" dir="rtl" className="w-full" value={node.say?.ar ?? ""} onChange={e => onChange({ say: { ...node.say, ar: e.target.value } })} />)}
-        {lbl("Final message (English)", <input id="node-say-en" className="w-full" value={node.say?.en ?? ""} onChange={e => onChange({ say: { ...node.say, en: e.target.value } })} />, "Leave both empty for a silent end.")}
+        {lbl("Final message (English)", <input id="node-say-en" className="w-full" value={node.say?.en ?? ""} onChange={e => onChange({ say: { ...node.say, en: e.target.value } })} />, "Leave both empty for a silent end. Use {{ variable }} to fill in values.")}
       </>}
+      {node.type === "settings" && <SettingsOptions node={node} onChange={onChange} />}
+      {node.type === "agent" && <AgentOptions node={node} onChange={onChange} />}
       {node.type === "skill" && lbl("Continue in skill", <select id="node-skill" className="w-full" value={node.skill ?? ""} onChange={e => onChange({ skill: e.target.value })}>
         <option value="">choose…</option>{skills.map(s => <option key={s}>{s}</option>)}</select>)}
       <div className="rounded-lg border border-line p-2">
@@ -557,23 +851,87 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
   );
 }
 
-const MODES = ["always", "llm", "replied", "filled", "empty", "equals", "stage", "json"] as const;
+const MODES = ["always", "llm", "replied", "filled", "empty", "equals", "stage", "dtmf", "json"] as const;
+const KEYPAD = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+
+/** Options of a transition: ask yes / no first, arrive silently, and (global ones) return afterwards. */
+function EdgeOptions({ edge, onChange }: { edge: FlowEdge; onChange: (e: FlowEdge) => void }) {
+  const global = edge.from === "*";
+  const flip = (k: "back" | "confirm" | "silent", on: boolean) => { const next = { ...edge }; if (on) next[k] = true as never; else delete next[k]; onChange(next); };
+  return (
+    <div className="space-y-1.5 rounded-lg border border-line p-2 text-xs">
+      <div className="font-medium">When this transition is taken</div>
+      <label className="flex items-start gap-2"><input id="edge-confirm" type="checkbox" className="mt-0.5" checked={!!edge.confirm} onChange={e => flip("confirm", e.target.checked)} />
+        <span>Ask the caller to confirm first<span className="block text-[11px] text-muted">The agent asks “Just to confirm…”; only a yes goes on.</span></span></label>
+      <label className="flex items-start gap-2"><input id="edge-silent" type="checkbox" className="mt-0.5" checked={!!edge.silent} onChange={e => flip("silent", e.target.checked)} />
+        <span>Go there silently<span className="block text-[11px] text-muted">The step says nothing (no goodbye, no hand-off line).</span></span></label>
+      {global && <label className="flex items-start gap-2"><input id="edge-back" type="checkbox" className="mt-0.5" checked={!!edge.back} onChange={e => flip("back", e.target.checked)} />
+        <span>Return to where the caller was afterwards<span className="block text-[11px] text-muted">Once the caller has replied to this step, the call goes back to the step they interrupted.</span></span></label>}
+    </div>
+  );
+}
+const CMP_KEYS = CMP.map(c => c[0]);
+
+/** One comparison: variable · operator · value, stored as {op: {variable: value}}. */
+function CompareFields({ when, onChange }: { when: Record<string, unknown>; onChange: (w: Record<string, unknown>) => void }) {
+  const op = CMP_KEYS.find(k => k in when) ?? "ne";
+  const [variable, value] = Object.entries((when[op] ?? {}) as Record<string, unknown>)[0] ?? ["", ""];
+  const numeric = ["gt", "gte", "lt", "lte"].includes(op);
+  const put = (o: string, v: string, val: unknown) => onChange({ [o]: { [v]: numeric && o === op && val !== "" && !isNaN(Number(val)) ? Number(val) : val } });
+  return (
+    <div className="space-y-2">
+      {lbl("Variable", <input id="edge-cmp-var" className="w-full font-mono" value={variable} onChange={e => put(op, e.target.value, value)} />)}
+      {lbl("Operator", <select id="edge-cmp-op" className="w-full" value={op} onChange={e => put(e.target.value, variable, value)}>
+        {CMP.map(([k, label]) => <option key={k} value={k}>{label}</option>)}</select>)}
+      {lbl(op === "regex" ? "Pattern (regular expression)" : "Value", <input id="edge-cmp-val" className="w-full font-mono" value={String(value ?? "")} onChange={e => put(op, variable, e.target.value)} />,
+        numeric ? "Compared as numbers; a value that isn't a number never matches." : undefined)}
+    </div>
+  );
+}
+
+/** Header pill: the flow is fine / has warnings / has errors; the list jumps to the node ("Focus"). */
+function ValidationBadge({ issues, open, onToggle, onFocus }: { issues: Issue[]; open: boolean; onToggle: () => void; onFocus: (id: string) => void }) {
+  const errors = issues.filter(i => i.level === "error"), warnings = issues.length - errors.length;
+  const tone = errors.length ? "border-bad/50 bg-bad/10 text-bad" : warnings ? "border-warn/50 bg-warn/10 text-warn" : "border-good/40 bg-good/10 text-good";
+  return (
+    <div className="relative">
+      <button id="flow-validation" onClick={onToggle} aria-expanded={open} title="Flow validation"
+        className={cx("flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium", tone)}>
+        {errors.length ? `✕ ${errors.length} error${errors.length > 1 ? "s" : ""}` : warnings ? `⚠ ${warnings} warning${warnings > 1 ? "s" : ""}` : "✓ Valid"}
+        {errors.length > 0 && warnings > 0 && <span>· {warnings} ⚠</span>}</button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 max-h-80 w-80 overflow-y-auto rounded-xl border border-line bg-panel p-2 shadow-xl">
+          <div className="px-1 pb-1 text-sm font-semibold">Validation</div>
+          {issues.length === 0 && <div className="px-1 py-3 text-xs text-muted">No problems found in this flow.</div>}
+          {[...errors, ...issues.filter(i => i.level === "warning")].map((i, k) => (
+            <div key={k} className="flex items-start gap-2 rounded-lg px-1.5 py-1.5 text-xs hover:bg-soft">
+              <span className={i.level === "error" ? "text-bad" : "text-warn"}>{i.level === "error" ? "✕" : "⚠"}</span>
+              <span className="min-w-0 flex-1">{i.node && <span className="mr-1 font-mono font-semibold">{i.node}</span>}{i.msg}</span>
+              {i.node && <button className="shrink-0 font-medium text-accent-text hover:underline" onClick={() => onFocus(i.node!)}>Focus</button>}
+            </div>))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
   edge: FlowEdge; order: number; fromTool: boolean; targets: string[]; onChange: (e: FlowEdge) => void; onDelete: () => void;
 }) {
   const w = edge.when ?? {};
   const keys = Object.keys(w);
-  const initialMode = edge.on ? "result" : !keys.length ? "always" : keys.length === 1 && MODES.includes(keys[0] as never) ? keys[0] : "json";
+  const initialMode = edge.on ? "result" : !keys.length ? "always" : keys.length === 1 && MODES.includes(keys[0] as never) ? keys[0]
+    : keys.length === 1 && CMP_KEYS.includes(keys[0]) ? "compare" : "json";
   const [mode, setMode] = useState<string>(initialMode);
-  const set = (when?: Record<string, unknown>, on?: string) => onChange({ from: edge.from, to: edge.to, ...(when ? { when } : {}), ...(on ? { on } : {}) });
+  const keep = { ...(edge.back ? { back: true } : {}), ...(edge.confirm ? { confirm: edge.confirm } : {}), ...(edge.silent ? { silent: true } : {}) };
+  const set = (when?: Record<string, unknown>, on?: string) => onChange({ from: edge.from, to: edge.to, ...(when ? { when } : {}), ...(on ? { on } : {}), ...keep });
   const list = (v: unknown) => (Array.isArray(v) ? v.join(", ") : "");
   return (
     <div className="space-y-3">
       <div className="text-xs">Transition {order} of <span className="font-mono">{edge.from === "*" ? "Anywhere" : edge.from}</span> → {" "}
         <select id="edge-target" className="text-xs" value={edge.to} onChange={e => onChange({ ...edge, to: e.target.value })}>
           {targets.map(t => <option key={t}>{t}</option>)}</select></div>
-      {lbl("Follow this transition when", <select id="edge-mode" className="w-full" value={mode} onChange={e => { setMode(e.target.value); if (e.target.value === "always") set(); }}>
+      {lbl("Follow this transition when", <select id="edge-mode" className="w-full" value={mode} onChange={e => { setMode(e.target.value); if (e.target.value === "always") set(); else if (e.target.value === "dtmf" && !w.dtmf) set({ dtmf: "1" }); else if (e.target.value === "compare" && !CMP_KEYS.some(k => k in w)) set({ ne: { "": "" } }); }}>
         <option value="always">always (keep it last)</option>
         {fromTool && <option value="result">the tool succeeded / failed</option>}
         <option value="llm">the caller's words mean …</option>
@@ -581,7 +939,9 @@ function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
         <option value="filled">these values are known</option>
         <option value="empty">these values are missing</option>
         <option value="equals">a value equals …</option>
+        <option value="compare">a value is not / greater / less / contains / matches …</option>
         <option value="stage">caller-verification stage is …</option>
+        <option value="dtmf">the caller presses a key …</option>
         <option value="json">advanced (JSON)</option>
       </select>, "A node's transitions are tried top to bottom, then the ones from Anywhere; the first that holds wins.")}
       {mode === "replied" && w.replied !== true && <Button onClick={() => set({ replied: true })}>Use this condition</Button>}
@@ -594,25 +954,57 @@ function EdgeInspector({ edge, order, fromTool, targets, onChange, onDelete }: {
       {(mode === "filled" || mode === "empty") && lbl("Values (comma-separated)", <input id="edge-list" className="w-full font-mono" value={list(w[mode])}
         onChange={e => set({ [mode]: e.target.value.split(",").map(s => s.trim()).filter(Boolean) })} />)}
       {mode === "equals" && lbl("Value = (JSON)", <JsonField id="edge-eq" value={w.equals} onChange={v => set({ equals: v as Record<string, unknown> })} rows={2} />, '{"intent": "book"} or {"verified": true}')}
+      {mode === "compare" && <CompareFields when={w} onChange={v => set(v)} />}
+      {mode === "dtmf" && <div>
+        <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Keypad">{KEYPAD.map(k => (
+          <button key={k} type="button" id={`edge-key-${k === "*" ? "star" : k === "#" ? "hash" : k}`} aria-pressed={w.dtmf === k} onClick={() => set({ dtmf: k })}
+            className={cx("rounded-lg border py-2 text-sm font-semibold", w.dtmf === k ? "border-accent bg-accent/10" : "border-line hover:bg-soft")}>{k}</button>))}</div>
+        <p className="mt-1 text-[11px] text-muted">Phone callers press a key to take this transition (a menu choice). From “Anywhere” it works at every step — e.g. 0 for an operator. Digits can't be transitions on a step that collects digits; use * or #.</p>
+      </div>}
       {mode === "stage" && <select id="edge-stage" className="w-full" value={String(w.stage ?? "")} onChange={e => set({ stage: e.target.value })}>
         {["awaiting_mobile", "awaiting_dob_and_name", "send_otp", "awaiting_otp", "verified"].map(s => <option key={s}>{s}</option>)}</select>}
       {mode === "json" && lbl("Condition (JSON)", <JsonField id="edge-json" value={edge.when} onChange={v => set(v as Record<string, unknown>, edge.on)} rows={6} />,
-        "all / any / filled / empty / not_all_filled / equals / stage / llm / replied — can be combined with On success / failure")}
+        "all / any / filled / empty / not_all_filled / equals / ne / gt / gte / lt / lte / contains / not_contains / regex / stage / llm / replied — can be combined with On success / failure")}
+      <EdgeOptions edge={edge} onChange={onChange} />
       <Button kind="danger" onClick={onDelete}>Delete transition</Button>
     </div>
   );
 }
 
-function Variables({ vars, infer, onChange }: {
-  vars: NonNullable<FlowGraph["variables"]>; infer?: Record<string, unknown>; onChange: (v: NonNullable<FlowGraph["variables"]>) => void;
+function Variables({ vars, infer, system, custom, onChange }: {
+  vars: NonNullable<FlowGraph["variables"]>; infer?: Record<string, unknown>; system: SysVar[];
+  custom: Record<string, { type?: string; default?: unknown; description?: string }>;
+  onChange: (v: NonNullable<FlowGraph["variables"]>) => void;
 }) {
   const [name, setName] = useState("");
   const [q, setQ] = useState("");
   const fromTools = [...new Set(Object.values(infer ?? {}).flatMap(r => Object.keys(((r as { set?: object }).set) ?? {})))].sort();
   const match = (s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
+  const reserved = system.map(v => v.name);
+  const problem = name ? (nameProblem(name, [...reserved, ...Object.keys(custom)]) ?? (vars[name] ? "already exists" : null)) : null;
+  const groups = [...new Set(system.map(v => v.group))];
   return (
     <div className="space-y-3">
       <input id="var-search" className="w-full" placeholder="Search variables…" value={q} onChange={e => setQ(e.target.value)} />
+      <details className="rounded-lg border border-line p-2" open>
+        <summary className="cursor-pointer text-xs font-semibold">System variables <span className="font-normal text-muted">· {system.length}, always available</span></summary>
+        <div className="mt-1.5 space-y-2">
+          {groups.map(g => {
+            const rows = system.filter(v => v.group === g && (match(v.name) || match(v.description)));
+            return rows.length ? (
+              <div key={g}><div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{g}</div>
+                {rows.map(v => <div key={v.name} className="flex items-baseline justify-between gap-2 py-0.5 text-[11px]"><span className="font-mono">{v.name}</span>
+                  <span className="text-right text-muted">{v.description}</span></div>)}</div>) : null;
+          })}
+        </div>
+      </details>
+      <div>
+        <div className="mb-1 text-xs font-semibold">Custom variables <span className="font-normal text-muted">· {Object.keys(custom).length} · set in Global Settings → Variables, or passed as params when a call starts</span></div>
+        {Object.entries(custom).filter(([k]) => match(k)).map(([k, v]) => (
+          <div key={k} className="flex items-baseline justify-between gap-2 py-0.5 text-[11px]"><span className="font-mono">{k}</span>
+            <span className="text-right text-muted">{v.type ?? "string"}{v.description ? ` · ${v.description}` : ""}</span></div>))}
+        {!Object.keys(custom).length && <div className="text-[11px] text-muted">None yet.</div>}
+      </div>
       <div>
         <div className="mb-1 text-xs font-semibold">Call facts <span className="font-normal text-muted">· provided by the platform</span></div>
         {CALL_FACTS.filter(([k]) => match(k)).map(([k, d]) => (
@@ -629,8 +1021,9 @@ function Variables({ vars, infer, onChange }: {
             <div key={k} className="space-y-1.5 rounded-lg border border-line p-2">
               <div className="flex items-center justify-between"><span className="font-mono text-xs font-medium">{k}</span>
                 <Button kind="ghost" onClick={() => { const { [k]: _gone, ...rest } = vars; void _gone; onChange(rest); }}>Remove</Button></div>
+              {nameProblem(k, reserved) && <div className="text-[11px] text-bad">The name {nameProblem(k, reserved)}.</div>}
               <select className="w-full text-xs" value={v.type ?? "string"} onChange={e => onChange({ ...vars, [k]: { ...v, type: e.target.value } })}>
-                {["string", "integer", "number", "boolean", "date"].map(t => <option key={t}>{t}</option>)}</select>
+                {["string", "integer", "number", "boolean", "date", "array", "object"].map(t => <option key={t}>{t}</option>)}</select>
               <input className="w-full text-xs" placeholder="allowed values, comma-separated (optional)" value={(v.enum ?? []).join(", ")}
                 onChange={e => onChange({ ...vars, [k]: { ...v, enum: e.target.value.split(",").map(s => s.trim()).filter(Boolean) } })} />
               <textarea className="w-full text-xs" rows={2} placeholder="what it is (the model reads this)" value={v.description ?? ""}
@@ -639,9 +1032,12 @@ function Variables({ vars, infer, onChange }: {
           ))}
         </div>
       </div>
-      <form className="flex gap-2" onSubmit={e => { e.preventDefault(); if (name && !vars[name]) { onChange({ ...vars, [name]: { type: "string" } }); setName(""); } }}>
-        <input id="var-name" className="min-w-0 flex-1 font-mono text-xs" placeholder="new_variable" value={name} onChange={e => setName(e.target.value.replace(/[^\w]/g, ""))} />
-        <Button type="submit" disabled={!name}>+ Add variable</Button>
+      <form className="space-y-1" onSubmit={e => { e.preventDefault(); if (name && !problem) { onChange({ ...vars, [name]: { type: "string" } }); setName(""); } }}>
+        <div className="flex gap-2">
+          <input id="var-name" className="min-w-0 flex-1 font-mono text-xs" placeholder="new_variable" value={name} onChange={e => setName(e.target.value.replace(/[^\w]/g, ""))} />
+          <Button type="submit" disabled={!name || !!problem}>+ Add variable</Button>
+        </div>
+        {problem && <div className="text-[11px] text-bad">The name {problem}.</div>}
       </form>
     </div>
   );
