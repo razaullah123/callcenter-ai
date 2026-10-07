@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { api, ApiError, getDefaultProject, getProject, setDefaultProject, setProject, type AuditRow, type Invitation,
   type Member, type Project } from "./api";
 import { Button, Card, cx, fmtTime } from "./ui";
+import { RowMenu } from "./table";
 
 // Hamsa's project switcher (top bar, left): "My projects" (you own them, ★ = the one you open with) and "Invited
 // projects" (someone invited you; the owner is shown, ✎ gives it your own label), then Project settings, Create
@@ -274,26 +275,6 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function RowMenu({ items }: { items: { label: string; danger?: boolean; onClick: () => void }[] }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, []);
-  if (!items.length) return null;
-  return (
-    <div ref={ref} className="relative inline-block">
-      <button aria-label="More actions" className="rounded px-2 text-muted hover:bg-soft hover:text-ink" onClick={() => setOpen(o => !o)}>⋯</button>
-      {open && <div className="absolute right-0 z-30 mt-1 w-48 rounded-lg border border-line bg-panel p-1 shadow-lg">
-        {items.map(i => <button key={i.label} onClick={() => { setOpen(false); i.onClick(); }}
-          className={cx("block w-full rounded px-2 py-1.5 text-left text-sm hover:bg-soft", i.danger && "text-bad")}>{i.label}</button>)}
-      </div>}
-    </div>
-  );
-}
-
 function LinkBox({ link, emailed, email }: { link: string; emailed: boolean; email: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -361,7 +342,7 @@ function TeamMembers({ project, inviting, onInvited }: { project: string; inviti
                 <td className="py-2.5 capitalize">{r.role}</td>
                 <td className="py-2.5"><StatusBadge status={r.status} /></td>
                 <td className="py-2.5 text-right">
-                  {d.can_manage && <RowMenu items={r.kind === "member"
+                  {d.can_manage && (r.kind !== "member" || (r.role !== "owner" && !r.you)) && <RowMenu items={r.kind === "member"
                     ? (r.role === "owner" || r.you ? [] : [{ label: "Remove", danger: true,
                         onClick: () => setConfirm({ text: `Remove ${r.email} from this project?`, run: () => api.removeMember(project, r.user_id) }) }])
                     : [{ label: r.status === "expired" ? "Send a new invitation" : "New invitation link",
@@ -374,11 +355,12 @@ function TeamMembers({ project, inviting, onInvited }: { project: string; inviti
         </table>
       )}
       {confirm && (
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-bad/40 bg-bad/5 px-3 py-2 text-sm">
-          <span>{confirm.text}</span>
-          <span className="flex gap-2"><Button kind="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
-            <Button kind="danger" onClick={() => act.mutate(confirm.run)} disabled={act.isPending}>Yes</Button></span>
-        </div>)}
+        <Dialog title="Please confirm" onClose={() => { setConfirm(null); act.reset(); }}>
+          <p className="text-sm">{confirm.text}</p>
+          {!confirm && act.error && <div className="mt-2 text-xs text-bad">{errorText(act.error)}</div>}
+          <div className="mt-4 flex justify-end gap-2"><Button kind="ghost" onClick={() => { setConfirm(null); act.reset(); }}>Cancel</Button>
+            <Button kind="danger" onClick={() => act.mutate(confirm.run)} disabled={act.isPending}>{act.isPending ? "Working…" : "Yes"}</Button></div>
+        </Dialog>)}
       {act.error && <div className="mt-2 text-xs text-bad">{errorText(act.error)}</div>}
       {link && <Dialog title="Invitation link" onClose={() => setLink(null)}><LinkBox {...link} />
         <div className="mt-4 flex justify-end"><Button kind="primary" onClick={() => setLink(null)}>Done</Button></div></Dialog>}
