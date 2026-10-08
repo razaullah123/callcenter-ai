@@ -38,7 +38,8 @@ yes / no before taking it; a dict gives the question per language), silent (go t
 Node options: conversation `dtmf_capture` {variable, max_digits, end_keys, timeout_s} collects keypad digits into a
 variable; `skip_response` (static messages) moves on without waiting for the caller; transfer `destination`,
 `transfer_type` warm / cold, `timeout_s`, `headers`; tool `on_error` continue / retry / fail, `retries`, `timeout_s`,
-`processing` (said while it runs) and `say` (said after it succeeds).
+`processing` (said while it runs), `say` (said after it succeeds) and `error_say` (said when it fails). Any node may carry
+a `label` (the name shown on the canvas) and a `description` (a note for editors).
 Settings node: `overrides` {system_prompt, voice {ar, en}, stt_model, llm {model, temperature}, call {interrupt,
 response_delay_ms, inactivity_s, min_interruption_ms, vad_threshold}} apply from that node on, until another settings
 node changes them. Any conversation node may also set `llm` {model, temperature} for its own replies. Agent node:
@@ -97,6 +98,9 @@ class Node:
     agent: str = ""                      # agent node: the agent that takes the call
     handoff_history: bool = False       # agent node: pass the conversation on
     handoff_variables: bool = False     # agent node: pass the collected values on
+    label: str = ""                     # any node: the name shown on the canvas (the id stays the technical name)
+    description: str = ""               # any node: a note for the people editing the flow
+    error_say: dict[str, str] = field(default_factory=dict)      # tool: said when it fails, per language
 
 
 @dataclass
@@ -144,7 +148,9 @@ class Graph:
                         on_error=str(n.get("on_error") or ""), retries=int(n.get("retries") or 0),
                         processing=dict(n.get("processing") or {}), overrides=dict(n.get("overrides") or {}),
                         llm=dict(n.get("llm") or {}), agent=str(n.get("agent") or ""),
-                        handoff_history=bool(n.get("handoff_history")), handoff_variables=bool(n.get("handoff_variables")))
+                        handoff_history=bool(n.get("handoff_history")), handoff_variables=bool(n.get("handoff_variables")),
+                        label=str(n.get("label") or ""), description=str(n.get("description") or ""),
+                        error_say=dict(n.get("error_say") or {}))
             nodes[node.id] = node
         # `on:` unquoted in YAML is the boolean true — accept that, and `result:` as a clearer name
         edges = [Edge(str(e["from"]), str(e["to"]), e.get("when"), e.get("result") or e.get("on") or e.get(True),
@@ -182,7 +188,7 @@ class Graph:
             for k in ("instructions", "tools", "auto_call", "extract", "set", "tool", "args", "reason", "say", "skill",
                       "outputs", "position", "dtmf_capture", "skip_response", "destination", "transfer_type", "timeout_s",
                       "headers", "on_error", "retries", "processing", "overrides", "llm", "agent", "handoff_history",
-                      "handoff_variables"):
+                      "handoff_variables", "label", "description", "error_say"):
                 if (v := getattr(n, k)) not in (None, "", [], {}, False, 0):
                     d[k] = v
             return d

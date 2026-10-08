@@ -249,6 +249,7 @@ nodes:
     timeout_s: __TIMEOUT__
     processing: {en: "Checking, one moment.", ar: "لحظة"}
     say: {en: "Found it, {{ name }}.", ar: "لقيته"}
+    error_say: {en: "I could not look that up.", ar: "ما قدرت أدور"}
     outputs: {name: result.name}
   - {id: ok, type: conversation, instructions: "Tell them."}
   - {id: bad, type: conversation, instructions: "Apologise."}
@@ -304,6 +305,23 @@ async def test_tool_node_retry_stops_at_the_first_success(monkeypatch):
     llm.then("Done.")
     await agent.handle("find it")
     assert len(calls) == 2 and agent.skills.node("line", s).id == "ok"
+
+
+async def test_tool_node_says_its_error_message_when_it_fails(monkeypatch):          # Hamsa's errorMessage
+    agent, s, llm, out = await make_agent(tool_flow("continue"))
+    monkeypatch.setattr(Agent, "_execute_with_filler", fake_tool([BAD()], []))
+    llm.then("Sorry.")
+    await agent.handle("find it")
+    assert out.said[0] == "I could not look that up." and "Found it" not in " ".join(out.said)
+    assert agent.skills.node("line", s).id == "bad"
+
+
+def test_nodes_keep_their_label_and_description():
+    g = Graph.from_dict({"start": "s", "nodes": [{"id": "s", "type": "conversation", "label": "Start Node",
+                                                  "description": "Initial start node for the workflow."}]})
+    assert g.nodes["s"].label == "Start Node"
+    d = g.to_dict()["nodes"][0]
+    assert d["label"] == "Start Node" and d["description"] == "Initial start node for the workflow."
 
 
 async def test_tool_node_continue_does_not_retry(monkeypatch):

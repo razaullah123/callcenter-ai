@@ -54,10 +54,10 @@ def test_new_blank_agent_loads_without_verification(studio):
     assert agents["clinic-faq"]["version"] == 1 and agents["hmg-care"]["default"]
     agent = loop.run_until_complete(rt.loader.for_call(agent_id="clinic-faq"))
     assert agent.settings.require_verification is False and agent.settings.entry_skill == "clinic_faq_main"
-    assert agent.phrases.GREETING["en"] == "Hello, how can I help you?"
-    assert agent.skills.persona("en").startswith("You are a voice customer care agent")   # its own persona
+    assert agent.phrases.GREETING["en"] == "Hello, how can I help you today?"
+    assert agent.skills.persona("en").startswith("You are a helpful assistant that will answer users questions")   # its own persona
     detail = c.get("/api/agents/clinic-faq").json()
-    assert detail["skills"]["clinic_faq_main"]["flow"]["graph"]["start"] == "talk"
+    assert detail["skills"]["clinic_faq_main"]["flow"]["graph"]["start"] == "start"
     assert detail["skills"]["_persona"]["library"] == "clinic_faq_persona"
     assert c.post("/api/agents", json={"name": "Clinic FAQ"}).status_code == 409
 
@@ -68,7 +68,7 @@ def test_canvas_edit_is_a_draft_until_published(studio):
     graph = c.get("/api/agents/clinic-faq").json()["skills"]["clinic_faq_main"]["flow"]["graph"]
     graph["nodes"].append({"id": "bye", "type": "end", "say": {"en": "Goodbye!", "ar": "مع السلامة"},
                            "position": {"x": 300, "y": 0}})
-    graph["edges"].append({"from": "talk", "to": "bye", "when": {"llm": "the caller says goodbye"}})
+    graph["edges"].append({"from": "start", "to": "bye", "when": {"llm": "the caller says goodbye"}})
     r = c.put("/api/agents/clinic-faq/draft/skills/clinic_faq_main", json={"graph": graph})
     assert r.status_code == 200, r.text and r.json()["version"] == 2
     detail = c.get("/api/agents/clinic-faq").json()
@@ -78,7 +78,7 @@ def test_canvas_edit_is_a_draft_until_published(studio):
     draft = loop.run_until_complete(rt.loader.load_draft("clinic-faq"))
     assert "bye" in draft.skills.graph("clinic_faq_main").nodes                    # test calls see the draft
     # a broken graph never becomes a version
-    bad = dict(graph, edges=graph["edges"] + [{"from": "talk", "to": "nowhere"}])
+    bad = dict(graph, edges=graph["edges"] + [{"from": "start", "to": "nowhere"}])
     r = c.put("/api/agents/clinic-faq/draft/skills/clinic_faq_main", json={"graph": bad})
     assert r.status_code == 422 and "nowhere" in r.text
     # publish → v2 for callers, draft cleared

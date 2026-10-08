@@ -47,16 +47,19 @@ description: {description}
 You are the voice agent for {name}. Keep replies short: one or two sentences and one question at a time.
 Answer only from what you know for certain; if the caller needs something you can't do, offer to transfer them.
 """
-BLANK_FLOW = {"start": "talk", "nodes": [{"id": "talk", "type": "conversation",
-                                           "instructions": "Help the caller with their question.",
-                                           "position": {"x": 0, "y": 0}}], "edges": []}
+# What a new agent starts with, like Hamsa's: one Start node (a conversation node, no transitions yet), a general
+# "helpful assistant" prompt and a plain greeting.
+BLANK_FLOW = {"start": "start", "nodes": [{"id": "start", "type": "conversation", "label": "Start Node",
+                                            "description": "Initial start node for the workflow.",
+                                            "instructions": "You are a helpful assistant.",
+                                            "position": {"x": 0, "y": 0}}], "edges": []}
 BLANK_PERSONA = """---
 routable: false
 ---
 ## ar
-أنت موظف خدمة عملاء صوتي. تكلم بجمل قصيرة ومحترمة، وسؤال واحد بس في كل رد.
+أنت مساعد مفيد تجيب على أسئلة المستخدمين.
 ## en
-You are a voice customer care agent. Be warm and brief: one or two sentences, one question per reply.
+You are a helpful assistant that will answer users questions.
 """
 
 
@@ -207,7 +210,7 @@ async def _blank_bundle(rt, store, agent_id: str, body: NewAgent) -> dict:
     if servers and server not in servers:
         server = servers[0]
     phrases = Phrases.defaults()
-    phrases["GREETING"] = {"ar": "مرحباً، كيف أقدر أخدمك؟", "en": "Hello, how can I help you?"}
+    phrases["GREETING"] = {"ar": "مرحباً، كيف أقدر أساعدك اليوم؟", "en": "Hello, how can I help you today?"}
     return {"schema": SCHEMA, "agent": {"name": body.name, "languages": ["ar", "en"], "default_language": "ar",
                                         "type": body.type},
             "models": models,

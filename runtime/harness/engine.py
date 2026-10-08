@@ -378,6 +378,9 @@ class Agent:
                 if result.ok and node.say and (line := self._flow_line(node)):     # the node's own spoken result
                     await self._say(line)
                     self.s.history.append({"role": "assistant", "content": line})
+                if not result.ok and node.error_say and (line := self._flow_line(node, "error_say")):   # Hamsa's errorMessage
+                    await self._say(line)
+                    self.s.history.append({"role": "assistant", "content": line})
                 if not result.ok and node.on_error == "fail":
                     await self._handoff(f"flow: tool {node.tool} failed", ev)
                 if self.s.handoff or self.s.ended:
@@ -420,9 +423,10 @@ class Agent:
                 ev.emit(EventType.SKILL_ENTER, skill=target, routed_by="flow")
         return False
 
-    def _flow_line(self, node) -> str:
-        """A node's fixed line in the call language (any language when that one is missing), with {{ }} filled in."""
-        line = node.say.get(self.s.language.language) or next(iter(node.say.values()), "")
+    def _flow_line(self, node, field: str = "say") -> str:
+        """A node's fixed line (`say`, or `error_say`) in the call language (any language when that one is missing), with {{ }} filled in."""
+        lines = getattr(node, field)
+        line = lines.get(self.s.language.language) or next(iter(lines.values()), "")
         if line and is_template(line):
             line = render(line, {"slots": self.s.slots, **template_vars(self.s)})
         return line.strip()

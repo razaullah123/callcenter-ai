@@ -35,3 +35,10 @@ Written 2026-10-07. Everything not listed here is built and tested; see `docs/ha
 
 - Web tools from a real website with a real microphone call (`docs/examples/web-tools-demo.html`).
 - Recording and web-tools behaviour under several server workers.
+
+## 5. Flow nodes: small gaps against Hamsa (2026-10-08)
+
+- Put the caller on hold while a tool node runs.
+- AI-generated (prompt-type) lines for tool processing messages and end-call farewells; today they are fixed text.
+- Change-settings node: expressiveness and pronunciation dictionaries (need those settings first).
+- Timeout on the transfer-to-agent node; per-variable type and description in the set node.

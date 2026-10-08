@@ -689,3 +689,23 @@ Hamsa's sidebar has no Skills, Agent models, Connections, Evals or Playground. W
 
 Only the sidebar entries are commented out (`console/src/App.tsx`, `GROUPS`); the routes `/providers`, `/evals` and `/playground` still work, so
 links and bookmarks keep working. To bring one back, uncomment its line.
+
+
+## Flow nodes: Hamsa docs (docs.tryhamsa.com/agents/flow-agent/nodes) against ours — 2026-10-08
+
+Hamsa has 10 node types. Ours (canvas `TYPES`) covers them; the only differences are small:
+
+| Hamsa node | Ours | Notes |
+|---|---|---|
+| Start (conversation or tool mode; mandatory) | the flow's `start` node, any type (conversation, or a tool node = tool mode) | Added: the start node can't be deleted (move "start" to another node first); new agents begin with one start node (label "Start Node", prompt "You are a helpful assistant."); play icon |
+| Conversation (prompt / static, extract variables, DTMF capture, transitions, global) | conversation | same; Jinja `{{ }}` templates |
+| Tool (timeout, onErrorBehavior continue/retry/fail, errorMessage, customResponse, outputMapping, processing message, putOnHold) | tool | Added `error_say` (errorMessage). Not built: put the caller on hold while the tool runs; processing message as an AI-generated line (ours is fixed text) |
+| Web Tool (browser tools, web calls only) | a tool node that calls a web-source tool (`source: web`) | same limit: web calls only |
+| Router (equation / always; ==, !=, >, <, >=, <=, contains, not_contains, regex, exists, not_exists, all / any) | router | same operators |
+| Transfer Call (E.164, warm / cold, message, timeout 1-60 s, SIP headers, global) | transfer | same |
+| Transfer Agent (agentId, handoffConversation, handoffVariables, message, timeout, global) | agent | same, except a per-node timeout |
+| End Call (final message static or prompt, silent) | end | static message or silent; AI-generated farewell not built |
+| Set Local Variables (string / number / boolean / array / object, `{{ }}`) | set | values are expressions / templates; no per-variable type or description field |
+| Change Agent Settings (system prompt, voice, expressiveness, STT model, dictionaries, interrupt, response delay, inactivity, min interruption, VAD) | settings | same, except expressiveness and pronunciation dictionaries (we have neither setting) |
+| Global nodes (prompt / DTMF trigger, return to source, double confirm, skip response) | "reach from anywhere" edges with `back`, `confirm`, `silent` | same |
+| Node `label` and `description` | added: optional `label` (shown on the canvas) and `description` | |

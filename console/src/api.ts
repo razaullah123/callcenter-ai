@@ -172,7 +172,7 @@ export type ImportResult = {
   stats: { nodes: number; edges: number; tools: number; variables: number };
 };
 export type FlowNode = {
-  id: string; type: string; instructions?: string; tools?: string[]; auto_call?: Record<string, unknown>[];
+  id: string; type: string; label?: string; description?: string; instructions?: string; tools?: string[]; auto_call?: Record<string, unknown>[];
   extract?: string[]; set?: Record<string, unknown>; tool?: string; args?: Record<string, unknown>; reason?: string;
   say?: Record<string, string>; skill?: string; position?: { x: number; y: number };
   /** tool nodes: slot ← path in the tool's result ("result.count") */
@@ -184,7 +184,7 @@ export type FlowNode = {
   /** transfer: own number / extension, warm (announce) or cold, ring timeout, SIP headers */
   destination?: string; transfer_type?: string; timeout_s?: number; headers?: Record<string, string>;
   /** tool: continue / retry / fail, extra attempts, said while it runs */
-  on_error?: string; retries?: number; processing?: Record<string, string>;
+  on_error?: string; retries?: number; processing?: Record<string, string>; error_say?: Record<string, string>;
   /** settings node: what changes from here on · conversation: model / temperature for this step */
   overrides?: Record<string, unknown>; llm?: { model?: string; temperature?: number };
   /** agent node: the agent that takes the call, and what it inherits */

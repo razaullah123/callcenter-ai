@@ -199,15 +199,15 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
       data.active && "!border-brand shadow-[0_0_0_4px_rgba(230,58,64,0.3)]")}>
       {!anywhere && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-400" />}
       <div className="flex items-center gap-2.5 px-3 pb-2 pt-3">
-        <span className={cx("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white", t.color)}><NodeIcon type={anywhere ? "anywhere" : n.type} size={16} /></span>
+        <span className={cx("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white", t.color)}><NodeIcon type={anywhere ? "anywhere" : data.start && n.type === "conversation" ? "play" : n.type} size={16} /></span>
         <button className="min-w-0 flex-1 truncate text-left text-[13px] font-semibold" onClick={e => { e.stopPropagation(); act.open(id); }}>
-          {n.id === DONE ? "Done" : anywhere ? "Anywhere" : n.id}</button>
+          {n.id === DONE ? "Done" : anywhere ? "Anywhere" : n.label || n.id}</button>
         {data.start && <span className="rounded bg-accent/15 px-1 text-[9px] font-semibold text-accent-text">START</span>}
         {!anywhere && <button title="Settings" aria-label="Settings" className="text-muted hover:text-ink" onClick={e => { e.stopPropagation(); act.open(id); }}><NodeIcon type="settings" size={14} stroke={1.8} /></button>}
         {!anywhere && <div className="relative">
           <button title="More" aria-label="More" className="px-1 text-muted hover:text-ink" onClick={e => { e.stopPropagation(); setMenu(m => !m); }}>⋯</button>
           {menu && <div className="absolute right-0 z-30 mt-1 w-36 rounded-lg border border-line bg-panel p-1 text-xs shadow-lg" onMouseLeave={() => setMenu(false)}>
-            {([["rename", "✎ Rename"], ["logs", "📜 View logs"], ["duplicate", "⧉ Duplicate"], ["delete", "🗑 Delete"]] as const).map(([a, l]) => (
+            {([["rename", "✎ Rename"], ["logs", "📜 View logs"], ["duplicate", "⧉ Duplicate"], ["delete", "🗑 Delete"]] as const).filter(([a]) => !(a === "delete" && data.start)).map(([a, l]) => (
               <button key={a} className={cx("block w-full rounded px-2 py-1 text-left hover:bg-soft", a === "delete" && "text-bad")}
                 onClick={e => { e.stopPropagation(); setMenu(false); act.menu(id, a); }}>{l}</button>))}
           </div>}
@@ -384,6 +384,7 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
     setFocusNew(null);
   }, [focusNew, rfNodes, rf]);
   const deleteNode = (id: string) => {
+    if (id === g.start) return;                           // the start node is the entry point: it can be moved to another node, not deleted
     setG(x => ({ ...x, nodes: x.nodes.filter(n => n.id !== id), edges: x.edges.filter(e => e.from !== id && e.to !== id) }));
     setSel(null); touch();
   };
@@ -635,6 +636,8 @@ function ToolOptions({ node, onChange }: { node: FlowNode; onChange: (p: Partial
         {lbl("Longest wait (s)", <NumField id="node-tool-timeout" min={0.1} max={120} step={0.5} value={node.timeout_s} onChange={v => onChange({ timeout_s: v })} />, "Empty: no limit")}
       </div>
       {lbl("While it runs, say", <LangFields id="node-processing" value={node.processing} onChange={v => onChange({ processing: v })} />, "Instead of the standard “one moment”. Empty: standard.")}
+      {lbl("When it fails, say", <LangFields id="node-tool-error-say" value={node.error_say} onChange={v => onChange({ error_say: v })} />,
+        "Optional. Said before the “On failure” transition (or the hand-off) when the tool does not work.")}
       {lbl("When it succeeds, say", <LangFields id="node-tool-say" value={node.say} onChange={v => onChange({ say: v })} />,
         "Optional. Use {{ variable }} for values saved from the result. Empty: say nothing (the next step talks).")}
     </div>
@@ -746,6 +749,10 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
         <span className={cx("flex h-7 w-7 items-center justify-center rounded-md text-white", t.color)}><NodeIcon type={node.type} size={15} /></span>
         <div><div className="text-sm font-semibold">{t.label}</div><div className="text-[11px] text-muted">{t.hint}</div></div>
       </div>
+      {lbl("Label", <input id="node-label" className="w-full" placeholder={node.id} value={node.label ?? ""}
+        onChange={e => onChange({ label: e.target.value || undefined })} />, "The name shown on the canvas. Empty: the technical name below.")}
+      {lbl("Description", <input id="node-description" className="w-full" placeholder="What this step is for (a note for editors)" value={node.description ?? ""}
+        onChange={e => onChange({ description: e.target.value || undefined })} />)}
       {lbl("Name", <div className="flex gap-2"><input ref={renameRef} id="node-id" className="min-w-0 flex-1 font-mono" value={id}
         onChange={e => setId(e.target.value.replace(/[^\w-]/g, ""))} onKeyDown={e => { if (e.key === "Enter") onRename(id); }} />
         <Button onClick={() => onRename(id)} disabled={id === node.id}>Rename</Button></div>)}
@@ -845,7 +852,8 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
       </div>
       <div className="flex gap-2 pt-1">
         {!isStart && <Button onClick={onStart}>Make start</Button>}
-        <Button kind="danger" onClick={onDelete}>Delete node</Button>
+        {!isStart && <Button kind="danger" onClick={onDelete}>Delete node</Button>}
+        {isStart && <span className="text-[11px] text-muted">This is the start node: every call begins here. Make another node the start to delete this one.</span>}
       </div>
     </div>
   );
