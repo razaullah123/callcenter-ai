@@ -28,6 +28,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from runtime.control.accounts import principal
 from runtime.control.api import _rt, auth, changed, audited
 from runtime.control.config_store import schemas
 from runtime.harness.prompts import PHRASE_NAMES, Phrases
@@ -95,7 +96,10 @@ async def list_agents() -> list[dict]:
     rt, store = _platform()
     routes = await store.routes(current_project())
     out = []
+    limit = principal().agents(current_project())
     for a in await store.agents(current_project()):
+        if limit is not None and a["id"] not in limit:
+            continue
         rel = await store.release(a["published_release_id"]) if a.get("published_release_id") else None
         bundle = (rel or {}).get("bundle") or a.get("draft") or {}
         meta = bundle.get("agent") or {}

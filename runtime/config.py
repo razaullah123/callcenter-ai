@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     console_token: SecretStr | None = None    # if set, /api requires "Authorization: Bearer <token>"
     # invitation emails (optional — without them the console shows the invitation link to copy)
     platform_owner_emails: str = ""      # comma-separated e-mails that see and manage EVERY project; empty: the owner of the default project
+    invited_users_can_create_projects: bool = True   # false: only the platform owner and people who already own a project
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None

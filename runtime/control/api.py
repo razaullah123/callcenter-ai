@@ -121,6 +121,10 @@ async def use_project(request: Request) -> None:
         if ws != WORKSPACE and rt.platform is not None and not any(
                 w["id"] == ws for w in await rt.platform.list_workspaces()):
             raise HTTPException(404, {"message": f"project {ws!r} not found", "project": True})
+    if who.is_user:
+        from runtime.control.accounts import access_refusal
+        if no := access_refusal(request.method, request.url.path, request.query_params.get("agent"), who, ws):
+            raise HTTPException(no[0], {"message": no[1]})
     from runtime.platform import set_project
     set_project(ws)
 
@@ -167,11 +171,15 @@ async def project_scope(agent: str | None = None, ws: str | None = None) -> tupl
     ws = ws or current_project()
     rt = _rt()
     agents = [a["id"] for a in await rt.platform.agents(ws)] if rt.platform is not None else [rt.agent.agent_id]
+    from runtime.control.accounts import principal
+    limit = principal().agents(ws)                      # a member limited to some agents sees only their calls
+    if limit is not None:
+        agents = [a for a in agents if a in limit]
     if agent:
         if agent not in agents:
             raise HTTPException(404, "agent not found in this project")
         return [agent], False
-    return agents, ws == WORKSPACE
+    return agents, ws == WORKSPACE and limit is None
 
 
 async def primary_agent(agent: str | None = None):

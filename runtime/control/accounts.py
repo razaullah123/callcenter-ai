@@ -24,8 +24,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SESSION_DAYS = 14
-INVITE_DAYS = 7
-ROLES = ("owner", "admin")
+INVITE_HOURS = 2
+ROLES = ("owner", "admin", "viewer")             # viewer: read-only
 DEFAULT_PROJECT = "hmg"
 
 
@@ -55,6 +55,17 @@ class Principal:
             return "owner"
         m = self.memberships.get(ws)
         return m["role"] if m else None
+
+    def agents(self, ws: str) -> list[str] | None:
+        """The agents of `ws` this person is limited to; None = all of them."""
+        if self.kind != "user" or self.platform:
+            return None
+        ids = (self.memberships.get(ws) or {}).get("agent_ids")
+        return list(ids) if ids is not None else None
+
+    def can_manage(self, ws: str) -> bool:
+        """Owner / admin with access to every agent (members and the project's setup are theirs to manage)."""
+        return self.role(ws) in ("owner", "admin") and self.agents(ws) is None
 
 
 _PRINCIPAL: ContextVar[Principal] = ContextVar("principal", default=Principal("open"))
@@ -176,7 +187,7 @@ def send_invitation_email(settings, to: str, project: str, inviter: str, link: s
     msg["From"] = settings.smtp_from
     msg["To"] = to
     msg.set_content(f"{inviter} invited you to join the project \"{project}\" on the voice agent console.\n\n"
-                    f"Accept the invitation: {link}\n\nThe link is valid for {INVITE_DAYS} days.")
+                    f"Accept the invitation: {link}\n\nThe link is valid for {INVITE_HOURS} hours; after that ask for a new one.")
     password = settings.smtp_password.get_secret_value() if settings.smtp_password else None
     if settings.smtp_port == 465:
         server = smtplib.SMTP_SSL(settings.smtp_host, 465, context=ssl.create_default_context(), timeout=15)
@@ -187,3 +198,37 @@ def send_invitation_email(settings, to: str, project: str, inviter: str, link: s
         if settings.smtp_user:
             server.login(settings.smtp_user, password or "")
         server.send_message(msg)
+
+
+# ---------------------------------------------------------------- what a member may do (checked on every console request)
+
+SELF_SERVICE = ("/api/me", "/api/auth/")                     # your own profile, default project, sign-out
+LIMITED_WRITES = ("calls", "evals", "live")                   # what an agent-limited member may still change besides their agents
+
+
+def access_refusal(method: str, path: str, query_agent: str | None, who: Principal, ws: str) -> tuple[int, str] | None:
+    """(status, message) when a signed-in member may not make this request, else None.
+
+    - viewer: reads only;
+    - limited to some agents: sees and changes only those agents (and their calls); reads the project's shared setup
+      (skills, tools, connections ...) because building an agent needs it, but never the API keys.
+    """
+    if not who.is_user or who.platform:
+        return None
+    write = method not in ("GET", "HEAD", "OPTIONS")
+    own = path.startswith(SELF_SERVICE) or path.endswith("/label")
+    role, limit = who.role(ws), who.agents(ws)
+    if role == "viewer" and write and not own:
+        return 403, "you have read-only access to this project"
+    if limit is None:
+        return None
+    parts = path.removeprefix("/api/").split("/")
+    if parts[0] == "api-keys":
+        return 403, "your access is limited to some agents - API keys are managed by the project's owner"
+    if query_agent and query_agent not in limit:
+        return 404, "agent not found"
+    if parts[0] == "agents" and len(parts) > 1 and parts[1] != "import":
+        return (404, "agent not found") if parts[1] not in limit else None
+    if write and not own and parts[0] not in LIMITED_WRITES:
+        return 403, "your access is limited to your agents - ask the project's owner for more"
+    return None

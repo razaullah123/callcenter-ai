@@ -280,7 +280,7 @@ function LinkBox({ link, emailed, email }: { link: string; emailed: boolean; ema
   return (
     <div className="space-y-2">
       <p className="text-sm">{emailed ? <>An invitation was emailed to <b>{email}</b>. You can also share this link:</>
-        : <>Send this link to <b>{email}</b> (email sending isn't set up — SMTP_* in .env). It works for 7 days:</>}</p>
+        : <>Send this link to <b>{email}</b> (email sending isn't set up — SMTP_* in .env). It works for 2 hours:</>}</p>
       <div className="flex gap-2">
         <input id="invite-link" readOnly className="min-w-0 flex-1 font-mono text-xs" value={link} onFocus={e => e.target.select()} />
         <Button onClick={() => copyText(link).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>{copied ? "Copied ✓" : "Copy link"}</Button>
@@ -289,10 +289,62 @@ function LinkBox({ link, emailed, email }: { link: string; emailed: boolean; ema
   );
 }
 
-function InviteDialog({ project, onClose }: { project: string; onClose: () => void }) {
-  const [email, setEmail] = useState("");
+type Access = { role: "admin" | "viewer"; agents: string[] | null };
+
+/** What a person may do: Admin (change things) or Viewer (read-only), on every agent or only the ticked ones. */
+function AccessFields({ value, onChange, agents }: { value: Access; onChange: (a: Access) => void; agents: { id: string; name: string }[] }) {
+  const some = value.agents !== null;
+  return (
+    <div className="mt-3 space-y-3">
+      <label className="block"><div className="mb-1 text-xs font-medium">Role</div>
+        <select className="w-full" value={value.role} onChange={e => onChange({ ...value, role: e.target.value as Access["role"] })}>
+          <option value="admin">Admin — can change what they have access to</option>
+          <option value="viewer">Viewer — read-only</option>
+        </select></label>
+      <div>
+        <div className="mb-1 text-xs font-medium">Agents</div>
+        <label className="mr-4 inline-flex items-center gap-1.5 text-sm"><input type="radio" checked={!some} onChange={() => onChange({ ...value, agents: null })} />All agents</label>
+        <label className="inline-flex items-center gap-1.5 text-sm"><input type="radio" checked={some} onChange={() => onChange({ ...value, agents: value.agents ?? agents.slice(0, 1).map(a => a.id) })} />Only some agents</label>
+        {some && (
+          <div className="mt-2 max-h-40 space-y-1 overflow-auto rounded-md border border-line p-2">
+            {agents.map(a => (
+              <label key={a.id} className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={value.agents!.includes(a.id)}
+                  onChange={e => onChange({ ...value, agents: e.target.checked ? [...value.agents!, a.id] : value.agents!.filter(x => x !== a.id) })} />
+                {a.name}</label>))}
+          </div>)}
+        {some && <p className="mt-1.5 text-[11px] text-muted">They see only these agents and their calls. Project settings, API keys and the other agents stay hidden.</p>}
+      </div>
+    </div>
+  );
+}
+
+const accessText = (ids: string[] | null, agents: { id: string; name: string }[]) =>
+  ids === null ? "All agents" : ids.map(i => agents.find(a => a.id === i)?.name ?? i).join(", ") || "None";
+
+function AccessDialog({ project, member, agents, onClose }: { project: string; member: Member; agents: { id: string; name: string }[]; onClose: () => void }) {
+  const [a, setA] = useState<Access>({ role: member.role === "viewer" ? "viewer" : "admin", agents: member.agent_ids });
   const qc = useQueryClient();
-  const invite = useMutation({ mutationFn: () => api.invite(project, email.trim()),
+  const save = useMutation({ mutationFn: () => api.changeAccess(project, member.user_id, a.role, a.agents),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["members", project] }); qc.invalidateQueries({ queryKey: ["project-audit", project] }); onClose(); } });
+  const bad = a.agents !== null && a.agents.length === 0;
+  return (
+    <Dialog title={`Access for ${member.email}`} onClose={onClose}>
+      <AccessFields value={a} onChange={setA} agents={agents} />
+      {save.error && <div className="mt-2 text-xs text-bad">{errorText(save.error)}</div>}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button kind="ghost" onClick={onClose}>Cancel</Button>
+        <Button kind="primary" onClick={() => save.mutate()} disabled={bad || save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
+      </div>
+    </Dialog>
+  );
+}
+
+function InviteDialog({ project, agents, onClose }: { project: string; agents: { id: string; name: string }[]; onClose: () => void }) {
+  const [email, setEmail] = useState("");
+  const [access, setAccess] = useState<Access>({ role: "admin", agents: null });
+  const qc = useQueryClient();
+  const invite = useMutation({ mutationFn: () => api.invite(project, email.trim(), access.role, access.agents),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["members", project] }); qc.invalidateQueries({ queryKey: ["project-audit", project] }); } });
   return (
     <Dialog title="Invite member" onClose={onClose}>
@@ -303,11 +355,11 @@ function InviteDialog({ project, onClose }: { project: string; onClose: () => vo
         <form onSubmit={e => { e.preventDefault(); if (email.trim()) invite.mutate(); }}>
           <label className="block"><div className="mb-1 text-xs font-medium">Email</div>
             <input id="invite-email" type="email" autoFocus className="w-full" placeholder="colleague@example.com" value={email} onChange={e => setEmail(e.target.value)} /></label>
-          <p className="mt-2 text-[11px] text-muted">They join as <b>Admin</b>: they can change everything in this project and invite others.</p>
+          <AccessFields value={access} onChange={setAccess} agents={agents} />
           {invite.error && <div className="mt-2 text-xs text-bad">{errorText(invite.error)}</div>}
           <div className="mt-4 flex justify-end gap-2">
             <Button kind="ghost" onClick={onClose}>Cancel</Button>
-            <Button kind="primary" type="submit" disabled={!email.trim() || invite.isPending}>{invite.isPending ? "Inviting…" : "Invite"}</Button>
+            <Button kind="primary" type="submit" disabled={!email.trim() || invite.isPending || (access.agents !== null && access.agents.length === 0)}>{invite.isPending ? "Inviting…" : "Invite"}</Button>
           </div>
         </form>
       )}
@@ -320,6 +372,7 @@ function TeamMembers({ project, inviting, onInvited }: { project: string; inviti
   const q = useQuery({ queryKey: ["members", project], queryFn: () => api.members(project) });
   const [link, setLink] = useState<{ link: string; emailed: boolean; email: string } | null>(null);
   const [confirm, setConfirm] = useState<{ text: string; run: () => Promise<unknown> } | null>(null);
+  const [editing, setEditing] = useState<Member | null>(null);
   const refresh = () => { qc.invalidateQueries({ queryKey: ["members", project] }); qc.invalidateQueries({ queryKey: ["project-audit", project] }); };
   const act = useMutation({ mutationFn: (f: () => Promise<unknown>) => f(), onSuccess: () => { setConfirm(null); refresh(); } });
   const d = q.data;
@@ -333,17 +386,18 @@ function TeamMembers({ project, inviting, onInvited }: { project: string; inviti
       ) : (
         <table className="w-full text-sm">
           <thead><tr className="text-left text-xs text-muted"><th className="py-2 font-medium">Name</th><th className="py-2 font-medium">Email</th>
-            <th className="py-2 font-medium">Role</th><th className="py-2 font-medium">Status</th><th /></tr></thead>
+            <th className="py-2 font-medium">Role</th><th className="py-2 font-medium">Agents</th><th className="py-2 font-medium">Status</th><th /></tr></thead>
           <tbody>
             {rows.map(r => (
               <tr key={r.kind + (r.kind === "member" ? r.user_id : r.id)} className="border-t border-line align-middle">
                 <td className="py-2.5">{r.name}{r.kind === "member" && r.you && <span className="ml-1 text-xs text-muted">(you)</span>}</td>
                 <td className="py-2.5 text-muted">{r.email}</td>
-                <td className="py-2.5 capitalize">{r.role}</td>
+                <td className="py-2.5 capitalize">{r.role === "viewer" ? "Viewer (read-only)" : r.role}</td>
+                <td className="py-2.5 text-muted">{r.role === "owner" ? "All agents" : accessText(r.agent_ids, d.agents)}</td>
                 <td className="py-2.5"><StatusBadge status={r.status} /></td>
                 <td className="py-2.5 text-right">
                   {d.can_manage && (r.kind !== "member" || (r.role !== "owner" && !r.you)) && <RowMenu items={r.kind === "member"
-                    ? (r.role === "owner" || r.you ? [] : [{ label: "Remove", danger: true,
+                    ? (r.role === "owner" || r.you ? [] : [{ label: "Change access", onClick: () => setEditing(r) }, { label: "Remove", danger: true,
                         onClick: () => setConfirm({ text: `Remove ${r.email} from this project?`, run: () => api.removeMember(project, r.user_id) }) }])
                     : [{ label: r.status === "expired" ? "Send a new invitation" : "New invitation link",
                          onClick: () => api.resendInvite(project, r.id).then(x => { setLink({ ...x, email: r.email }); refresh(); }) },
@@ -364,7 +418,8 @@ function TeamMembers({ project, inviting, onInvited }: { project: string; inviti
       {act.error && <div className="mt-2 text-xs text-bad">{errorText(act.error)}</div>}
       {link && <Dialog title="Invitation link" onClose={() => setLink(null)}><LinkBox {...link} />
         <div className="mt-4 flex justify-end"><Button kind="primary" onClick={() => setLink(null)}>Done</Button></div></Dialog>}
-      {inviting && <InviteDialog project={project} onClose={onInvited} />}
+      {inviting && <InviteDialog project={project} agents={d?.agents ?? []} onClose={onInvited} />}
+      {editing && <AccessDialog project={project} member={editing} agents={d?.agents ?? []} onClose={() => setEditing(null)} />}
     </Card>
   );
 }

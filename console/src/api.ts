@@ -269,12 +269,12 @@ export type AuditRow = { id: number; ts: string; action: string; actor: string |
 
 export type Project = { id: string; name: string; created_at: string | null; platform_default: boolean; agents: number;
   connections: number; mcp_servers: number; tools: number; secrets: number; routes: string[];
-  role: "owner" | "admin"; mine: boolean; access?: "member" | "platform"; label: string | null; owner: string | null; default: boolean | null };
+  role: "owner" | "admin" | "viewer"; mine: boolean; access?: "member" | "platform"; label: string | null; owner: string | null; default: boolean | null };
 export type User = { id: string; email: string; name: string; default_project: string | null };
 export type AuthStatus = { mode: "setup" | "login" | "signed_in" | "token" | "open"; user?: User; accounts: boolean;
   mail: boolean; open?: boolean };
-export type Member = { user_id: string; name: string; email: string; role: string; status: "joined"; joined_at: string; you: boolean };
-export type Invitation = { id: string; email: string; role: string; status: "invited" | "expired" | "joined";
+export type Member = { user_id: string; name: string; email: string; role: string; agent_ids: string[] | null; status: "joined"; joined_at: string; you: boolean };
+export type Invitation = { id: string; email: string; role: string; agent_ids: string[] | null; status: "invited" | "expired" | "joined";
   invited_by: string | null; created_at: string; expires_at: string };
 
 const TOKEN_KEY = "hmg-console-token";
@@ -417,10 +417,13 @@ export const api = {
   setProjectLabel: (id: string, label: string) =>
     req<{ label: string | null }>(`/api/projects/${encodeURIComponent(id)}/label`, { method: "PUT", body: JSON.stringify({ label }) }),
   members: (id: string) => req<{ members: Member[]; invitations: Invitation[]; can_manage: boolean; you: string | null;
-    mail: boolean; accounts: boolean }>(`/api/projects/${encodeURIComponent(id)}/members`),
-  invite: (id: string, email: string) =>
+    agents: { id: string; name: string }[]; mail: boolean; accounts: boolean }>(`/api/projects/${encodeURIComponent(id)}/members`),
+  invite: (id: string, email: string, role: "admin" | "viewer" = "admin", agent_ids: string[] | null = null) =>
     req<{ invitation: Invitation; link: string; emailed: boolean }>(`/api/projects/${encodeURIComponent(id)}/invitations`,
-      { method: "POST", body: JSON.stringify({ email, role: "admin" }) }),
+      { method: "POST", body: JSON.stringify({ email, role, agent_ids }) }),
+  changeAccess: (id: string, user: string, role: "admin" | "viewer", agent_ids: string[] | null) =>
+    req<{ role: string; agent_ids: string[] | null }>(`/api/projects/${encodeURIComponent(id)}/members/${user}`,
+      { method: "PUT", body: JSON.stringify({ role, agent_ids }) }),
   resendInvite: (id: string, inv: string) =>
     req<{ link: string; emailed: boolean }>(`/api/projects/${encodeURIComponent(id)}/invitations/${inv}/resend`, { method: "POST" }),
   revokeInvite: (id: string, inv: string) =>

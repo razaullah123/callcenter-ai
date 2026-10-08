@@ -29,7 +29,7 @@ Written 2026-10-07. Everything not listed here is built and tested; see `docs/ha
 - Test against a real PBX / phone system.
 - Call panel fields: Hamsa shows Cost and Agent Number; ours shows LLM and speech-to-text (Cost depends on section 1).
 
-- Access control: per-agent access inside a project, a read-only role, an option to stop invited users creating their own projects, and a platform-owner list managed from the console (today: `PLATFORM_OWNER_EMAILS`).
+- Access control, still open: a platform-owner list managed from the console (today: `PLATFORM_OWNER_EMAILS`). Done 2026-10-08: per-agent access, read-only Viewer role, and `INVITED_USERS_CAN_CREATE_PROJECTS=false` to stop invited users creating projects. Not yet checked by hand in the browser.
 
 ## 4. Not verified yet (built and covered by tests, never run end to end)
 

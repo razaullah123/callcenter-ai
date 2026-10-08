@@ -13,7 +13,9 @@ from .test_projects import console as projects_console  # noqa: F401  (fixture)
 def client(projects_console):  # noqa: F811
     c, rt, store, loop = projects_console
     from runtime.control import accounts_api
+    from runtime.control import keys_api
     c.app.include_router(accounts_api.router)
+    c.app.include_router(keys_api.router)
     return c, rt, store, loop
 
 
@@ -110,7 +112,7 @@ def test_expired_invitation(client):
     owner = _setup(c)
     link = c.post("/api/projects/hmg/invitations", json={"email": "late@example.com"}, headers=_h(owner)).json()["link"]
     inv = loop.run_until_complete(store.invitations("hmg"))[0]
-    loop.run_until_complete(store.update_invitation(inv["id"], expires_at=inv["expires_at"] - timedelta(days=8)))
+    loop.run_until_complete(store.update_invitation(inv["id"], expires_at=inv["expires_at"] - timedelta(hours=3)))
     token = link.rsplit("/", 1)[1]
     assert c.get(f"/api/invitations/{token}").json()["status"] == "expired"
     assert c.post(f"/api/invitations/{token}/accept", json={"name": "L", "password": "llll-llll"}).status_code == 410
@@ -160,3 +162,55 @@ def test_platform_owner_emails_override_the_default(client):
     assert c.get("/api/me", headers=_h(owner)).json()["platform_owner"] is False                          # named list: only those
     assert {p["id"] for p in c.get("/api/projects", headers=_h(sara)).json()} == {"hmg", "sara-lab"}
     assert {p["id"] for p in c.get("/api/projects", headers=_h(owner)).json()} == {"hmg"}
+
+
+def _join(c, owner, email, **extra):
+    link = c.post("/api/projects/hmg/invitations", json={"email": email, **extra}, headers=_h(owner))
+    assert link.status_code == 200, link.text
+    tok = link.json()["link"].rsplit("/", 1)[1]
+    return c.post(f"/api/invitations/{tok}/accept", json={"name": email[:4], "password": "pass-word-1"}).json()["token"]
+
+
+def test_a_member_limited_to_one_agent_sees_and_changes_only_that_agent(client):
+    c, rt, store, loop = client
+    owner = _setup(c)
+    first = c.get("/api/agents", headers=_h(owner)).json()[0]["id"]
+    second = c.post("/api/agents", json={"name": "Second agent"}, headers=_h(owner)).json()["id"]
+    assert c.post("/api/projects/hmg/invitations", json={"email": "a@example.com", "agent_ids": ["nope"]},
+                  headers=_h(owner)).status_code == 422
+    dev = _join(c, owner, "dev@example.com", agent_ids=[second])
+    assert [a["id"] for a in c.get("/api/agents", headers=_h(dev)).json()] == [second]
+    assert c.get(f"/api/agents/{second}", headers=_h(dev)).status_code == 200
+    assert c.get(f"/api/agents/{first}", headers=_h(dev)).status_code == 404
+    assert c.put(f"/api/agents/{second}", json={"name": "Renamed", "description": ""}, headers=_h(dev)).status_code == 200
+    assert c.put(f"/api/agents/{first}", json={"name": "x", "description": ""}, headers=_h(dev)).status_code == 404
+    assert c.get(f"/api/calls?agent={first}", headers=_h(dev)).status_code == 404
+    assert c.post("/api/agents", json={"name": "Third"}, headers=_h(dev)).status_code == 403          # no new agents
+    assert c.get("/api/api-keys", headers=_h(dev)).status_code == 403
+    assert c.post("/api/projects/hmg/invitations", json={"email": "x@example.com"}, headers=_h(dev)).status_code == 403
+    members = c.get("/api/projects/hmg/members", headers=_h(owner)).json()
+    uid = next(m["user_id"] for m in members["members"] if m["email"] == "dev@example.com")
+    assert c.put(f"/api/projects/hmg/members/{uid}", json={"role": "admin", "agent_ids": None}, headers=_h(owner)).status_code == 200
+    assert {a["id"] for a in c.get("/api/agents", headers=_h(dev)).json()} == {first, second}         # now all agents
+
+
+def test_a_viewer_can_read_but_not_change(client):
+    c, rt, store, loop = client
+    owner = _setup(c)
+    agent = c.get("/api/agents", headers=_h(owner)).json()[0]["id"]
+    viewer = _join(c, owner, "view@example.com", role="viewer")
+    assert c.get("/api/agents", headers=_h(viewer)).status_code == 200
+    assert c.get(f"/api/agents/{agent}", headers=_h(viewer)).status_code == 200
+    assert c.put(f"/api/agents/{agent}", json={"name": "x", "description": ""}, headers=_h(viewer)).status_code == 403
+    assert c.post("/api/agents", json={"name": "New"}, headers=_h(viewer)).status_code == 403
+    assert c.put("/api/me", json={"name": "Vee"}, headers=_h(viewer)).status_code == 200              # their own profile
+    assert c.post("/api/projects/hmg/invitations", json={"email": "z@example.com"}, headers=_h(viewer)).status_code == 403
+
+
+def test_invited_users_can_be_stopped_from_creating_projects(client):
+    c, rt, store, loop = client
+    owner = _setup(c)
+    sara = _join(c, owner, "sara@example.com")
+    rt.settings = rt.settings.model_copy(update={"invited_users_can_create_projects": False})
+    assert c.post("/api/projects", json={"name": "Mine", "copy_setup": False}, headers=_h(sara)).status_code == 403
+    assert c.post("/api/projects", json={"name": "Mine", "copy_setup": False}, headers=_h(owner)).status_code == 200

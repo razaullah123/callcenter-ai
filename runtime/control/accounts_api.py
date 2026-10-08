@@ -182,13 +182,26 @@ async def set_label(project_id: str, body: LabelBody) -> dict:
 # ---------------------------------------------------------------- members + invitations
 
 def _manage(project_id: str) -> None:
-    if principal().role(project_id) not in ("owner", "admin"):
+    if not principal().can_manage(project_id):
         raise HTTPException(404 if principal().role(project_id) is None else 403, "not allowed")
+
+
+async def _agent_ids(store, project_id: str, ids: list[str] | None) -> list[str] | None:
+    """None (all agents) or a non-empty list of the project's own agents."""
+    if ids is None:
+        return None
+    mine = {a["id"] for a in await store.agents(project_id)}
+    bad = [i for i in ids if i not in mine]
+    if bad or not ids:
+        raise HTTPException(422, {"errors": [f"agents: {', '.join(bad)} not in this project" if bad else
+                                             "agents: choose at least one agent, or all agents"]})
+    return list(dict.fromkeys(ids))
 
 
 def _invite_view(i: dict) -> dict:
     status = "joined" if i.get("accepted_at") else "expired" if i["expires_at"] < acc.now() else "invited"
-    return {"id": i["id"], "email": i["email"], "role": i["role"], "status": status, "invited_by": i.get("invited_by"),
+    return {"id": i["id"], "email": i["email"], "role": i["role"], "agent_ids": i.get("agent_ids"), "status": status,
+            "invited_by": i.get("invited_by"),
             "created_at": i.get("created_at"), "expires_at": i["expires_at"]}
 
 
@@ -198,19 +211,21 @@ async def list_members(project_id: str) -> dict:
     if principal().role(project_id) is None:
         raise HTTPException(404, "project not found")
     members = [{"user_id": m["user_id"], "name": m.get("name") or m["email"].split("@")[0], "email": m["email"],
-                "role": m["role"], "status": "joined", "joined_at": m.get("joined_at"),
+                "role": m["role"], "agent_ids": m.get("agent_ids"), "status": "joined", "joined_at": m.get("joined_at"),
                 "you": principal().is_user and m["user_id"] == principal().user["id"]}
                for m in await store.members(project_id)]
     members.sort(key=lambda m: (m["role"] != "owner", str(m["joined_at"])))
     invites = [_invite_view(i) for i in await store.invitations(project_id) if not i.get("accepted_at")]
-    return {"members": members, "invitations": invites, "can_manage": principal().role(project_id) in ("owner", "admin"),
+    return {"members": members, "invitations": invites, "can_manage": principal().can_manage(project_id),
+            "agents": [{"id": a["id"], "name": a["name"]} for a in await store.agents(project_id)],
             "you": principal().role(project_id), "mail": acc.mail_configured(rt.settings),
             "accounts": await store.count_users() > 0}
 
 
 class InviteBody(BaseModel):
     email: str
-    role: str = "admin"
+    role: str = "admin"                   # admin | viewer (read-only)
+    agent_ids: list[str] | None = None    # None: every agent; else only these
 
 
 def _link(request: Request, token: str) -> str:
@@ -237,8 +252,9 @@ async def invite(project_id: str, body: InviteBody, request: Request) -> dict:
     email = body.email.strip().lower()
     if not EMAIL.match(email):
         raise HTTPException(422, {"errors": ["email: not a valid address"]})
-    if body.role not in ("admin",):
-        raise HTTPException(422, {"errors": ["role: admin (a project has one owner)"]})
+    if body.role not in ("admin", "viewer"):
+        raise HTTPException(422, {"errors": ["role: admin or viewer (a project has one owner)"]})
+    agent_ids = await _agent_ids(store, project_id, body.agent_ids)
     if any(m["email"] == email for m in await store.members(project_id)):
         raise HTTPException(409, f"{email} is already a member")
     for old in await store.invitations(project_id):               # a new invitation replaces a pending one
@@ -246,10 +262,10 @@ async def invite(project_id: str, body: InviteBody, request: Request) -> dict:
             await store.delete_invitation(old["id"])
     token = acc.new_token("inv")
     inv = {"id": uuid.uuid4().hex[:16], "workspace_id": project_id, "email": email, "role": body.role,
-           "token_hash": acc.token_hash(token), "invited_by": principal().actor,
-           "expires_at": acc.now() + timedelta(days=acc.INVITE_DAYS)}
+           "token_hash": acc.token_hash(token), "invited_by": principal().actor, "agent_ids": agent_ids,
+           "expires_at": acc.now() + timedelta(hours=acc.INVITE_HOURS)}
     await store.create_invitation(inv)
-    await store.audit("", "member.invited", principal().actor, {"email": email, "role": body.role}, ws=project_id)
+    await store.audit("", "member.invited", principal().actor, {"email": email, "role": body.role, "agents": agent_ids or "all"}, ws=project_id)
     emailed = await _send(rt, request, project_id, email, token)
     return {"invitation": _invite_view({**inv, "created_at": acc.now()}), "link": _link(request, token),
             "emailed": emailed}
@@ -264,7 +280,7 @@ async def resend(project_id: str, inv_id: str, request: Request) -> dict:
         raise HTTPException(404, "invitation not found")
     token = acc.new_token("inv")                                  # the old link stops working
     await store.update_invitation(inv_id, token_hash=acc.token_hash(token),
-                                  expires_at=acc.now() + timedelta(days=acc.INVITE_DAYS))
+                                  expires_at=acc.now() + timedelta(hours=acc.INVITE_HOURS))
     emailed = await _send(rt, request, project_id, inv["email"], token)
     return {"link": _link(request, token), "emailed": emailed}
 
@@ -279,6 +295,30 @@ async def revoke(project_id: str, inv_id: str) -> dict:
     await store.delete_invitation(inv_id)
     await store.audit("", "member.invitation_revoked", principal().actor, {"email": inv["email"]}, ws=project_id)
     return {"ok": True}
+
+
+class AccessBody(BaseModel):
+    role: str = "admin"
+    agent_ids: list[str] | None = None
+
+
+@router.put("/projects/{project_id}/members/{user_id}", dependencies=auth)
+async def change_access(project_id: str, user_id: str, body: AccessBody) -> dict:
+    """A member's role (admin / read-only viewer) and the agents they may use."""
+    rt, store = _store()
+    _manage(project_id)
+    m = next((m for m in await store.members(project_id) if m["user_id"] == user_id), None)
+    if m is None:
+        raise HTTPException(404, "member not found")
+    if m["role"] == "owner":
+        raise HTTPException(409, "the project owner's access can't be changed")
+    if body.role not in ("admin", "viewer"):
+        raise HTTPException(422, {"errors": ["role: admin or viewer"]})
+    agent_ids = await _agent_ids(store, project_id, body.agent_ids)
+    await store.add_member(project_id, user_id, body.role, agent_ids)
+    await store.audit("", "member.access_changed", principal().actor,
+                      {"email": m["email"], "role": body.role, "agents": agent_ids or "all"}, ws=project_id)
+    return {"role": body.role, "agent_ids": agent_ids}
 
 
 @router.delete("/projects/{project_id}/members/{user_id}", dependencies=auth)
@@ -335,7 +375,7 @@ async def accept(token: str, body: AcceptBody) -> dict:
     elif not acc.check_password(body.password, user["password_hash"]):
         await asyncio.sleep(0.4)
         raise HTTPException(401, {"message": "wrong password for this account"})
-    await store.add_member(inv["workspace_id"], user["id"], inv["role"])
+    await store.add_member(inv["workspace_id"], user["id"], inv["role"], inv.get("agent_ids"))
     await store.update_invitation(inv["id"], accepted_at=acc.now())
     await store.audit("", "member.joined", user["email"], {"email": user["email"], "role": inv["role"]},
                       ws=inv["workspace_id"])

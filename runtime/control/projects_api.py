@@ -71,6 +71,10 @@ def _slug(name: str) -> str:
 @router.post("/projects", dependencies=auth)
 async def create_project(body: NewProject) -> dict:
     rt, store = _store()
+    who = principal()
+    if who.is_user and not who.platform and not rt.settings.invited_users_can_create_projects \
+            and not any(m["role"] == "owner" for m in who.memberships.values()):
+        raise HTTPException(403, "only the platform owner and project owners can create projects here")
     name = body.name.strip()
     if not name:
         raise HTTPException(422, {"errors": ["name: required"]})

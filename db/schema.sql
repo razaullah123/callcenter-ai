@@ -338,8 +338,9 @@ CREATE TABLE IF NOT EXISTS console_sessions (
 CREATE TABLE IF NOT EXISTS project_members (
     workspace_id  text NOT NULL,
     user_id       text NOT NULL,
-    role          text NOT NULL,                    -- owner | admin
+    role          text NOT NULL,                    -- owner | admin | viewer (read-only)
     label         text,                             -- the member's own name for the project (only they see it)
+    agent_ids     text[],                           -- NULL: every agent of the project; else only these
     joined_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, user_id)
 );
@@ -355,6 +356,8 @@ CREATE TABLE IF NOT EXISTS project_invitations (
     accepted_at   timestamptz
 );
 CREATE INDEX IF NOT EXISTS project_invitations_ws_idx ON project_invitations (workspace_id);
+ALTER TABLE project_members ADD COLUMN IF NOT EXISTS agent_ids text[];
+ALTER TABLE project_invitations ADD COLUMN IF NOT EXISTS agent_ids text[];
 
 
 -- Knowledge base (12.9): documents and free text per project, split into chunks the agents search during a call

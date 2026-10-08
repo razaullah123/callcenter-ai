@@ -265,10 +265,11 @@ class MemoryStore:
     async def delete_session(self, token_hash: str) -> None:
         self._acc()["sessions"].pop(token_hash, None)
 
-    async def add_member(self, ws: str, user_id: str, role: str) -> None:
+    async def add_member(self, ws: str, user_id: str, role: str, agent_ids: list[str] | None = None) -> None:
         old = self._acc()["members"].get((ws, user_id), {})
         self._acc()["members"][(ws, user_id)] = {"workspace_id": ws, "user_id": user_id, "role": role,
-                                                 "label": old.get("label"), "joined_at": old.get("joined_at", _now())}
+                                                 "agent_ids": agent_ids, "label": old.get("label"),
+                                                 "joined_at": old.get("joined_at", _now())}
 
     async def members(self, ws: str) -> list[dict]:
         users = self._acc()["users"]
@@ -821,9 +822,10 @@ class PgStore:
     async def delete_session(self, token_hash: str) -> None:
         await self._exec("DELETE FROM console_sessions WHERE token_hash = $1", token_hash)
 
-    async def add_member(self, ws: str, user_id: str, role: str) -> None:
-        await self._exec("INSERT INTO project_members (workspace_id, user_id, role) VALUES ($1, $2, $3) "
-                         "ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role", ws, user_id, role)
+    async def add_member(self, ws: str, user_id: str, role: str, agent_ids: list[str] | None = None) -> None:
+        await self._exec("INSERT INTO project_members (workspace_id, user_id, role, agent_ids) VALUES ($1, $2, $3, $4) "
+                         "ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role, "
+                         "agent_ids = EXCLUDED.agent_ids", ws, user_id, role, agent_ids)
 
     async def members(self, ws: str) -> list[dict]:
         return await self._fetch("SELECT m.*, u.email, u.name FROM project_members m JOIN console_users u "
@@ -841,9 +843,9 @@ class PgStore:
 
     async def create_invitation(self, row: dict) -> None:
         await self._exec("INSERT INTO project_invitations (id, workspace_id, email, role, token_hash, invited_by, "
-                         "expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)", row["id"], row["workspace_id"],
+                         "expires_at, agent_ids) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", row["id"], row["workspace_id"],
                          row["email"].lower(), row.get("role", "admin"), row["token_hash"], row.get("invited_by"),
-                         row["expires_at"])
+                         row["expires_at"], row.get("agent_ids"))
 
     async def invitations(self, ws: str) -> list[dict]:
         return await self._fetch("SELECT * FROM project_invitations WHERE workspace_id = $1 ORDER BY created_at", ws)
