@@ -394,3 +394,18 @@ Not verified: a real microphone call from a real site (try the demo page).
 | Console | Recording card in the call panel (play, download, delete), Record calls setting | `pages/CallPanel.tsx`, `api.ts`, `studio/GlobalSettings.tsx` |
 
 Tests: new `tests/test_recording.py` (12). Console build clean. Not verified: a real call with a real microphone.
+
+## Left sidebar: items commented out (2026-10-08)
+
+Hamsa's sidebar has no Skills, Agent models, Connections, Evals or Playground. We hid three of them and kept two:
+
+| Item | Now | Why |
+|---|---|---|
+| Agent models | commented out | per-agent model setup now lives in Agent Studio -> Global settings |
+| Evals | commented out | test cases and the publish gate live in Agent Studio -> Tests |
+| Playground | commented out | Agent Studio has its own test panel (browser call / chat) |
+| Skills | kept | the only place to edit a skill's text; Agent Studio links to it |
+| Connections | kept | the only place for the keys and URLs of the LLM / STT / TTS providers; Global settings links to it |
+
+Only the sidebar entries are commented out (`console/src/App.tsx`, `GROUPS`); the routes `/providers`, `/evals` and `/playground` still work, so
+links and bookmarks keep working. To bring one back, uncomment its line.

@@ -72,8 +72,12 @@ const GROUPS: { title?: string; items: NavItem[] }[] = [
   { title: "Agents", items: [
     { to: "/agents", label: "Agents", icon: "agents" }, { to: "/knowledge-base", label: "Knowledge base", icon: "book" },
     { to: "/tools", label: "Tools Templates", icon: "tools" }, { to: "/skills", label: "Skills", icon: "skills" },
-    { to: "/providers", label: "Agent models", icon: "models" }, { to: "/connections", label: "Connections", icon: "plug" },
-    { to: "/evals", label: "Evals", icon: "evals" }, { to: "/playground", label: "Playground", icon: "play" },
+    { to: "/connections", label: "Connections", icon: "plug" },
+    // Commented out 2026-10-08 (Hamsa's sidebar has none of these; their routes below still work, so links and bookmarks
+    // keep working — to bring one back, uncomment its line):
+    //   { to: "/providers", label: "Agent models", icon: "models" },   // per-agent model setup: now in Agent Studio -> Global settings
+    //   { to: "/evals", label: "Evals", icon: "evals" },               // test cases: now in Agent Studio -> Tests (publish gate)
+    //   { to: "/playground", label: "Playground", icon: "play" },      // test call: now in Agent Studio's test panel
   ] },
   { title: "Telephony", items: [
     { to: "/numbers", label: "Phone numbers", icon: "plus" }, { to: "/batch-calls", label: "Batch calls", icon: "phone" },

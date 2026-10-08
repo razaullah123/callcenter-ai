@@ -674,3 +674,18 @@ Decided with the owner: local folder, 30 days, anyone with access to the agent m
 | Webhook `conversationRecording` | ❌ | still null: no signed download link yet |
 
 Verdict: ✅. Not built: S3 storage, Opus compression (WAV is about 2 MB a minute before encryption), recording of listen-in audio, a download link in the webhook, a per-call "do not record" option.
+
+## Left sidebar: items commented out (2026-10-08)
+
+Hamsa's sidebar has no Skills, Agent models, Connections, Evals or Playground. We hid three of them and kept two:
+
+| Item | Now | Why |
+|---|---|---|
+| Agent models | commented out | per-agent model setup now lives in Agent Studio -> Global settings |
+| Evals | commented out | test cases and the publish gate live in Agent Studio -> Tests |
+| Playground | commented out | Agent Studio has its own test panel (browser call / chat) |
+| Skills | kept | the only place to edit a skill's text; Agent Studio links to it |
+| Connections | kept | the only place for the keys and URLs of the LLM / STT / TTS providers; Global settings links to it |
+
+Only the sidebar entries are commented out (`console/src/App.tsx`, `GROUPS`); the routes `/providers`, `/evals` and `/playground` still work, so
+links and bookmarks keep working. To bring one back, uncomment its line.
