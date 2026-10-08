@@ -11,6 +11,7 @@ No user accounts yet: every console user sees every project (members / invitatio
 """
 
 import re
+import uuid
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -68,6 +69,17 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:32]
 
 
+def uuid_project_id(name: str, existing: set[str]) -> str:
+    """A new project's id, like Hamsa's: a UUID (62f59559-bc1c-4749-b265-3ab3280bd12a). The default project keeps its old
+    id ("hmg") and so do projects made before; ids are never changed once given."""
+    while (pid := str(uuid.uuid4())) in existing:
+        pass
+    return pid
+
+
+new_project_id = uuid_project_id            # what create_project calls (tests swap it for readable ids)
+
+
 @router.post("/projects", dependencies=auth)
 async def create_project(body: NewProject) -> dict:
     rt, store = _store()
@@ -78,11 +90,7 @@ async def create_project(body: NewProject) -> dict:
     name = body.name.strip()
     if not name:
         raise HTTPException(422, {"errors": ["name: required"]})
-    existing = {w["id"] for w in await store.list_workspaces()}
-    base = _slug(name) or "project"
-    pid, n = base, 2
-    while pid in existing:
-        pid, n = f"{base}-{n}", n + 1
+    pid = new_project_id(name, {w["id"] for w in await store.list_workspaces()})
     await store.ensure_workspace(pid, name)
     if principal().is_user:                                  # the creator owns it (Hamsa: "My projects")
         await store.add_member(pid, principal().user["id"], "owner")
@@ -100,15 +108,16 @@ async def _copy_setup(store, src: str, dst: str, by: str) -> dict:
         row = await store.secret(src, s["name"])
         await store.put_secret(dst, s["name"], row["ciphertext"], row.get("hint") or "", by)
     providers = await store.providers(src)
+    short = dst[:8]                                          # ids of copies carry a short project tag (a full UUID is long)
     for p in providers:
         await store.put_provider({**{k: v for k, v in p.items() if k not in ("updated_at",)},
-                                  "id": f"{dst}-{p['id']}", "workspace_id": dst, "updated_by": by})
+                                  "id": f"{short}-{p['id']}", "workspace_id": dst, "updated_by": by})
     tools = await store.tools(src)
     if tools:
         await store.put_tools(dst, [{k: t[k] for k in ("name", "grp", "source", "policy") if k in t} for t in tools])
     servers = await store.mcp_servers(src)
     for m in servers:
-        new = f"{m['name']}-{dst}"
+        new = f"{m['name']}-{short}"
         await store.put_mcp_server({k: v for k, v in {**m, "id": new, "name": new, "workspace_id": dst}.items()
                                     if k != "updated_at"})
     return {"secrets": len(await store.secrets(dst)), "connections": len(providers), "tools": len(tools),

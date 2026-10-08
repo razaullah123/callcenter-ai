@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError, type AgentSummary, type ImportResult } from "../api";
 import { CI, CopyButton, MultiSelect, Pager, RowMenu, ViewMenu, loadColumns, saveColumns } from "../table";
 import { Button, ErrorBox, cx } from "../ui";
+import { usePermissions } from "../permissions";
 
 const PAGE = 20;
 const TYPES: [string, string][] = [["flow", "Flow Agent"], ["prompt", "Single Prompt"]];
@@ -218,6 +219,7 @@ export default function Agents() {
   const [creating, setCreating] = useState<"flow" | "prompt" | null>(null);
   const [deleting, setDeleting] = useState<AgentSummary | null>(null);
   const [importing, setImporting] = useState(false);
+  const { can } = usePermissions();
   const [notice, setNotice] = useState<string | null>(null);
   const duplicate = useMutation({
     mutationFn: async (a: AgentSummary) => {
@@ -249,11 +251,11 @@ export default function Agents() {
           <h1 className="text-3xl font-bold tracking-tight">Agents list</h1>
           <p className="mt-1 text-sm text-muted">Manage your agents and their settings.</p>
         </div>
-        <div className="flex flex-wrap gap-3">
+        {can("agents", "create") && <div className="flex flex-wrap gap-3">
           <ActionCard icon={A.bolt} label="Create Prompt Agent" onClick={() => setCreating("prompt")} />
           <ActionCard icon={A.flow} label="Create Flow Agent" onClick={() => setCreating("flow")} />
           <ActionCard icon={A.upload} label="Import Agent" onClick={() => setImporting(true)} />
-        </div>
+        </div>}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

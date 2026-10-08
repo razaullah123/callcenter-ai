@@ -9,6 +9,7 @@ import GlobalSettings, { KNOB_LABELS } from "../studio/GlobalSettings";
 import { MakeCall } from "./Numbers";
 import TestsTab, { AuditCard, gateBadge, PublishDialog } from "../studio/TestsTab";
 import { useTestCall, type TestMode } from "../studio/useTestCall";
+import { usePermissions } from "../permissions";
 import { Badge, Button, Card, ErrorBox, fmtTime } from "../ui";
 
 const JsonDiff = lazy(() => import("../studio/JsonDiff"));      // Monaco only loads when a diff is opened
@@ -20,6 +21,7 @@ type Tab = "flow" | "settings" | "tests" | "versions";
 export default function Studio() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
+  const { can, role } = usePermissions();
   const q = useQuery({ queryKey: ["agent", id], queryFn: () => api.agent(id) });
   const [tab, setTab] = useState<Tab>("flow");
   const [publishing, setPublishing] = useState(false);
@@ -106,7 +108,8 @@ export default function Studio() {
           )}
           <Button onClick={() => { setTab("flow"); setPanel(p => (p === "logs" ? null : "logs")); }}><span className="inline-flex items-center gap-1.5"><Icon d={ICONS.activity} />Live Call Logs</span></Button>
           <Link to={`/agents/${d.agent.id}/share`} className="rounded-lg border border-line bg-panel px-3 py-1.5 text-sm font-medium hover:bg-soft">Share</Link>
-          <Button kind="primary" onClick={() => setPublishing(true)} disabled={!d.has_draft}>⇪ Publish</Button>
+          <Button kind="primary" onClick={() => setPublishing(true)} disabled={!d.has_draft || !can("agents", "deploy")} title={can("agents", "deploy") ? undefined : "You have read-only access"}>⇪ Publish</Button>
+          {role === "VIEWER" && <span className="rounded-lg border border-line px-3 py-1.5 text-sm text-muted">Read-only</span>}
           <span className={`rounded-lg border px-3 py-1.5 text-sm ${dirty ? "border-warn/50 text-warn" : "border-good/40 text-good"}`}>
             {dirty ? "● Unsaved changes" : "✓ Saved"}</span>
           <Button onClick={() => exportAgent.mutate()} disabled={exportAgent.isPending}>⤓ Export</Button>

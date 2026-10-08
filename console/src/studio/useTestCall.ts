@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api, getProject } from "../api";
 
 // A test session with an agent: a browser voice call (/ws, microphone + speaker) or a typed chat (/ws/chat).
 // Both report the agent's lines and the call id; the call's events come from the live log (/api/live).
@@ -73,6 +74,16 @@ export function useTestCall() {
     stop();
     setLines([]); setLatency([]); setCallId(null); setMode(m); setState("connecting");
     const c = r.current;
+    try {                      // like Hamsa: right before a test call, the session and the permissions are checked afresh
+      const [session, perms] = await Promise.all([api.validateSession(), api.myPermissions(getProject() ?? "")]);
+      const mine = perms.data;
+      if (!session.data.authenticated || session.data.suspicious || !mine.resolvedPermissions.agents?.call
+          || (mine.agents && !mine.agents.includes(opts.agent))) {
+        setLines([{ role: "sys", text: "⚠ You don't have permission to test this agent." }]);
+        setState("ended");
+        return;
+      }
+    } catch { /* the check itself failed (offline): the server still refuses anything not allowed */ }
     if (m === "chat") {
       const ws = new WebSocket(`${wsBase()}/ws/chat`);
       c.ws = ws;

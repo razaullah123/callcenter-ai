@@ -214,3 +214,26 @@ def test_invited_users_can_be_stopped_from_creating_projects(client):
     rt.settings = rt.settings.model_copy(update={"invited_users_can_create_projects": False})
     assert c.post("/api/projects", json={"name": "Mine", "copy_setup": False}, headers=_h(sara)).status_code == 403
     assert c.post("/api/projects", json={"name": "Mine", "copy_setup": False}, headers=_h(owner)).status_code == 200
+
+
+def test_my_permissions_follow_the_role_and_the_agent_limit(client):
+    c, rt, store, loop = client
+    owner = _setup(c)
+    second = c.post("/api/agents", json={"name": "Second agent"}, headers=_h(owner)).json()["id"]
+    url = "/api/projects/members/me/permissions?projectId=hmg"
+
+    def get(token):
+        body = c.get(url, headers=_h(token)).json()
+        assert body["success"] is True and body["message"] == "success"
+        return body["data"], body["data"]["resolvedPermissions"]
+    d, p = get(owner)                                                    # Hamsa's shape: role + resource -> action -> bool
+    assert d["role"] == "OWNER" and d["agents"] is None and p["agents"]["create"] and p["members"]["invite"] and p["project"]["update"]
+    d, p = get(_join(c, owner, "view@example.com", role="viewer"))
+    assert d["role"] == "VIEWER" and p["agents"]["read"] and not p["agents"]["update"] and not p["agents"]["deploy"]
+    assert p["call_history"]["read"] and not p["tools"]["create"] and not p["members"]["invite"]
+    d, p = get(_join(c, owner, "dev@example.com", agent_ids=[second]))
+    assert d["agents"] == [second] and p["agents"]["update"] and p["agents"]["deploy"] and not p["agents"]["create"]
+    assert not p["members"]["invite"] and not p["secrets"]["read"] and not p["api_keys"]["read"]
+    assert c.get("/api/projects/members/me/permissions?projectId=nope", headers=_h(owner)).status_code == 404
+    assert c.post("/api/users/validate-session", headers=_h(owner)).json()["data"] == {"authenticated": True, "suspicious": False}
+    assert c.post("/api/users/validate-session").status_code == 401

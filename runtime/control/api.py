@@ -104,7 +104,7 @@ async def use_project(request: Request) -> None:
     from runtime.control.accounts import principal
     rt = _rt()
     who = principal()
-    ws = request.headers.get("x-project")
+    ws = request.headers.get("x-project") or request.query_params.get("projectId")     # ?projectId= is Hamsa's way
     if who.kind == "key":                                     # a key belongs to one project; it never sees another
         own = who.key["workspace_id"]
         if ws and ws != own:

@@ -385,3 +385,33 @@ def test_http_tools_follow_tools_mode(monkeypatch):
     assert simulated("read")[0] is False and simulated("write")[0] is True
     monkeypatch.setattr(s, "tools_mode", "live")
     assert simulated("write") is None
+
+
+def test_new_projects_get_uuid_ids(console, monkeypatch):
+    import uuid
+    from runtime.control import projects_api
+    monkeypatch.setattr(projects_api, "new_project_id", projects_api.uuid_project_id)     # the real thing, not the test slugs
+    c, rt, store, loop = console
+    first = c.post("/api/projects", json={"name": "Clinic", "copy_setup": True}).json()
+    second = c.post("/api/projects", json={"name": "Clinic", "copy_setup": False}).json()
+    assert str(uuid.UUID(first["id"])) == first["id"] and first["id"] != second["id"]      # same name, own id
+    assert [m["name"] for m in loop.run_until_complete(store.mcp_servers(first["id"]))] == [f"hmg_tools-{first['id'][:8]}"]
+    assert c.get("/api/agents", headers={"X-Project": first["id"]}).status_code == 200
+    assert "hmg" in {p["id"] for p in c.get("/api/projects").json()}                          # the default keeps its id
+
+
+def test_new_agents_get_uuid_ids_and_open_like_hamsa(console, monkeypatch):
+    import uuid
+    from runtime.control import agents_api
+    monkeypatch.setattr(agents_api, "new_agent_id", agents_api.uuid_agent_id)             # the real thing, not the test slugs
+    c, rt, store, loop = console
+    r = c.post("/api/agents", json={"name": "Clinic FAQ"}).json()
+    again = c.post("/api/agents", json={"name": "Clinic FAQ"}).json()                      # same name, own id
+    assert str(uuid.UUID(r["id"])) == r["id"] and again["id"] != r["id"]
+    # Hamsa's address: /voice-agents/<agent id>?projectId=<project id>
+    got = c.get(f"/api/voice-agents/{r['id']}?projectId=hmg")
+    assert got.status_code == 200 and got.json()["agent"]["id"] == r["id"]
+    assert c.get(f"/api/voice-agents/{r['id']}?projectId=nope").status_code == 404           # not that project
+    assert c.get(f"/api/agents/{r['id']}").status_code == 200                                # the old address still works
+    bundle = loop.run_until_complete(store.release(loop.run_until_complete(store.agent(r["id"]))["published_release_id"]))["bundle"]
+    assert bundle["knobs"]["entry_skill"] == f"clinic_faq_{r['id'][:8]}_main"                # readable skill names

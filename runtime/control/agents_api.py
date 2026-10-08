@@ -22,6 +22,7 @@ skill versions and pinned by the draft only.
 
 import copy
 import re
+import uuid
 from typing import Any, Literal
 
 import yaml
@@ -88,6 +89,24 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40]
 
 
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def uuid_agent_id(name: str) -> str:
+    """A new agent's id, like Hamsa's: a UUID (8f724d99-c291-4693-952c-51f098a8dc08). Agents made before keep theirs."""
+    return str(uuid.uuid4())
+
+
+new_agent_id = uuid_agent_id               # what create / import call (tests swap it for readable ids)
+
+
+def skill_key(agent_id: str, name: str) -> str:
+    """The prefix of an agent's own skills in the project's library ("<name>_<first 8 of the id>_main")."""
+    if not _UUID.fullmatch(agent_id):
+        return agent_id.replace("-", "_")
+    return f"{_slug(name).replace('-', '_')[:24] or 'agent'}_{agent_id[:8]}"
+
+
 # ---------------------------------------------------------------- agents
 
 
@@ -147,7 +166,7 @@ class NewAgent(BaseModel):
 @audited("agent.created")
 async def create_agent(body: NewAgent) -> dict:
     rt, store = _platform()
-    agent_id = _slug(body.name)
+    agent_id = new_agent_id(body.name) if body.name.strip() else ""
     if not agent_id or await store.agent(agent_id):
         raise HTTPException(409, "an agent with this name exists (or the name is empty)")
     if body.copy_from:
@@ -166,7 +185,8 @@ async def create_agent(body: NewAgent) -> dict:
 async def _blank_bundle(rt, store, agent_id: str, body: NewAgent) -> dict:
     """A minimal agent: its own persona + one skill with a one-node flow, no caller verification, the default
     agent's model connections, no tools yet."""
-    main, persona = f"{agent_id.replace('-', '_')}_main", f"{agent_id.replace('-', '_')}_persona"
+    key = skill_key(agent_id, body.name)
+    main, persona = f"{key}_main", f"{key}_persona"
     files = {"SKILL.md": BLANK_SKILL.format(name=body.name, description=body.description or body.name)}
     if body.type == "flow":
         files["flow.yaml"] = yaml.safe_dump(BLANK_FLOW, allow_unicode=True, sort_keys=False)
@@ -223,11 +243,11 @@ async def import_agent(body: ImportBody) -> dict:
             taken |= set(tools_in(((await store.release(a["published_release_id"]))["bundle"]).get("tools") or {}))
     parts = hamsa_import.convert(hamsa, taken_tools=taken)
     name = (body.name or parts["name"]).strip() or "Imported agent"
-    base = _slug(name) or "imported-agent"
+    base = new_agent_id(name) or "imported-agent"
     agent_id, k = base, 2
     while await store.agent(agent_id):
         agent_id, k = f"{base[:36]}-{k}", k + 1
-    key = agent_id.replace("-", "_")
+    key = skill_key(agent_id, name)
     flow_skill, persona = f"{key}_flow", f"{key}_persona"
     ws = current_project()
     v_flow = await store.add_skill_version(ws, flow_skill, {
@@ -268,6 +288,7 @@ async def import_agent(body: ImportBody) -> dict:
             "stats": parts["stats"], "tools": sorted(parts["tools"]), "report": parts["report"]}
 
 
+@router.get("/voice-agents/{agent_id}", dependencies=auth)        # Hamsa's address: /voice-agents/<agent id>?projectId=<project id>
 @router.get("/agents/{agent_id}", dependencies=auth)
 async def get_agent(agent_id: str) -> dict:
     rt, store = _platform()

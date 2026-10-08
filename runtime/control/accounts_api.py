@@ -123,6 +123,62 @@ async def me() -> dict:
     return {"kind": who.kind, "user": acc.public_user(who.user) if who.is_user else None, "platform_owner": who.platform}
 
 
+def _grant(actions: tuple[str, ...], allowed) -> dict[str, bool]:
+    return {a: bool(allowed(a) if callable(allowed) else allowed) for a in actions}
+
+
+def permissions_of(who, project: str, can_create_projects: bool) -> dict:
+    """What the caller may do in `project`, in Hamsa's shape: {resource: {action: bool}}. The console hides what is
+    refused; the API refuses it anyway (accounts.access_refusal)."""
+    role, limit = who.role(project), who.agents(project)
+    full = role in ("owner", "admin")                      # may change what they can see
+    setup = who.can_manage(project)                        # the project's shared setup, people and keys
+    open_agents = full and limit is None                   # not limited to some agents
+    return {
+        "agents": {"create": open_agents, "read": role is not None, "update": full, "delete": open_agents,
+                   "export": role is not None, "import": open_agents, "call": full, "deploy": full},
+        "knowledge_base": _grant(("create", "read", "update", "delete", "cancel", "upload"),
+                                 lambda a: role is not None if a == "read" else setup),
+        "tools": _grant(("create", "read", "update", "delete"), lambda a: role is not None if a == "read" else setup),
+        "phone_numbers": _grant(("create", "read", "update", "delete"), lambda a: role is not None if a == "read" else setup),
+        "call_history": {"read": role is not None, "delete": full, "export": role is not None, "monitor": full},
+        "outbound_calls": _grant(("create", "read", "update", "delete", "launch", "stop"),
+                                 lambda a: role is not None if a == "read" else setup),
+        "voices": _grant(("create", "read", "update", "delete"), lambda a: role is not None if a == "read" else setup),
+        "secrets": _grant(("create", "read", "update", "delete"), setup),
+        "api_keys": _grant(("create", "read", "delete"), setup),
+        "project": {"create": bool(who.platform or not who.is_user or can_create_projects), "read": role is not None,
+                    "update": role == "owner", "delete": False, "deactivate": False},
+        "members": {"read": role is not None, "invite": setup, "update": setup, "delete": setup},
+        "statistics": {"read": role is not None},
+        "outcome_dashboard": {"read": role is not None, "update": full},
+    }
+
+
+@router.post("/users/validate-session", dependencies=auth)
+async def validate_session() -> dict:
+    """Is the caller's session still good? (Hamsa: POST /users/validate-session, asked right before a test call.)
+    A token that isn't valid never gets here: the console's sign-in check answers 401 first."""
+    return {"success": True, "message": "success", "data": {"authenticated": True, "suspicious": False}}
+
+
+@router.get("/projects/members/me/permissions", dependencies=auth)
+async def my_permissions(projectId: str | None = None) -> dict:
+    """The caller's role and permissions in a project, shaped like Hamsa's
+    /projects/members/me/permissions?projectId=...  {success, message, data: {role, resolvedPermissions}}.
+    `data.agents` (ours) lists the agents a limited member may use; null = all of them."""
+    from runtime.platform import current_project
+    rt, store = _store()
+    who = principal()
+    project = projectId or current_project()
+    if who.role(project) is None or not any(w["id"] == project for w in await store.list_workspaces()):
+        raise HTTPException(404, {"success": False, "message": "project not found"})
+    owns = any(m["role"] == "owner" for m in who.memberships.values())
+    return {"success": True, "message": "success",
+            "data": {"role": (who.role(project) or "").upper(), "platformOwner": who.platform, "agents": who.agents(project),
+                     "resolvedPermissions": permissions_of(who, project, rt.settings.invited_users_can_create_projects or owns)}}
+
+
 class MeBody(BaseModel):
     name: str | None = None
     password: str | None = None

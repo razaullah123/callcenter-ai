@@ -227,7 +227,7 @@ def access_refusal(method: str, path: str, query_agent: str | None, who: Princip
         return 403, "your access is limited to some agents - API keys are managed by the project's owner"
     if query_agent and query_agent not in limit:
         return 404, "agent not found"
-    if parts[0] == "agents" and len(parts) > 1 and parts[1] != "import":
+    if parts[0] in ("agents", "voice-agents") and len(parts) > 1 and parts[1] != "import":
         return (404, "agent not found") if parts[1] not in limit else None
     if write and not own and parts[0] not in LIMITED_WRITES:
         return 403, "your access is limited to your agents - ask the project's owner for more"

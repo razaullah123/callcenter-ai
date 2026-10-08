@@ -273,6 +273,8 @@ export type Project = { id: string; name: string; created_at: string | null; pla
 export type User = { id: string; email: string; name: string; default_project: string | null };
 export type AuthStatus = { mode: "setup" | "login" | "signed_in" | "token" | "open"; user?: User; accounts: boolean;
   mail: boolean; open?: boolean };
+export type Permissions = { success: boolean; message: string; data: { role: "OWNER" | "ADMIN" | "VIEWER"; platformOwner: boolean;
+  agents: string[] | null; resolvedPermissions: Record<string, Record<string, boolean>> } };
 export type Member = { user_id: string; name: string; email: string; role: string; agent_ids: string[] | null; status: "joined"; joined_at: string; you: boolean };
 export type Invitation = { id: string; email: string; role: string; agent_ids: string[] | null; status: "invited" | "expired" | "joined";
   invited_by: string | null; created_at: string; expires_at: string };
@@ -416,6 +418,10 @@ export const api = {
     req<{ default_project: string }>("/api/me/default-project", { method: "PUT", body: JSON.stringify({ project }) }),
   setProjectLabel: (id: string, label: string) =>
     req<{ label: string | null }>(`/api/projects/${encodeURIComponent(id)}/label`, { method: "PUT", body: JSON.stringify({ label }) }),
+  validateSession: () =>
+    req<{ success: boolean; data: { authenticated: boolean; suspicious: boolean } }>("/api/users/validate-session", { method: "POST" }),
+  myPermissions: (projectId: string) =>
+    req<Permissions>(`/api/projects/members/me/permissions?projectId=${encodeURIComponent(projectId)}`),
   members: (id: string) => req<{ members: Member[]; invitations: Invitation[]; can_manage: boolean; you: string | null;
     agents: { id: string; name: string }[]; mail: boolean; accounts: boolean }>(`/api/projects/${encodeURIComponent(id)}/members`),
   invite: (id: string, email: string, role: "admin" | "viewer" = "admin", agent_ids: string[] | null = null) =>
@@ -497,7 +503,7 @@ export const api = {
   testConnection: (id: string) =>
     req<Record<string, unknown>>(`/api/connections/${encodeURIComponent(id)}/test`, { method: "POST" }),
   agents: () => req<AgentSummary[]>("/api/agents"),
-  agent: (id: string) => req<AgentDetail>(`/api/agents/${encodeURIComponent(id)}`),
+  agent: (id: string) => req<AgentDetail>(`/api/voice-agents/${encodeURIComponent(id)}?projectId=${encodeURIComponent(currentProject)}`),
   createAgent: (body: { name: string; description?: string; copy_from?: string; type?: "flow" | "prompt" }) =>
     req<{ id: string }>("/api/agents", { method: "POST", body: JSON.stringify(body) }),
   importAgent: (body: { content: string; name?: string; filename?: string }) =>
