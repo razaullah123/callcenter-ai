@@ -544,6 +544,13 @@ export const api = {
     req<{ ok: boolean }>("/api/routes", { method: "PUT", body: JSON.stringify(body) }),
   deleteRoute: (pattern: string) => req<{ ok: boolean }>(`/api/routes?pattern=${encodeURIComponent(pattern)}`, { method: "DELETE" }),
   toolLibrary: () => req<ToolLibrary>("/api/tool-library"),
+  /** Hamsa's list of a project's tools (GET /voice-agents/web-tool/list): skip is the page number from 1. */
+  toolList: (q: { skip: number; take: number; search?: string; collection?: string; status?: string }) => {
+    const p = new URLSearchParams({ projectId: getProject() ?? "", skip: String(q.skip), take: String(q.take) });
+    for (const k of ["search", "collection", "status"] as const) if (q[k]) p.set(k, q[k]!);
+    return req<{ success: boolean; message: string; data: { items: { id: string; name: string; type: string; isActive: boolean; description: string }[];
+      total: number; filtered: number; matched: number } }>(`/api/voice-agents/web-tool/list?${p}`);
+  },
   knowledge: () => req<KbList>("/api/knowledge"),
   kbItem: (id: string) => req<KbItem>(`/api/knowledge/${encodeURIComponent(id)}`),
   addKbText: (body: { name: string; content: string }) =>

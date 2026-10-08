@@ -126,6 +126,9 @@ class MCPPool:
         return {t.name: {"description": t.description or "", "input_schema": t.input_schema}
                 for s in self._servers.values() for t in s.tools}
 
+    def scoped(self, names: set[str]) -> "ScopedPool":
+        return ScopedPool(self, names)
+
     def status(self) -> dict[str, dict[str, Any]]:
         """Per server: connected?, its tools, the last connection error."""
         return {name: {"connected": s.session is not None, "tools": [t.name for t in s.tools],
@@ -138,6 +141,40 @@ class MCPPool:
             server = self._route.get(name)
         if server is None:
             raise KeyError(f"no MCP server provides tool {name!r}")
+        result = await server.call(name, arguments, timeout_s)
+        return (not result.is_error), parse_result(result)
+
+
+class ScopedPool:
+    """One project's view of the shared pool: only the servers it connected. A tool name that two projects' servers both
+    offer goes to this project's own server, never to the other project's."""
+
+    def __init__(self, pool: "MCPPool", names: set[str]) -> None:
+        self._pool, self._names = pool, set(names)
+
+    async def start(self) -> None:           # the pool is started once, for every project
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    def _servers(self) -> list[_ServerConnection]:
+        return [s for n, s in self._pool._servers.items() if n in self._names]
+
+    def schemas(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for s in self._servers():
+            for t in s.tools:
+                out.setdefault(t.name, {"description": t.description or "", "input_schema": t.input_schema})
+        return out
+
+    def status(self) -> dict[str, dict[str, Any]]:
+        return {n: v for n, v in self._pool.status().items() if n in self._names}
+
+    async def call(self, name: str, arguments: dict[str, Any], timeout_s: float) -> tuple[bool, Any]:
+        server = next((s for s in self._servers() if any(t.name == name for t in s.tools)), None)
+        if server is None:
+            raise KeyError(f"no MCP server of this project provides tool {name!r}")
         result = await server.call(name, arguments, timeout_s)
         return (not result.is_error), parse_result(result)
 

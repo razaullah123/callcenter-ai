@@ -131,7 +131,55 @@ type CanvasActions = {
   pickTool: (id: string) => void; selectEdge: (gi: number) => void; moveEdge: (gi: number, dir: -1 | 1) => void;
   /** Conversation card: switch between a prompt the agent follows and a message it says as written. */
   setMode: (id: string, mode: "prompt" | "static") => void;
+  /** Every node's id (the targets a new transition can go to). */
+  ids: string[];
+  /** The "Add" menu on a conversation card: a new transition of this kind to an existing node, or to a new one ("+new"). */
+  addTransition: (from: string, kind: AddKind, target: string) => void;
 };
+type AddKind = "prompt" | "keypad" | "reply";
+/** The kinds of transition a conversation card offers (Hamsa's Add menu: Prompt, DTMF Input, After User Replies). */
+const ADD_KINDS: { kind: AddKind; icon: string; label: string; hint: string }[] = [
+  { kind: "prompt", icon: "sparkles", label: "Prompt", hint: "Natural language condition" },
+  { kind: "keypad", icon: "hash", label: "DTMF Input", hint: "Keypad input detection" },
+  { kind: "reply", icon: "skill", label: "After User Replies", hint: "Advance after the user replies" },
+];
+
+/** "+ Add" on a conversation card: pick the kind, then where it goes. */
+function AddTransition({ id }: { id: string }) {
+  const act = useContext(Actions)!;
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<AddKind | null>(null);
+  const close = () => { setOpen(false); setKind(null); };
+  return (
+    <div className="nodrag nopan relative">
+      <div className="relative flex items-center gap-1 rounded-lg border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-accent-text">
+        <button type="button" className="flex flex-1 items-center gap-1 text-left" onClick={e => { e.stopPropagation(); setOpen(o => !o); setKind(null); }}>
+          <span className="text-sm leading-none">+</span> Add<span className="font-normal text-muted"> — or drag from ● to connect</span></button>
+        <Handle id="new" type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-slate-400" />
+      </div>
+      {open && (
+        <div role="menu" className="absolute bottom-full right-0 z-30 mb-1 w-56 rounded-lg border border-line bg-panel p-1 text-xs shadow-lg" onMouseLeave={() => !kind && close()}>
+          {!kind ? ADD_KINDS.map(k => (
+            <button key={k.kind} role="menuitem" className="flex w-full items-start gap-2 rounded px-2 py-1.5 text-left hover:bg-soft"
+              onClick={e => { e.stopPropagation(); setKind(k.kind); }}>
+              <span className="mt-0.5"><NodeIcon type={k.icon} size={13} /></span>
+              <span><span className="block font-medium">{k.label}</span><span className="block text-[10px] text-muted">{k.hint}</span></span>
+            </button>))
+            : (
+              <div className="space-y-1.5 p-1.5">
+                <div className="font-medium">Go to</div>
+                <select id={`add-target-${id}`} autoFocus className="w-full text-xs" defaultValue="" onClick={e => e.stopPropagation()}
+                  onChange={e => { if (e.target.value) { act.addTransition(id, kind, e.target.value); close(); } }}>
+                  <option value="">choose…</option>
+                  <option value="+new">＋ a new conversation node</option>
+                  {act.ids.filter(x => x !== id).map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+                <button className="text-[10px] text-muted hover:text-ink" onClick={e => { e.stopPropagation(); setKind(null); }}>← back</button>
+              </div>)}
+        </div>)}
+    </div>
+  );
+}
 const Actions = createContext<CanvasActions | null>(null);
 
 function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
@@ -238,10 +286,11 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
                 </div>);
             })}
             {auto && <div className="text-[10px] text-muted">No transitions — the call stays here.</div>}
-            <div className="relative flex items-center gap-1 rounded-lg border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-accent-text">
-              <span className="text-sm leading-none">+</span> Add — drag from ● to connect
-              <Handle id="new" type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-slate-400" />
-            </div>
+            {n.type === "conversation" ? <AddTransition id={id} /> : (
+              <div className="relative flex items-center gap-1 rounded-lg border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-accent-text">
+                <span className="text-sm leading-none">+</span> Add — drag from ● to connect
+                <Handle id="new" type="source" position={Position.Right} className="!-right-[13px] !h-2.5 !w-2.5 !bg-slate-400" />
+              </div>)}
           </div>
         </div>
       )}
@@ -433,6 +482,20 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
       else if (a === "duplicate") duplicateNode(id);
       else deleteNode(id);
     },
+    ids: g.nodes.map(n => n.id),
+    addTransition: (from, kind, target) => {
+      const when: Record<string, unknown> = kind === "prompt" ? { llm: "" } : kind === "keypad" ? { dtmf: "" } : { replied: true };
+      let to = target, nodes = g.nodes;
+      if (target === "+new") {                         // a new conversation node to the right of this one
+        let i = 1; while (g.nodes.some(n => n.id === `conversation_${i}`)) i++;
+        to = `conversation_${i}`;
+        const at = rfNodes.find(n => n.id === from)?.position ?? { x: 0, y: 0 };
+        const used = g.edges.filter(e => e.from === from).length;
+        nodes = [...nodes, { id: to, type: "conversation", instructions: "", position: { x: at.x + 340, y: at.y + used * 140 } }];
+      }
+      const edges = [...g.edges, { from, to, when }];
+      setG(x => ({ ...x, nodes, edges })); inspect({ kind: "edge", gi: g.edges.length }); touch();
+    },
     pickTool: id => setPicker(id), selectEdge: gi => inspect({ kind: "edge", gi }), moveEdge,
     setMode: (id, mode) => {
       const cur = g.nodes.find(nd => nd.id === id);
@@ -559,7 +622,7 @@ function ToolPicker({ tools, info, current, onPick, onClose }: {
               {info?.[t] && <><Badge>{info[t].source}</Badge><Badge tone={info[t].kind === "read" ? "neutral" : "warn"}>{info[t].kind}</Badge></>}
               <Button kind={t === current ? "primary" : "default"} onClick={() => onPick(t)}>{t === current ? "Selected" : "Select"}</Button>
             </div>))}
-          {shown.length === 0 && <div className="py-6 text-center text-sm text-muted">No tool matches. Add tools to this agent on the Tools page.</div>}
+          {shown.length === 0 && <div className="py-6 text-center text-sm text-muted">No tool matches. Add the tool on the Tools page: tools belong to the project, so every agent in it can use them.</div>}
         </div>
       </div>
     </div>

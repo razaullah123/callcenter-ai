@@ -130,6 +130,21 @@ def tools_in(cfg: dict[str, Any]) -> dict[str, tuple[str, dict]]:
     return {n: (g, p or {}) for g, entries in (cfg.get("skills") or {}).items() for n, p in (entries or {}).items()}
 
 
+async def attach_library(store, bundle: dict[str, Any], names: set[str] | None = None) -> list[str]:
+    """Adds the project's library tools (all of them, or only `names`) that `bundle` doesn't have yet, with their current
+    policies. The library is the project's: connect an MCP server or define a tool once and every agent of the project can use
+    it; an agent keeps the policies it was released with (releases are frozen). Returns the names added."""
+    have = tools_in(bundle.get("tools") or {})
+    added = []
+    for row in await store.tools(current_project()):
+        name = row["name"]
+        if name in have or (names is not None and name not in names) or (row["policy"] or {}).get("enabled") is False:
+            continue
+        bundle["tools"] = put_in_config(bundle.get("tools") or {}, name, row["grp"], row["policy"] or {})
+        added.append(name)
+    return added
+
+
 async def usage(store) -> dict[str, list[str]]:
     """tool name → agents whose published release has it."""
     used: dict[str, list[str]] = {}

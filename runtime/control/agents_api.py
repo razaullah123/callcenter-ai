@@ -36,7 +36,7 @@ from runtime.harness.prompts import PHRASE_NAMES, Phrases
 from runtime.platform import WORKSPACE, current_project, gate, hamsa_import
 from runtime.platform.bundle import KNOBS, SCHEMA, validate as validate_bundle
 from runtime.platform.loader import skill_ref
-from runtime.platform.toollib import tools_in
+from runtime.platform.toollib import attach_library, tools_in
 from runtime.skills import SKILL_FILES, Graph
 
 router = APIRouter(prefix="/api")
@@ -177,6 +177,7 @@ async def create_agent(body: NewAgent) -> dict:
         bundle["agent"] = {**bundle.get("agent", {}), "name": body.name}
     else:
         bundle = await _blank_bundle(rt, store, agent_id, body)
+    await attach_library(store, bundle)                  # the project's tools are available to every agent in it
     await store.put_agent({"id": agent_id, "workspace_id": current_project(), "name": body.name,
                            "description": body.description})
     rel = await store.add_release(agent_id, bundle, body.author, "created" + (f" from {body.copy_from}"
@@ -239,8 +240,10 @@ async def import_agent(body: ImportBody) -> dict:
     except ValueError as e:
         raise HTTPException(422, str(e)) from None
     taken: set[str] = set()                            # tool names the project already has
-    for status in (rt.mcp_status() if hasattr(rt, "mcp_status") else {}).values():
-        taken |= set((status or {}).get("tools") or [])
+    mine = {m["name"] for m in await store.mcp_servers(current_project())}          # this project's servers only
+    for server, status in (rt.mcp_status() if hasattr(rt, "mcp_status") else {}).items():
+        if server in mine:
+            taken |= set((status or {}).get("tools") or [])
     for a in await store.agents(current_project()):
         if a.get("published_release_id"):
             taken |= set(tools_in(((await store.release(a["published_release_id"]))["bundle"]).get("tools") or {}))
@@ -402,6 +405,11 @@ async def put_draft_skill(agent_id: str, key: str, body: SkillBody) -> dict:
     files = {f: files[f] for f in SKILL_FILES if files.get(f, "").strip()}
     if "SKILL.md" not in files:
         files["SKILL.md"] = f"---\ndescription: {key}\n---\n"
+    if files.get("flow.yaml"):             # a library tool the flow uses joins the agent (any tool of the project may be used)
+        try:
+            await attach_library(store, bundle, Graph.parse(files["flow.yaml"]).all_tools())
+        except Exception:                  # a flow that does not parse is reported by the check below
+            pass
     if errors := await _check_with_files(rt, agent_id, bundle, key, files):
         raise HTTPException(422, {"errors": errors})
     version = await store.add_skill_version(current_project(), lib, files, body.author, body.note or "studio draft")

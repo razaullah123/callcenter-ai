@@ -146,6 +146,8 @@ function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLog
   const lib = useQuery({ queryKey: ["tool-library"], queryFn: api.toolLibrary });
   const toolInfo = Object.fromEntries((lib.data?.tools ?? []).map(t => [t.name, {
     description: t.description, kind: t.policy.kind, source: t.source === "mcp" && t.server ? `mcp · ${t.server}` : t.source }]));
+  // every tool of the project can be used (one the agent doesn't have yet joins it when the flow is saved)
+  const allTools = [...new Set([...d.tools, ...(lib.data?.tools ?? []).filter(t => t.policy.enabled !== false).map(t => t.name)])].sort();
   const withFlow = Object.entries(d.skills).filter(([, s]) => s.flow?.graph);
   const [skill, setSkill] = useState(withFlow[0]?.[0] ?? "");
   const save = useMutation({ mutationFn: (g: FlowGraph) => api.putDraftSkill(d.agent.id, skill, { graph: g }), onSuccess: onSaved });
@@ -169,7 +171,7 @@ function FlowTab({ d, onSaved, onDirty, active, follow, locate, aside, onViewLog
         {s && <span className="text-xs text-muted">· {s.library} v{s.version}</span>}
       </div>
       <ErrorBox error={save.error} />
-      {s?.flow?.graph && <FlowCanvas key={`${skill}:${s.version}`} graph={s.flow.graph} converted={!!s.flow.converted} tools={d.tools}
+      {s?.flow?.graph && <FlowCanvas key={`${skill}:${s.version}`} graph={s.flow.graph} converted={!!s.flow.converted} tools={allTools}
         skills={Object.keys(d.skills).filter(k => k !== "_persona")} saving={save.isPending} onSave={g => save.mutate(g)}
         onDirty={onDirty} aside={aside} activeNode={activeSkill === skill ? activeNode : null} follow={follow} locate={locateHere}
         toolInfo={toolInfo} onViewLogs={onViewLogs} onInspect={onInspect} customVars={d.bundle.variables}

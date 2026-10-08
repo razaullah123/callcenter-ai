@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -6,7 +6,7 @@ import {
   type ToolPolicy, type ToolTestOverride,
 } from "../api";
 import { copyText } from "../Projects";
-import { CI, CopyButton, RowMenu, usePopover } from "../table";
+import { CI, CopyButton, Pager, RowMenu, usePopover } from "../table";
 import { Badge, Button, Empty, ErrorBox, cx } from "../ui";
 
 // Tool library (Hamsa's "Integration Tools" / Tools Templates): tool cards on the left (collections, drafts, a ⋮ menu
@@ -808,14 +808,21 @@ export default function Tools() {
   const [drafts, setDrafts] = useState<Draft[]>(() => store.get(draftsKey(), []));
   const [moving, setMoving] = useState<LibraryTool | null>(null);
   const [pane, setPane] = useState<Pane>(null);
-  const refresh = () => qc.invalidateQueries({ queryKey: ["tool-library"] });
+  const [page, setPage] = useState(0);
+  const PAGE = 10;
+  // the list on the left comes from the paged list (like Hamsa's /voice-agents/web-tool/list); the details from the library
+  const listQ = useQuery({ queryKey: ["tool-list", page, filter, collection, status], placeholderData: keepPreviousData,
+    queryFn: () => api.toolList({ skip: page + 1, take: PAGE, search: filter, collection, status: status === "all" ? undefined : status }) });
+  const refresh = () => { qc.invalidateQueries({ queryKey: ["tool-library"] }); qc.invalidateQueries({ queryKey: ["tool-list"] }); };
   const saveDrafts = (d: Draft[]) => { setDrafts(d); store.set(draftsKey(), d.map(withoutSecretValues)); };
   const lib = q.data;
   const groups = useMemo(() => [...new Set([...(lib?.tools ?? []).map(t => t.group), ...extraCollections])].sort(), [lib, extraCollections]);
-  const tools = useMemo(() => (lib?.tools ?? []).filter(t => (!collection || t.group === collection)
-    && (status === "all" || (status === "inactive") === (t.policy.enabled === false))
-    && (!filter || `${t.name} ${t.group} ${t.description}`.toLowerCase().includes(filter.toLowerCase())))
-    .sort((a, b) => a.name.localeCompare(b.name)), [lib, filter, collection, status]);
+  const matched = listQ.data?.data.matched ?? 0;
+  const pages = Math.max(1, Math.ceil(matched / PAGE));
+  useEffect(() => { setPage(0); }, [filter, collection, status]);
+  useEffect(() => { if (page > pages - 1) setPage(pages - 1); }, [page, pages]);
+  const tools = useMemo(() => (listQ.data?.data.items ?? []).map(i => lib?.tools.find(t => t.name === i.name)).filter((t): t is LibraryTool => !!t),
+    [listQ.data, lib]);
   if (!lib) return <ErrorBox error={q.error} />;
   const selectedName = pane?.kind === "tool" ? pane.name : params.get("tool");
   const selected = lib.tools.find(t => t.name === selectedName) ?? (pane === null ? tools[0] : undefined);
@@ -880,7 +887,7 @@ export default function Tools() {
                 {TI.back}Collections</button>
               <div className="flex items-center justify-between px-3 py-2.5 text-sm font-medium">
                 <span className={cx(collection && "font-mono")}>{collection || "All Tools"}</span>
-                <span className="text-xs font-normal text-muted">{tools.length}</span>
+                <span className="text-xs font-normal text-muted">{matched}</span>
               </div>
             </div>
           )}
@@ -903,6 +910,7 @@ export default function Tools() {
                   { label: "Delete", icon: TI.trash, danger: true, onClick: () => show(t.name, true) },
                 ]} />} />
             ))}
+            {pages > 1 && <div className="flex justify-center py-1"><Pager page={page} pages={pages} onPage={setPage} /></div>}
             {!tools.length && <Empty>{collection && !filter ? "No tools in this collection yet — use ⋮ → Move to Collection on a tool." : "No tools match."}</Empty>}
             {discovered.length > 0 && <>
               <div className="pt-2 text-xs font-semibold tracking-wide text-muted uppercase">Available from servers · {discovered.length}</div>

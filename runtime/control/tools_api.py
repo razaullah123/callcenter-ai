@@ -44,14 +44,23 @@ def _schemas(rt) -> dict[str, dict]:
     return rt.backend.schemas() if hasattr(rt.backend, "schemas") else {}
 
 
+async def _project_mcp(rt, store):
+    """(backend view, status, schemas) of the current project's MCP servers only: another project's servers and tools are
+    not shown here and never answer this project's calls."""
+    names = {m["name"] for m in await store.mcp_servers(current_project())}
+    backend = rt.backend.scoped(names) if hasattr(rt.backend, "scoped") else rt.backend
+    status = {n: v for n, v in (backend.status() if hasattr(backend, "status") else {}).items() if n in names}
+    return backend, status, (backend.schemas() if hasattr(backend, "schemas") else {})
+
+
 @router.get("/tool-library", dependencies=auth)
 async def library() -> dict:
     rt, store = _platform()
     load_packs()
     used = await toollib.usage(store)
-    status = rt.mcp_status() if hasattr(rt, "mcp_status") else {}
+    _, status, mcp_schemas = await _project_mcp(rt, store)
     server_of = {t: name for name, st in status.items() for t in st.get("tools", [])}
-    mcp_schemas, local = _schemas(rt), local_schemas()
+    local = local_schemas()
     rows = await store.tools(current_project())
     names = {r["name"] for r in rows}
     tools = []
@@ -77,6 +86,75 @@ async def library() -> dict:
             "agents": [{"id": a["id"], "name": a["name"]} for a in await store.agents(current_project())]}
 
 
+# ---------------------------------------------------------------- Hamsa's shape of the same list
+# GET /v2/voice-agents/web-tool/list?projectId=&skip=&take=  ->  {success, message, data: {items, total, filtered}}
+# (skip is the page number, from 1). The Tools page of the console reads /api/tool-library for the policies; this is the
+# list the way Hamsa returns it, for anything written against Hamsa's API.
+
+_TYPES = {"http": "FUNCTION", "mcp": "MCP", "local": "LOCAL", "web": "WEB"}
+
+
+def hamsa_tool(row: dict, project: str, schema: dict, server_url: str | None) -> dict:
+    import uuid
+    policy = row.get("policy") or {}
+    http = policy.get("http") or {}
+    source = row.get("source") or policy.get("source") or "mcp"
+    key = f"{project}/{row['name']}"
+    settings = {"httpHeaders": http.get("headers") or {}, "pathParameters": None,
+                "serverUrl": http.get("url") if source == "http" else server_url,
+                "timeout": policy.get("timeout_s"), "authToken": None,
+                "methodType": http.get("method") if source == "http" else None, "onHoldMusic": False}
+    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "persistentId": uuid.uuid5(uuid.NAMESPACE_URL, "p/" + key).hex[:24],
+            "version": 1, "name": row["name"], "type": _TYPES.get(source, "FUNCTION"), "userId": None, "projectId": project,
+            "isActive": policy.get("enabled") is not False, "async": bool(policy.get("async")),
+            "description": (policy.get("description") or schema.get("description") or "")[:1000],
+            "collectionId": None, "toolSettings": settings,
+            "params": policy.get("input_schema") or schema.get("input_schema") or {"type": "object", "required": [], "properties": {}},
+            "messages": []}
+
+
+@router.get("/voice-agents/web-tool/list", dependencies=auth)
+async def hamsa_tool_list(skip: int = 1, take: int = 10, search: str | None = None, q: str | None = None,
+                          returnUncategorized: bool = False, collection: str | None = None, status: str | None = None) -> dict:
+    """`collection` (a group) and `status` (active | inactive) filter further; `matched` counts the tools that match
+    across all pages (for the pager)."""
+    rt, store = _platform()
+    project = current_project()
+    _, status, mcp_schemas = await _project_mcp(rt, store)
+    server_of = {t: name for name, st in status.items() for t in st.get("tools", [])}
+    urls = {m["name"]: m.get("url") for m in await store.mcp_servers(project)}
+    local = local_schemas()
+    needle = (search or q or "").strip().lower()
+    rows = sorted(await store.tools(project), key=lambda r: r["name"].lower())
+    items = []
+    for r in rows:
+        schema = mcp_schemas.get(r["name"]) or local.get(r["name"]) or {}
+        t = hamsa_tool(r, project, schema, urls.get(server_of.get(r["name"], "")))
+        if needle and needle not in f"{r['grp']} {t['name']} {t['description']}".lower():
+            continue
+        if (collection and r["grp"] != collection) or (status == "active" and not t["isActive"]) \
+                or (status == "inactive" and t["isActive"]):
+            continue
+        items.append(t)
+    take = max(1, min(take, 100))
+    page = items[(max(skip, 1) - 1) * take:][:take]
+    return {"success": True, "message": "success",
+            "data": {"items": page, "total": len(rows), "filtered": len(page), "matched": len(items)}}
+
+
+@router.get("/voice-agents/collections/list", dependencies=auth)
+async def hamsa_collections(skip: int = 1, take: int = 100) -> dict:
+    """Hamsa's tool collections: here, the groups the Tools page files tools under."""
+    rt, store = _platform()
+    groups: dict[str, int] = {}
+    for r in await store.tools(current_project()):
+        groups[r["grp"]] = groups.get(r["grp"], 0) + 1
+    items = [{"id": g, "name": g, "projectId": current_project(), "toolsCount": n} for g, n in sorted(groups.items())]
+    take = max(1, min(take, 100))
+    page = items[(max(skip, 1) - 1) * take:][:take]
+    return {"success": True, "message": "success", "data": {"items": page, "total": len(items), "filtered": len(page)}}
+
+
 class ToolBody(BaseModel):
     group: str
     policy: dict[str, Any]
@@ -90,7 +168,7 @@ class ToolBody(BaseModel):
 async def put_tool(name: str, body: ToolBody) -> dict:
     rt, store = _platform()
     policy = {k: v for k, v in body.policy.items() if v not in (None, "", [], {})}
-    if errors := toollib.validate_policy(name, policy, mcp_tools=set(_schemas(rt)), local_tools=set(local_schemas())):
+    if errors := toollib.validate_policy(name, policy, mcp_tools=set((await _project_mcp(rt, store))[2]), local_tools=set(local_schemas())):
         raise HTTPException(422, {"errors": errors})
     if not re.fullmatch(r"[a-z][a-z0-9_]*", body.group):
         raise HTTPException(422, {"errors": ["group: lower-case letters, digits and _ (usually the skill name)"]})
@@ -170,7 +248,7 @@ async def test_tool(name: str, body: TestBody) -> dict:
         elif row["source"] == "local":
             ok, data = True, await call_local(name, body.args, ToolContext(call_id="console-test"))
         else:
-            ok, data = await rt.backend.call(name, body.args, timeout)
+            ok, data = await (await _project_mcp(rt, store))[0].call(name, body.args, timeout)
     except Exception as e:
         return {"ok": False, "error": repr(e)[:400], "ms": round((time.perf_counter() - t0) * 1000)}
     return {"ok": ok, "ms": round((time.perf_counter() - t0) * 1000), "data": _clip(data)}

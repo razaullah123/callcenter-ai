@@ -51,6 +51,13 @@ class HybridMCP:
         self.live, self.fake, self.echo = live, fake or fake_backend(), echo
         self.live_tools = LIVE_SAFE | (AUTH_TOOLS if live_auth else set()) | (BOOKING_TOOLS if live_booking else set())
 
+    def scoped(self, names: set[str]) -> "HybridMCP":
+        """The same simulation rules over one project's MCP servers only."""
+        import copy
+        view = copy.copy(self)
+        view.live = self.live.scoped(names) if self.live is not None and hasattr(self.live, "scoped") else self.live
+        return view
+
     async def start(self) -> None:
         if self.live:
             await self.live.start()

@@ -139,3 +139,22 @@ async def test_most_specific_route_wins():
     assert await loader.route(number="88809999") == "b"
     assert await loader.route(number="8812") == "a"
     assert await loader.route(number="0550000000") == "hmg-care"
+
+
+def test_every_tool_of_the_project_is_usable_by_every_agent(studio):
+    """An MCP / library tool belongs to the project: a new agent has it, and a flow may use a tool added after the agent was made."""
+    c, rt, store, loop = studio
+    library = {r["name"] for r in loop.run_until_complete(store.tools("hmg"))}
+    assert library
+    c.post("/api/agents", json={"name": "Clinic FAQ"})
+    assert library <= set(c.get("/api/agents/clinic-faq").json()["tools"])               # a new agent starts with the project's tools
+    loop.run_until_complete(store.put_tools("hmg", [{"name": "late_tool", "grp": "misc", "source": "http", "policy": {
+        "kind": "read", "source": "http", "description": "added later", "input_schema": {"type": "object", "properties": {}},
+        "http": {"method": "GET", "url": "https://example.test/x"}}}]))
+    assert "late_tool" not in c.get("/api/agents/clinic-faq").json()["tools"]
+    graph = c.get("/api/agents/clinic-faq").json()["skills"]["clinic_faq_main"]["flow"]["graph"]
+    graph["nodes"].append({"id": "look", "type": "tool", "tool": "late_tool", "position": {"x": 300, "y": 0}})
+    graph["edges"].append({"from": "start", "to": "look", "when": {"llm": "the caller asks"}})
+    r = c.put("/api/agents/clinic-faq/draft/skills/clinic_faq_main", json={"graph": graph})
+    assert r.status_code == 200, r.text
+    assert "late_tool" in c.get("/api/agents/clinic-faq").json()["tools"]                # joined the agent when the flow was saved

@@ -201,7 +201,10 @@ class AgentLoader:
             tools_cfg = copy.deepcopy(tools_cfg if tools_cfg is not None else load_tools_config())
             tools_cfg.setdefault("skills", {}).setdefault("knowledge", {})[KB_TOOL] = {"kind": "read", "source": "local",
                                                                                          "timeout_s": 8}
-        executor = executor_for(self.backend, tools_cfg)
+        backend = self.backend
+        if self.store is not None and hasattr(backend, "scoped"):      # only this project's MCP servers serve this agent
+            backend = backend.scoped({m["name"] for m in await self.store.mcp_servers(current_project())})
+        executor = executor_for(backend, tools_cfg)
         skill_files = await self._skill_files(bundle)
         skills = SkillSet(executor.catalog, skill_files, phrases)
         if kb_items:
