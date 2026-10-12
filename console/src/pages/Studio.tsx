@@ -275,9 +275,6 @@ function SettingsTab({ d, onSaved }: { d: AgentDetail; onSaved: () => void }) {
               {t === "bool" ? (
                 <select id={`knob-${k}`} className="w-full" value={String(b.knobs[k] ?? "")} onChange={e => setKnob(k, e.target.value === "true")}>
                   <option value="true">true</option><option value="false">false</option></select>
-              ) : k === "red_flag_mode" ? (
-                <select id={`knob-${k}`} className="w-full" value={String(b.knobs[k] ?? "")} onChange={e => setKnob(k, e.target.value)}>
-                  {["empathy_only", "advise_and_continue", "stop"].map(m => <option key={m}>{m}</option>)}</select>
               ) : k === "entry_skill" ? (
                 <select id={`knob-${k}`} className="w-full" value={String(b.knobs[k] ?? "")} onChange={e => setKnob(k, e.target.value)}>
                   {Object.keys(d.skills).filter(s => s !== "_persona").map(s => <option key={s}>{s}</option>)}</select>

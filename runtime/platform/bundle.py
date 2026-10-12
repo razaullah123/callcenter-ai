@@ -4,7 +4,7 @@
      "agent":  {"name": "...", "languages": ["ar", "en"], "default_language": "ar"},
      "models": {"llm": {"provider": "<providers.id>", "settings": {"model": "..."}}, "stt": …, "tts": …,
                 "embedding": …},                        # repo / offline bundles use {"type": "groq"} instead of an id
-     "knobs":  {"red_flag_mode": "...", "voice_end_silence_ms": 550, …},
+     "knobs":  {"voice_end_silence_ms": 550, …},
      "voice":  {"stt_hint": {"ar": "...", "en": "..."}},
      "phrases": {"GREETING": {"ar": "...", "en": "..."}, …},   # overrides of harness.prompts defaults
      "variables": {"business_name": {"type": "string", "default": "…", "description": "…"}},   # custom variables
@@ -35,7 +35,7 @@ CONNECTION_FIELDS = {"api_key", "base_url", "url", "headers", "timeout_s", "toke
 
 # Per-agent knobs: name → type. They overlay the process settings for that agent's calls.
 KNOBS: dict[str, type] = {
-    "red_flag_mode": str, "voice_end_silence_ms": int, "voice_barge_in_ms": int, "voice_barge_in_confirm": bool,
+    "voice_end_silence_ms": int, "voice_barge_in_ms": int, "voice_barge_in_confirm": bool,
     "voice_level_gate_db": float, "voice_filler_after_s": float, "llm_hedge_after_s": float,
     "voice_interrupt": bool, "voice_wait_for_user": str, "voice_vad_threshold": float, "voice_inactivity_s": float, "call_max_minutes": float,
     "record_calls": bool, "recording_retention_days": int,
@@ -62,10 +62,15 @@ def coerce(kind: type, value: Any) -> Any:
 # Knobs that take one of a fixed set of words.
 CHOICES: dict[str, tuple[str, ...]] = {"voice_wait_for_user": ("never", "always", "outbound")}
 
+# Settings that no longer exist; releases and drafts made before still carry them, and they are simply ignored.
+RETIRED_KNOBS = {"red_flag_mode"}
+
 
 def knob_errors(knobs: dict[str, Any]) -> list[str]:
     errors = []
     for k, v in knobs.items():
+        if k in RETIRED_KNOBS:
+            continue
         if k not in KNOBS:
             errors.append(f"knobs: unknown setting {k}")
             continue

@@ -48,7 +48,20 @@ export function referencedNames(text: string): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(/\{\{-?\s*([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]);
   for (const m of text.matchAll(/\{%-?\s*(?:el)?if\s+(?:not\s+)?([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]);
-  return [...out];
+  // names the template defines itself ({% set x = … %}, {% for a, b in … %}, {% macro f(x) %}) and Jinja's own globals
+  const locals = new Set(["loop", "namespace", "range", "true", "false", "none", "True", "False", "None"]);
+  for (const m of text.matchAll(/\{%-?\s*set\s+([A-Za-z_][A-Za-z0-9_]*)/g)) locals.add(m[1]);
+  for (const m of text.matchAll(/\{%-?\s*for\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*([A-Za-z_][A-Za-z0-9_]*))?\s+in\b/g)) { locals.add(m[1]); if (m[2]) locals.add(m[2]); }
+  for (const m of text.matchAll(/\{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/g)) {
+    locals.add(m[1]);
+    for (const a of m[2].split(",")) { const nm = a.trim().split("=")[0].trim(); if (nm) locals.add(nm); }
+  }
+  // {{ name|default(…) }} already copes with the value not existing yet, so it is not a "used too early" problem
+  for (const m of text.matchAll(/\{\{-?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*default\b/g)) {
+    if (![...text.matchAll(new RegExp("\\{\\{-?\\s*" + m[1] + "\\s*(?!\\|\\s*default\\b)[^A-Za-z0-9_|]", "g"))].length
+      && ![...text.matchAll(new RegExp("\\{%-?\\s*(?:el)?if\\s+(?:not\\s+)?" + m[1] + "\\b", "g"))].length) locals.add(m[1]);
+  }
+  return [...out].filter(n => !locals.has(n));
 }
 
 /** The texts of a step that may hold templates. */

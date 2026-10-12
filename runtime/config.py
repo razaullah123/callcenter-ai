@@ -43,12 +43,6 @@ class Settings(BaseSettings):
     embedding_url: str | None = None
     embedding_dim: int = 1024
 
-    # Emergency symptoms during a call (chest pain, can't breathe, ...):
-    #   advise_and_continue — empathy + one short ER / 997 safety line, then continue booking
-    #   empathy_only        — empathy, then continue booking (no safety line) — default (user decision)
-    #   stop                — safety message only, no booking
-    red_flag_mode: str = "empathy_only"   # user decision: no ER / 997 line; advise_and_continue | stop also exist
-
     # Tool backend: live (production) | hybrid (live lookups, simulated patient/auth/writes) | mock
     tools_mode: str = "hybrid"
     hybrid_live_auth: bool = False       # hybrid: real patient lookup + OTP

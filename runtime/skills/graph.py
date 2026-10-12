@@ -301,6 +301,8 @@ class Graph:
         said = state.get("said")
         if state.get("silent") == node.id or (node.skip_response and said and said[0] == node.id):
             replied = True                               # arrived silently / a message that doesn't wait for the caller
+        elif node.type == "conversation" and node.skip_response and not replied:
+            return None                                  # a message (static or model-written) says itself first, then we move on
         for e in self._edges_from(node.id):
             target = self.nodes.get(e.target)
             if target is not None and target.type == "tool" and target.id != node.id \

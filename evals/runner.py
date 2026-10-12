@@ -111,6 +111,7 @@ async def _run_case_once(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMP
     t0 = time.perf_counter()
     calls: list[tuple[str, dict]] = []
     offered_doctors: list[list[int]] = []          # doctor ids per successful slot search, in the order returned
+    offered_names: dict[int, list[str]] = {}       # doctor id -> the names the agent may say (Arabic / English)
     executor = await build_tooling(fixture_backend(), tools_config=(bundle or {}).get("tools"))
     original_execute = executor.execute
 
@@ -120,7 +121,10 @@ async def _run_case_once(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMP
         calls.append((call.name, dict(call.arguments)))
         result = await original_execute(call, ctx, emitter)
         if result.ok and ("doctorSlots" in call.name or "availableDoctors" in call.name) and isinstance(result.data, dict):
-            offered_doctors.append([d["doctor_id"] for d in doctor_rows(result.data)])
+            rows = doctor_rows(result.data)
+            offered_doctors.append([d["doctor_id"] for d in rows])
+            for d in rows:
+                offered_names[d["doctor_id"]] = [n for n in (d.get("name_ar"), d.get("name_en")) if n]
         return result
 
     executor.execute = recording_execute
@@ -177,7 +181,8 @@ async def _run_case_once(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMP
     result: dict[str, Any] = {
         "case": case.id, "suite": case.suite, "title": case.title, "mode": "script" if use_script else "llm",
         "transcript": transcript, "tool_calls": calls, "turns": session.turn_id, "error": error,
-        "offered_doctors": offered_doctors, "caller_raw": getattr(caller, "raw", []),
+        "offered_doctors": offered_doctors, "offered_doctor_names": {str(k): v for k, v in offered_names.items()},
+        "caller_raw": getattr(caller, "raw", []),
         "session": {"verified": session.auth.verified, "handoff": session.handoff, "language": session.language.language,
                     "gender": session.gender.known, "slots": _jsonable(session.slots), "skill": session.active_skill},
         "latency": _latency(events), "duration_s": round(time.perf_counter() - t0, 1),

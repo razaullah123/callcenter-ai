@@ -46,7 +46,6 @@ export const KNOB_LABELS: Record<string, [string, string]> = {
   call_max_minutes: ["Max call duration (min)", "End the call with a closing line after this long; 0 = no limit"],
   llm_hedge_after_s: ["Backup LLM request after (s)", "No first token by then → race an identical request; 0 = off"],
   require_verification: ["Caller verification", "Verify the caller (mobile + code) before anything else"],
-  red_flag_mode: ["Serious symptoms", "What the agent does when a caller describes an emergency"],
   ivr_transfer_destination: ["Human transfer destination", "Extension / queue for “talk to a person”"],
   ivr_barge_in_grace_ms: ["Phone: echo grace (ms)", "No interruptions right after the agent starts talking on phone lines"],
   ivr_chunk_ms: ["Phone: audio chunk (ms)", "Size of the audio pieces sent to the phone line"],
@@ -461,10 +460,6 @@ export default function GlobalSettings({ d, skill, onSaved, onClose }: {
             <Switch id="gs-interrupt" on={knob("voice_interrupt", true)} onChange={v => setKnob("voice_interrupt", v)} /></Row>
           <Row title={KNOB_LABELS.require_verification[0]} help={KNOB_LABELS.require_verification[1]}>
             <Switch id="gs-verify" on={knob("require_verification", true)} onChange={v => setKnob("require_verification", v)} /></Row>
-          <Row title={KNOB_LABELS.red_flag_mode[0]} help={KNOB_LABELS.red_flag_mode[1]}>
-            <select id="gs-red-flag" className="text-sm" value={knob("red_flag_mode", "empathy_only")} onChange={e => setKnob("red_flag_mode", e.target.value)}>
-              <option value="empathy_only">Empathy, continue</option><option value="advise_and_continue">Advise ER, continue</option><option value="stop">Safety message only</option>
-            </select></Row>
           <Slider id="gs-response-delay" title="Response Delay" help={KNOB_LABELS.voice_end_silence_ms[1]}
             value={knob("voice_end_silence_ms", 550)} min={200} max={2000} step={50} unit="ms" onChange={v => setKnob("voice_end_silence_ms", v)} />
           <Slider id="gs-inactivity" title="User Inactivity Timeout" help={KNOB_LABELS.voice_inactivity_s[1]}

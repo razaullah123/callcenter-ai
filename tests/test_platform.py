@@ -64,7 +64,7 @@ async def test_seed_moves_the_hmg_agent_into_the_platform():
     assert set(b["skills"]) == set(bundle_mod.repo_skill_files())
     assert all(v == 1 for v in b["skills"].values())
     assert b["phrases"]["GREETING"] == GREETING and b["models"]["llm"]["provider"] == kinds["llm"]["id"]
-    assert b["knobs"]["red_flag_mode"] == get_settings().red_flag_mode
+    assert b["knobs"]["call_max_minutes"] == get_settings().call_max_minutes
     # .env model defaults are written into the release: the agent doesn't depend on .env any more
     assert b["models"]["llm"]["settings"]["model"] == get_settings().groq_llm_model
     assert b["models"]["tts"]["settings"]["voice_ar"] == get_settings().groq_tts_voice_ar
@@ -168,7 +168,7 @@ async def test_second_agent_with_its_own_phrases_knobs_and_route(backend):
     b = copy.deepcopy((await published(store))["bundle"])
     b["agent"]["name"] = "Clinic FAQ"
     b["phrases"] = {**b["phrases"], "GREETING": {"ar": "هلا بك في العيادة", "en": "Welcome to the clinic line."}}
-    b["knobs"]["red_flag_mode"] = "stop"
+    b["knobs"]["voice_inactivity_s"] = 12
     b["models"]["llm"]["settings"] = {"model": "openai/gpt-oss-20b"}
     await store.put_agent({"id": "faq", "workspace_id": WORKSPACE, "name": "Clinic FAQ"})
     await store.add_release("faq", b, "console", "v1")
@@ -180,7 +180,7 @@ async def test_second_agent_with_its_own_phrases_knobs_and_route(backend):
     assert (await loader.for_call(number="0551112222")).agent_id == "faq"       # exact number
     assert (await loader.for_call(number="0500000000")).agent_id == "hmg-care"  # default '*'
     faq = await loader.for_call(agent_id="faq")
-    assert faq.settings.red_flag_mode == "stop" and faq.providers.llm.settings.model == "openai/gpt-oss-20b"
+    assert faq.settings.voice_inactivity_s == 12 and faq.providers.llm.settings.model == "openai/gpt-oss-20b"
     with pytest.raises(LookupError):
         await loader.for_call(agent_id="nope")
 

@@ -228,37 +228,6 @@ async def test_affirm_gate(rig):
 # ---------------------------------------------------------------- safety / handoff
 
 
-async def test_red_flag_empathy_then_continue(rig):
-    agent, llm, mock, out, events = rig
-    verify(agent)
-    llm.then("سلامتك، آسفين نسمع إنك تعاني من ألم في الصدر. بناءً على ألم الصدر، نقترح لك عيادة القلب. تبي تحجز فيها، "
-             "ولا تفضل عيادة ثانية؟")
-    await agent.handle("عندي ألم في صدري من اسبوع")
-    assert len(llm.requests) == 1                       # booking continues through the LLM
-    user_msg = llm.requests[0]["messages"][-1]["content"]
-    # default (user decision): empathy + clinic, no ER / 997 line
-    assert "empathy naming the symptom" in user_msg and "Don't mention emergency departments or 997" in user_msg
-    assert "cardiology" in user_msg                     # chest pain → cardiology hint stays
-
-
-async def test_red_flag_advise_mode_still_available(rig, monkeypatch):
-    from runtime.config import get_settings
-    agent, llm, mock, out, events = rig
-    verify(agent)
-    monkeypatch.setattr(get_settings(), "red_flag_mode", "advise_and_continue")
-    llm.then("سلامتك.")
-    await agent.handle("عندي ألم في صدري من اسبوع")
-    assert "997" in llm.requests[0]["messages"][-1]["content"]
-
-
-async def test_red_flag_stop_mode(rig, monkeypatch):
-    from runtime.config import get_settings
-    agent, llm, mock, out, events = rig
-    monkeypatch.setattr(get_settings(), "red_flag_mode", "stop")
-    await agent.handle("عندي ألم في صدري من ساعة")
-    assert llm.requests == [] and "٩٩٧" in out.said[-1]
-
-
 async def test_human_request_transfers(rig):
     agent, llm, mock, out, _ = rig
     await agent.handle("ابي اكلم موظف")
@@ -904,3 +873,8 @@ def test_wait_for_user_knob_is_validated():
     from runtime.platform.bundle import knob_errors
     assert not knob_errors({"voice_wait_for_user": "always"})
     assert knob_errors({"voice_wait_for_user": "sometimes"})
+
+
+def test_clean_for_speech_drops_pause_tags():
+    from runtime.harness.policy import clean_for_speech
+    assert clean_for_speech("8 AM <pause short 8:15 AM <pause_short> 8:30 AM") == "8 AM, 8:15 AM, 8:30 AM"

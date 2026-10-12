@@ -99,13 +99,7 @@ export default function Providers() {
           {Object.entries(q.data.runtime_knobs).map(([k, type]) => (
             <label key={k} className="block">
               <div className="mb-1 text-xs font-medium">{k}</div>
-              {k === "red_flag_mode" ? (
-                <select className="w-full" value={String(runtime[k] ?? "")} onChange={e => setDraft({ ...draft, runtime: { ...runtime, [k]: e.target.value } })}>
-                  <option value="advise_and_continue">advise_and_continue — empathy + ER/997 line, then continue</option>
-                  <option value="empathy_only">empathy_only — empathy, then continue</option>
-                  <option value="stop">stop — safety message only</option>
-                </select>
-              ) : type === "bool" ? (
+              {type === "bool" ? (
                 <select className="w-full" value={String(runtime[k] ?? "")} onChange={e => setDraft({ ...draft, runtime: { ...runtime, [k]: e.target.value === "true" } })}>
                   <option value="true">true</option><option value="false">false</option>
                 </select>

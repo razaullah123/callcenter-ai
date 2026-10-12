@@ -150,6 +150,45 @@ edges = [
     W(**{"from": "new_booking", "to": "hospital"}),
 ]
 
+
+# ---- symptoms: handled in the steps, as in Hamsa's flow (no platform-level check). The caller's complaint gets one warm
+# line first; naming a clinic is not a complaint. Where the caller can say it: the first request, the clinic step, "anything else".
+GREETING_RULE = (
+    "\nSymptom → sympathy FIRST: if the caller describes a pain, symptom or health problem — even alongside a booking request — "
+    "open your reply with one brief warm line of sympathy, never skipped: Arabic «سلامتك، ما تشوف شر» / English \"I'm sorry to hear "
+    "that, I hope you feel better.\" Then treat it as a booking request (intent book); the "
+    "clinic is matched later.\nNot a symptom, so no sympathy: naming a clinic, specialty, department or doctor («أبغى موعد عند "
+    "الأسنان», «عيادة الجلدية», \"a dermatology appointment\") says where they want the appointment, not that anything hurts. "
+    "Sympathy is only for an actual complaint of pain, illness or injury.\n")
+CLINIC_RULE = (
+    "\nSymptom → sympathy FIRST: if the caller describes a pain, symptom or health problem in this step, your reply opens with one "
+    "brief warm line of sympathy, never skipped: Arabic «سلامتك، ما تشوف شر» / English \"I'm sorry to hear that, I hope you feel "
+    "better.\" — then the clinic suggestion in the same reply. No sympathy for naming a clinic or specialty, or if you already said "
+    "it for this symptom earlier in the call. Never mention emergency departments or 997.\n")
+SHORT_RULE = (
+    "\nSymptom → sympathy FIRST: if the caller now describes a pain, symptom or health problem (a new booking need), open your reply "
+    "with one brief warm line of sympathy (Arabic «سلامتك، ما تشوف شر» / English \"I'm sorry to hear that, I hope you feel "
+    "better.\"), then carry on. No sympathy for naming a clinic or specialty.\n")
+OLD_PARENS = "(Serious symptoms: start with one short line of empathy\n   naming the symptom.)"
+CLINIC_STEP0 = ("0. First check: if the caller has already named a clinic or specialty, or described a symptom earlier in the call, "
+                "skip the question in 1 and go on. Otherwise ask ONLY about the complaint (exactly the question in 1), then wait; in "
+                "that turn don't name, list or hint at any clinic.\n")
+CLINIC_HEAD = "The clinic list of the chosen hospital is already in the conversation (fetched by the system).\n"
+
+
+def add_symptom_rules(nodes: list) -> None:
+    by = {n["id"]: n for n in nodes}
+    by["greeting_intent"]["instructions"] = by["greeting_intent"]["instructions"].rstrip("\n") + "\n" + GREETING_RULE
+    c = by["symptoms_and_clinic"]
+    text = c["instructions"]
+    assert text.startswith(CLINIC_HEAD) and OLD_PARENS in text
+    text = text.replace(OLD_PARENS, "(A symptom described here gets the sympathy line first: see the rule at the end of this step.)")
+    c["instructions"] = CLINIC_HEAD + CLINIC_STEP0 + text[len(CLINIC_HEAD):].rstrip("\n") + "\n" + CLINIC_RULE
+    by["anything_else"]["instructions"] = by["anything_else"]["instructions"].rstrip("\n") + "\n" + SHORT_RULE
+
+
+add_symptom_rules(nodes)
+
 graph = {
     "start": "greeting_intent",
     "variables": {

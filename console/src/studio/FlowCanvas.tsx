@@ -124,7 +124,7 @@ function layout(nodes: FlowNode[], edges: FlowEdge[], start: string, dir: "horiz
 // ---------------------------------------------------------------- node view
 
 type RowInfo = { gi: number; kind: string; text: string };
-type NodeData = { node: FlowNode; start: boolean; active: boolean; rows: RowInfo[]; selectedEdge: number | null };
+type NodeData = { node: FlowNode; start: boolean; active: boolean; rows: RowInfo[]; selectedEdge: number | null; global?: boolean };
 
 type CanvasActions = {
   open: (id: string) => void; menu: (id: string, action: "rename" | "logs" | "duplicate" | "delete") => void;
@@ -242,9 +242,10 @@ function FlowNodeView({ id, data, selected }: NodeProps<Node<NodeData>>) {
   })();
   const auto = !anywhere && ["set", "router"].includes(n.type) === false && data.rows.length === 0 && n.type !== "end" && n.type !== "transfer";
   return (
-    <div className={cx("w-64 rounded-2xl border bg-panel text-left shadow-sm", t.edge,
+    <div className={cx("relative w-64 rounded-2xl border bg-panel text-left shadow-sm", t.edge,
       selected && "!border-accent ring-2 ring-accent/30",
       data.active && "!border-brand shadow-[0_0_0_4px_rgba(230,58,64,0.3)]")}>
+      {data.global && <span className="absolute -top-4 left-3 rounded-md bg-accent px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-white" title="Can be reached from anywhere in the flow">Global</span>}
       {!anywhere && <Handle type="target" position={Position.Left} className="!h-3 !w-3 !bg-slate-400" />}
       <div className="flex items-center gap-2.5 px-3 pb-2 pt-3">
         <span className={cx("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white", t.color)}><NodeIcon type={anywhere ? "anywhere" : data.start && n.type === "conversation" ? "play" : n.type} size={16} /></span>
@@ -372,23 +373,19 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
       const old = prev.find(p => p.id === n.id);
       return { ...(old ?? {}), id: n.id, type: "flow", position: old?.position ?? n.position ?? auto[n.id],
                selected: sel?.kind === "node" && sel.id === n.id,
-               data: { node: n, start: n.id === g.start, active: n.id === activeNode, rows: rows(n.id), selectedEdge } } as Node<NodeData>;
+               data: { node: n, start: n.id === g.start, active: n.id === activeNode, rows: rows(n.id), selectedEdge,
+                       global: g.edges.some(e => e.from === "*" && e.to === n.id) } } as Node<NodeData>;
     });
-    if (g.edges.some(e => e.from === "*")) {
-      const old = prev.find(p => p.id === ANY);
-      out.unshift({ ...(old ?? {}), id: ANY, type: "flow", position: old?.position ?? { x: -340, y: -40 }, deletable: false,
-                    data: { node: { id: ANY, type: "router" }, start: false, active: false, rows: rows("*"), selectedEdge } } as Node<NodeData>);
-    }
     return out;
   }, [g, activeNode, sel]);
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node<NodeData>>(build([]));
   useEffect(() => { setRfNodes(prev => build(prev)); }, [build, setRfNodes]);
 
-  const rfEdges: Edge[] = useMemo(() => g.edges.map((e, gi) => ({
-    id: `e${gi}`, source: e.from === "*" ? ANY : e.from, sourceHandle: `h-${gi}`, target: e.to,
-    animated: e.from === "*" || (sel?.kind === "edge" && sel.gi === gi),
-    style: { strokeWidth: sel?.kind === "edge" && sel.gi === gi ? 2.5 : 1.2, ...(e.from === "*" ? { strokeDasharray: "4 3" } : {}) },
-  })), [g.edges, sel]);
+  const rfEdges: Edge[] = useMemo(() => g.edges.flatMap((e, gi) => e.from === "*" ? [] : [{
+    id: `e${gi}`, source: e.from, sourceHandle: `h-${gi}`, target: e.to,
+    animated: sel?.kind === "edge" && sel.gi === gi,
+    style: { strokeWidth: sel?.kind === "edge" && sel.gi === gi ? 2.5 : 1.2 },
+  }]), [g.edges, sel]);
 
   const centre = useCallback((id: string) => {
     const n = rf.getNode(id);
@@ -523,7 +520,8 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
             globalEdges={g.edges.map((e, gi) => ({ e, gi })).filter(x => x.e.from === "*" && x.e.to === node.id)}
             onChange={p => patchNode(node.id, p)} onRename={next => renameNode(node.id, next)} onPickTool={() => setPicker(node.id)}
             onStart={() => { setG(x => ({ ...x, start: node.id })); touch(); }} onDelete={() => deleteNode(node.id)}
-            onAddGlobal={() => { setG(x => ({ ...x, edges: [...x.edges, { from: "*", to: node.id, when: { llm: "" } }] })); setSel({ kind: "edge", gi: g.edges.length }); touch(); }}
+            onAddGlobal={() => { setG(x => ({ ...x, edges: [...x.edges, { from: "*", to: node.id, when: { llm: "" } }] })); touch(); }}
+            onEditGlobal={(gi, e) => setEdge(gi, e)} onRemoveGlobal={gi => deleteEdge(gi)}
             onOpenEdge={gi => setSel({ kind: "edge", gi })} />
         : edge && sel?.kind === "edge" ? <EdgeInspector key={sel.gi} edge={edge} order={g.edges.filter(e => e.from === edge.from).indexOf(edge) + 1}
             fromTool={["tool", "agent"].includes(g.nodes.find(n => n.id === edge.from)?.type ?? "")} targets={g.nodes.map(n => n.id)}
@@ -537,7 +535,7 @@ function Canvas({ graph, converted, tools, skills, onSave, saving, aside, global
   return (
     <div className="space-y-2">
       {converted && <div className="rounded-lg bg-soft px-3 py-2 text-xs text-muted">This flow was written as steps. The canvas shows it as a graph
-        (each step is reached from “Anywhere” when its conditions hold); saving keeps the same behaviour.</div>}
+        (each step is marked Global: it is reached from anywhere when its conditions hold); saving keeps the same behaviour.</div>}
       <div className={cx("grid gap-3", aside ? "lg:grid-cols-[1fr_26rem]" : showGlobal ? "lg:grid-cols-[1fr_30rem]" : "lg:grid-cols-[1fr_24rem]")}>
         <div ref={boxRef} className="relative h-[70vh] overflow-hidden rounded-xl border border-line bg-panel">
           <Actions.Provider value={actions}>
@@ -795,13 +793,14 @@ function TransferOptions({ node, onChange }: { node: FlowNode; onChange: (p: Par
 }
 
 function NodeInspector({ node, isStart, tools, skills, variables, renameRef, toolInfo, globalEdges, onChange, onRename, onPickTool, onStart,
-  onDelete, onAddGlobal, onOpenEdge, others, onConnectFrom, onConnectTo, varGroups }: {
+  onDelete, onAddGlobal, onEditGlobal, onRemoveGlobal, onOpenEdge, others, onConnectFrom, onConnectTo, varGroups }: {
   node: FlowNode; isStart: boolean; tools: string[]; skills: string[]; variables: string[]; varGroups: VarGroup[];
   others: string[]; onConnectFrom: (src: string) => void; onConnectTo: (dst: string) => void;
   renameRef: React.MutableRefObject<HTMLInputElement | null>; toolInfo?: CanvasProps["toolInfo"];
   globalEdges: { e: FlowEdge; gi: number }[];
   onChange: (p: Partial<FlowNode>) => void; onRename: (id: string) => void; onPickTool: () => void; onStart: () => void;
-  onDelete: () => void; onAddGlobal: () => void; onOpenEdge: (gi: number) => void;
+  onDelete: () => void; onAddGlobal: () => void; onEditGlobal: (gi: number, e: FlowEdge) => void; onRemoveGlobal: (gi: number) => void;
+  onOpenEdge: (gi: number) => void;
 }) {
   const [id, setId] = useState(node.id);
   const toggle = (list: string[] | undefined, v: string) => (list ?? []).includes(v) ? (list ?? []).filter(x => x !== v) : [...(list ?? []), v];
@@ -847,9 +846,9 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
           {lbl("Message (Arabic)", <textarea id="node-say-ar" rows={2} dir="rtl" className="w-full text-sm" value={node.say.ar ?? ""} onChange={e => onChange({ say: { ...node.say, ar: e.target.value } })} />)}
           {lbl("Message (English)", <textarea id="node-say-en" rows={2} className="w-full text-sm" value={node.say.en ?? ""} onChange={e => onChange({ say: { ...node.say, en: e.target.value } })} />,
             "Said word for word when the flow reaches this step — no model call. Use {{ variable }} to fill in values.")}
-          <label className="flex items-center gap-2 text-xs"><input id="node-skip" type="checkbox" checked={!!node.skip_response}
-            onChange={e => onChange({ skip_response: e.target.checked || undefined })} />Don't wait for the caller — go straight to the next step</label>
         </>}
+        <label className="flex items-center gap-2 text-xs"><input id="node-skip" type="checkbox" checked={!!node.skip_response}
+          onChange={e => onChange({ skip_response: e.target.checked || undefined })} />Don't wait for the caller — say it, then go straight to the next step</label>
         <VariablePicker groups={varGroups} fields={[{ id: "node-instr", value: node.instructions ?? "", onChange: v => onChange({ instructions: v }) }]} />
         {lbl(node.say ? "Prompt for the caller's reply (optional)" : "Prompt (what the agent does at this step)", <textarea id="node-instr" rows={node.say ? 4 : 9} className={cx("w-full text-xs", !node.instructions && !node.say && "border-warn")}
           dir="auto" value={node.instructions ?? ""} placeholder={'e.g. Ask exactly: "Would you like the earliest available appointment, or a specific date?"'}
@@ -906,13 +905,7 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
       {node.type === "agent" && <AgentOptions node={node} onChange={onChange} />}
       {node.type === "skill" && lbl("Continue in skill", <select id="node-skill" className="w-full" value={node.skill ?? ""} onChange={e => onChange({ skill: e.target.value })}>
         <option value="">choose…</option>{skills.map(s => <option key={s}>{s}</option>)}</select>)}
-      <div className="rounded-lg border border-line p-2">
-        <div className="text-xs font-medium">Global</div>
-        <div className="mb-1 text-[11px] text-muted">Reach this step from anywhere in the flow when a condition holds.</div>
-        {globalEdges.map(({ e, gi }) => (
-          <button key={gi} className="block w-full truncate rounded px-1.5 py-1 text-left text-[11px] hover:bg-soft" onClick={() => onOpenEdge(gi)}>✳ when {conditionLabel(e)}</button>))}
-        <Button kind="ghost" onClick={onAddGlobal}>+ Reach from anywhere when…</Button>
-      </div>
+      <GlobalSection edges={globalEdges} onAdd={onAddGlobal} onEdit={onEditGlobal} onRemove={onRemoveGlobal} onOpen={onOpenEdge} />
       <div className="flex gap-2 pt-1">
         {!isStart && <Button onClick={onStart}>Make start</Button>}
         {!isStart && <Button kind="danger" onClick={onDelete}>Delete node</Button>}
@@ -924,6 +917,50 @@ function NodeInspector({ node, isStart, tools, skills, variables, renameRef, too
 
 const MODES = ["always", "llm", "replied", "filled", "empty", "equals", "stage", "dtmf", "json"] as const;
 const KEYPAD = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+
+/** Hamsa's "Global" section of a step: allow it to be reached from anywhere in the flow. Stored as edges from "*" (the Anywhere node). */
+function GlobalSection({ edges, onAdd, onEdit, onRemove, onOpen }: {
+  edges: { e: FlowEdge; gi: number }[]; onAdd: () => void; onEdit: (gi: number, e: FlowEdge) => void; onRemove: (gi: number) => void; onOpen: (gi: number) => void;
+}) {
+  const on = edges.length > 0;
+  const flip = (e: FlowEdge, k: "back" | "confirm", v: boolean) => { const next = { ...e }; if (v) next[k] = true as never; else delete next[k]; return next; };
+  return (
+    <div className="space-y-2 rounded-lg border border-line p-2 text-xs">
+      <label className="flex items-start gap-2"><input id="node-global-on" type="checkbox" className="mt-0.5" checked={on}
+        onChange={e => { if (e.target.checked) onAdd(); else [...edges].reverse().forEach(x => onRemove(x.gi)); }} />
+        <span className="font-medium">Global<span className="block text-[11px] font-normal text-muted">Allow this step to be triggered from anywhere in the flow.</span></span></label>
+      {edges.map(({ e, gi }, k) => {
+        const keys = Object.keys(e.when ?? {});
+        const kind = keys.length === 1 && keys[0] === "dtmf" ? "dtmf" : keys.length === 1 && keys[0] === "llm" ? "llm" : "other";
+        return (
+          <div key={gi} className="space-y-1.5 rounded-lg bg-soft p-2">
+            {edges.length > 1 && <div className="flex items-center justify-between text-[11px] text-muted">Trigger {k + 1}
+              <button className="hover:text-bad" onClick={() => onRemove(gi)}>Remove</button></div>}
+            {kind === "other" ? (
+              <button className="block w-full truncate text-left text-[11px] hover:underline" onClick={() => onOpen(gi)}>✳ when {conditionLabel(e)} — edit transition</button>
+            ) : <>
+              <label className="block"><span className="text-[11px] text-muted">Trigger type</span>
+                <select id={`node-global-type-${k}`} className="w-full" value={kind}
+                  onChange={ev => onEdit(gi, { ...e, when: ev.target.value === "dtmf" ? { dtmf: "1" } : { llm: "" } })}>
+                  <option value="llm">Natural language (prompt)</option><option value="dtmf">Keypad press (DTMF)</option></select></label>
+              {kind === "llm"
+                ? <label className="block"><span className="text-[11px] text-muted">Trigger when the caller says something matching…</span>
+                    <textarea id={`node-global-cond-${k}`} rows={4} className="w-full" value={String((e.when as { llm?: string }).llm ?? "")}
+                      placeholder="Fire this ONLY when the caller clearly asks to…" onChange={ev => onEdit(gi, { ...e, when: { llm: ev.target.value } })} /></label>
+                : <label className="block"><span className="text-[11px] text-muted">Key</span>
+                    <select id={`node-global-key-${k}`} className="w-full" value={String((e.when as { dtmf?: string }).dtmf ?? "1")}
+                      onChange={ev => onEdit(gi, { ...e, when: { dtmf: ev.target.value } })}>{KEYPAD.map(x => <option key={x}>{x}</option>)}</select></label>}
+            </>}
+            <label className="flex items-start gap-2"><input id={`node-global-back-${k}`} type="checkbox" className="mt-0.5" checked={!!e.back} onChange={ev => onEdit(gi, flip(e, "back", ev.target.checked))} />
+              <span>Return to source after execution<span className="block text-[11px] text-muted">After the caller replies here, go back to the step they interrupted.</span></span></label>
+            <label className="flex items-start gap-2"><input id={`node-global-confirm-${k}`} type="checkbox" className="mt-0.5" checked={!!e.confirm} onChange={ev => onEdit(gi, flip(e, "confirm", ev.target.checked))} />
+              <span>Confirm before proceeding<span className="block text-[11px] text-muted">The agent asks “Just to confirm…” first; only a yes goes on.</span></span></label>
+          </div>);
+      })}
+      {on && <Button kind="ghost" onClick={onAdd}>+ Add another trigger</Button>}
+    </div>
+  );
+}
 
 /** Options of a transition: ask yes / no first, arrive silently, and (global ones) return afterwards. */
 function EdgeOptions({ edge, onChange }: { edge: FlowEdge; onChange: (e: FlowEdge) => void }) {

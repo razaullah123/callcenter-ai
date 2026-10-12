@@ -157,14 +157,15 @@ async def extract(llm: LLMProvider, field: str, text: str, *, today: date, offer
 
 GRAPH_PROMPT = _STT + """
 You read ONE caller reply in a phone call and fill in a small JSON form. Do not reply to the caller.
-1. "answers": for each question below, true only if the caller's latest words clearly mean it, else false.
+1. "answers": for each numbered question below, true only if the caller's latest words clearly mean it, else false.
+   Key each answer by the question's NUMBER ("1", "2", …), never by its text.
 2. "values": for each variable below, the value the caller gave in these words, or null if they didn't give it.
    Use exactly one of the allowed values when a variable lists them; dates as YYYY-MM-DD (today is {today}).
 Questions:
 {questions}
 Variables:
 {variables}
-Reply with JSON only: {"answers": {"<question>": true|false, ...}, "values": {"<name>": value|null, ...}}"""
+Reply with JSON only: {"answers": {"1": true|false, "2": true|false, ...}, "values": {"<name>": value|null, ...}}"""
 
 
 def _variable_line(name: str, spec: dict[str, Any]) -> str:
@@ -232,6 +233,8 @@ async def classify_and_extract(llm: LLMProvider, text: str, *, questions: list[s
             obj = {}
     answers = obj.get("answers") if isinstance(obj.get("answers"), dict) else {}
     values = obj.get("values") if isinstance(obj.get("values"), dict) else {}
-    return ({q: answers.get(q) is True for q in questions},
+    # keyed by the question's number (long questions with quotes / Arabic are not reliably echoed back as text keys);
+    # an answer keyed by the question's text still counts
+    return ({q: (answers.get(str(i)) is True or answers.get(q) is True) for i, q in enumerate(questions, 1)},
             {n: v for n in variables if (v := check_value(variables[n], values.get(n))) is not None},
             round((time.perf_counter() - t0) * 1000, 1))

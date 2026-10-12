@@ -99,6 +99,21 @@ def test_checks_which_doctor_was_booked():
     assert not not_booked[0]["passed"]
 
 
+def test_first_suggestion_is_the_doctor_the_agent_named():
+    names = {"5018": ["روبينا قادري", "Rubeena Qadri"], "12565": ["علاء اسماعيل", "Alaa Esmaeil"]}
+    said = [{"role": "agent", "text": "نقترح لك الدكتور علاء اسماعيل. تبي تحجز معه، ولا تفضل دكتور ثاني؟"}]
+    r = _result(tool_calls=[("api_book_Appointment", {"DoctorID": 12565})], offered_doctors=[[5018, 12565]],
+                offered_doctor_names=names, transcript=said)
+    # the list starts with 5018, but the agent suggested Alaa and the caller accepted him: the caller did what the case says
+    assert check_all({"booked_first_doctor": True}, r)[0]["passed"]
+    # ...and the separate check reports that the agent did not suggest the list's first doctor
+    follow = check_all({"suggested_list_first": True}, r)[0]
+    assert not follow["passed"] and "named 12565" in follow["detail"] and "starts with 5018" in follow["detail"]
+    ok = _result(tool_calls=[], offered_doctors=[[5018, 12565]], offered_doctor_names=names,
+                 transcript=[{"role": "agent", "text": "We suggest Dr. Rubeena Qadri. Would you like to book with her?"}])
+    assert check_all({"suggested_list_first": True}, ok)[0]["passed"]
+
+
 async def test_caller_retries_groq_parse_failure():
     from evals.caller import LLMCaller
     from runtime.providers import TextDelta

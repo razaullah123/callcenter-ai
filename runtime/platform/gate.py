@@ -12,7 +12,7 @@ from typing import Any
 
 from .bundle import content_hash
 
-EXPECT_KEYS = {"verified", "handoff", "tools_called", "tools_not_called", "slots", "booked", "booked_first_doctor",
+EXPECT_KEYS = {"verified", "handoff", "tools_called", "tools_not_called", "slots", "booked", "booked_first_doctor", "suggested_list_first",
                "booked_offered_doctor", "max_turns", "language", "gender", "no_medical_advice", "say", "never_say",
                "max_words_per_reply", "max_questions_per_reply"}
 CASE_ID = re.compile(r"^[a-z0-9][a-z0-9_\-]{1,60}$")

@@ -4,7 +4,7 @@ is runtime.platform; each call runs on the release its agent had when the call s
 
     {"stt": {"provider": "groq", "settings": {"model": "whisper-large-v3"}},
      "llm": {"provider": "groq", "settings": {...}}, "tts": {...}, "embedding": {...},
-     "runtime": {"red_flag_mode": "advise_and_continue", "voice_end_silence_ms": 550, ...}}
+     "runtime": {"voice_end_silence_ms": 550, ...}}
 """
 
 import json

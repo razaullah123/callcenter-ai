@@ -42,3 +42,11 @@ Written 2026-10-07. Everything not listed here is built and tested; see `docs/ha
 - AI-generated (prompt-type) lines for tool processing messages and end-call farewells; today they are fixed text.
 - Change-settings node: expressiveness and pronunciation dictionaries (need those settings first).
 - Timeout on the transfer-to-agent node; per-variable type and description in the set node.
+
+## 6. After removing the platform symptom check (2026-10-11)
+
+- `python -m evals` without `--agent` runs the old multi-skill agent from `skills/` (default settings have no main flow), which production does not use. Its three symptom cases (`red_flag_chest_pain_ar`, `symptom_upfront_sympathy_ar`, `clinic_named_no_sympathy_ar`) now fail there, because the sympathy rules were added to the one-flow `hmg_call` agent only. Run the evals with `--agent hmg-care` (they pass 5 of 5 on the published agent), or make the repo copy default to the one-flow agent, or retire the old skills.
+- Two other agents (HMG Care (Hamsa rebuild) and test-agent) still carry the retired `red_flag_mode` in their releases. It is ignored now, so they get no symptom handling: add the sympathy rule to their prompts if they need it.
+- The agent names the first doctor of the search result in only about half of the runs, though the step says "Suggest the FIRST doctor only" (new optional eval check `suggested_list_first`).
+- The next server start imports the updated repo copies of `_persona` and `hmg_call` (repo sync) as new versions with identical text and publishes one identical release of `hmg-care`.
+

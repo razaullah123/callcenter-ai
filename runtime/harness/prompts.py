@@ -63,20 +63,6 @@ GREETING_NOTE = ("\n[system: the caller only greeted. Greet them back warmly in 
                  "\"وعليكم السلام ورحمة الله، هلا والله\"; \"مساء الخير\" → \"مساء النور\"; \"hi\" / \"good afternoon\" → "
                  "\"Hello, good afternoon!\"), then ask how you can help them today. Do not ask for the mobile number yet.]")
 
-# Appended to the caller's message when they describe potentially serious symptoms (see RED_FLAG_MODE).
-RED_FLAG_NOTE = {
-    "advise_and_continue": "\n[system: the caller described potentially serious symptoms. Reply in three short "
-                           "parts, about 25 words in all: empathy naming the symptom (Arabic: \"سلامتك، آسفين نسمع إنك "
-                           "تعاني من ...\"; English: \"I'm sorry to hear you're suffering from ...\"); ONE short line "
-                           "(Arabic: \"إذا صار شديد أو فجأة، روح أقرب طوارئ أو اتصل ٩٩٧.\"; English: \"If it gets "
-                           "severe or sudden, go to the nearest ER or call 997.\"); then continue the booking normally "
-                           "(e.g. suggest the matching clinic).]",
-    "empathy_only": "\n[system: the caller described symptoms that sound hard. Start your reply with one line of "
-                    "empathy naming the symptom (Arabic: \"سلامتك، آسفين نسمع إنك تعاني من ...\"; English: \"I'm sorry "
-                    "to hear you're suffering from ...\"), then continue the booking normally (e.g. suggest the "
-                    "matching clinic). Don't mention emergency departments or 997.]",
-}
-
 # Said instead of a generic filler for tools known to be slow (WhatsApp OTP send: 10–12 s live).
 SLOW_TOOL_FILLER = {
     "api_send_otp_request": {"ar": "أرسل لك الحين رمز التحقق على الواتساب، ممكن ياخذ كم ثانية.",
@@ -141,7 +127,7 @@ NOT_REGISTERED = {
 # Everything above is the default set. An agent release may override any of these names (same shape: {"ar", "en"}
 # dicts, lists or strings); the harness reads phrases through the agent's `Phrases`, never the constants directly.
 PHRASE_NAMES = ("GREETING", "PERSONA", "READBACK_REASK", "READBACK_UNCLEAR_NOTE", "REPLY_IN_ENGLISH", "AUTH_STEPS",
-                "GREETING_NOTE", "RED_FLAG_NOTE", "SLOW_TOOL_FILLER", "STILL_WORKING", "FILLER", "FALLBACK",
+                "GREETING_NOTE", "SLOW_TOOL_FILLER", "STILL_WORKING", "FILLER", "FALLBACK",
                 "OTP_CODE_QUESTION", "BOOKED_LINE", "IDENTITY_CONFIRMED_NOTE", "IDENTITY_QUESTION", "IDENTITY_STEP",
                 "TRANSLITERATE", "NOT_THE_PATIENT", "HANDOFF_SHORT", "HANDOFF", "NOT_REGISTERED", "STILL_THERE",
                 "CALL_TIME_LIMIT", "CONFIRM_GLOBAL", "RECORDING_NOTICE")

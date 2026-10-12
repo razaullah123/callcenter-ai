@@ -34,7 +34,7 @@ from .nlu.dates import resolve_dob, today_riyadh
 from .nlu.gender import gender_from_text
 from .nlu.extract import classify_and_extract, dateish, extract, numberish
 from .nlu.lang import detect
-from .nlu.intents import (EMERGENCY_MESSAGE, describes_location, greeting_only, greeting_reply, loose_earliest, mentions_since, red_flag, red_flag_clinic,
+from .nlu.intents import (describes_location, greeting_only, greeting_reply, loose_earliest, mentions_since,
                           wants_earliest, wants_human, yes_no)
 from .nlu.numbers import extract_code, normalize_mobile
 from .policy import (MAX_MATCH_ATTEMPTS, MAX_OTP_ATTEMPTS, Policy, clean_for_speech, normalize_datetime_args,
@@ -58,6 +58,8 @@ def _tool_call_error(e: Exception) -> str | None:
         return "malformed tool call"
     return None
 MAX_TOOL_FAILURES = 3
+_NO_TOOL = {"type": "function", "function": {"name": "no_tool", "description": "Placeholder; never call it.",
+                                              "parameters": {"type": "object", "properties": {}}}}
 
 
 class AgentOutput(Protocol):
@@ -239,17 +241,6 @@ class Agent:
             await self._handoff("caller asked for a human agent", ev)
             return
         note = ""
-        if red_flag(text):
-            mode = self.settings.red_flag_mode
-            ev.emit(EventType.POLICY_BLOCK, reason="red_flag_symptoms", mode=mode)
-            if mode == "stop":
-                msg = EMERGENCY_MESSAGE[s.language.language]
-                s.history += [{"role": "user", "content": text}, {"role": "assistant", "content": msg}]
-                await self._say(msg)
-                return
-            note = self.ph.RED_FLAG_NOTE[mode]
-            if clinic := red_flag_clinic(text):
-                note += f"\n[system: the matching clinic for this symptom is {clinic}.]"
 
         if greeting and not note:
             # greet back in kind, word for word — no model round trip (it copied "وعليكم السلام" to a "مرحبا")
@@ -661,15 +652,26 @@ class Agent:
                 ev.emit(EventType.ERROR, level=Level.WARNING, error=f"{kind} from model", detail=str(e)[:300])
                 valid = ", ".join(t["function"]["name"] for t in tools)
                 already = " ".join(self._spoken[spoken_before:])
-                note = (f"You called a tool that is not available now. Only these tools exist: {valid}."
-                        if kind == "invalid tool name" else
-                        "Your last tool call was malformed. Call a tool with valid JSON arguments exactly as its "
-                        "schema says, or just reply to the caller.")
+                if kind == "invalid tool name":
+                    note = (f"You called a tool that is not available now. Only these tools exist: {valid}."
+                            if valid else
+                            "There are NO tools in this step. Do not call any tool; answer the caller in words only.")
+                else:
+                    note = ("Your last tool call was malformed. Call a tool with valid JSON arguments exactly as its "
+                            "schema says, or just reply to the caller.")
                 if already:
                     note += f" You already said to the caller: \"{already}\" — do not repeat it."
-                messages = messages + [{"role": "system", "content": note}]
-                text, calls = await self._stream(messages, tools, ev.bind(skill=s.active_skill), hop,
-                                                 mute=bool(already))
+                for attempt in range(2):                       # the model sometimes repeats the mistake once
+                    messages = messages + [{"role": "system", "content": note}]
+                    try:
+                        text, calls = await self._stream(messages, tools, ev.bind(skill=s.active_skill), hop,
+                                                         mute=bool(already), no_calls=bool(attempt))
+                        break
+                    except Exception as e2:
+                        if attempt or not _tool_call_error(e2):
+                            raise
+                        ev.emit(EventType.ERROR, level=Level.WARNING, error=f"{_tool_call_error(e2)} from model (retry)",
+                                detail=str(e2)[:300])
                 text = (already + " " + text).strip() if already else text
             if not calls:
                 if text:
@@ -677,6 +679,8 @@ class Agent:
                     for hook in self._turn_hooks():
                         if after := getattr(hook, "after_text", None):
                             after(self, text)
+                    if self._message_node_said():
+                        continue                    # a prompt-written message that doesn't wait: on to the next step now
                 elif len(self._spoken) == spoken_before:
                     await self._say(self.ph.FALLBACK[s.language.language])
                 return
@@ -705,7 +709,13 @@ class Agent:
         await self._say(self.ph.FALLBACK[s.language.language])
 
     async def _stream(self, messages, tools, ev: BoundEmitter, hop: int,
-                      mute: bool = False) -> tuple[str, list[ToolCall]]:
+                      mute: bool = False, no_calls: bool = False) -> tuple[str, list[ToolCall]]:
+        """no_calls: the model keeps inventing tools — answer in words only (tool_choice none; the API needs a tool
+        list for that, so an empty one gets a placeholder that can never be called)."""
+        options = self._llm_options()
+        if no_calls:
+            tools = tools or [_NO_TOOL]
+            options = {**options, "tool_choice": "none"}
         lang = self.s.language.language
         chunker = SentenceChunker()
         spoken: list[str] = []
@@ -715,7 +725,7 @@ class Agent:
         asked = False   # one question per reply: stop speaking after the first question …
         after_question = 0   # … except one short statement after it
         ev.emit(EventType.LLM_REQUEST, hop=hop, tools=len(tools), messages=len(messages))
-        async for event in self.llm.stream(messages, tools=tools, **self._llm_options()):
+        async for event in self.llm.stream(messages, tools=tools, **options):
             if isinstance(event, TextDelta):
                 if first:
                     ev.emit(EventType.LLM_FIRST_TOKEN, latency_ms=round((time.perf_counter() - t0) * 1000, 1))
@@ -1004,6 +1014,18 @@ class Agent:
         """A pending read-back must still be spoken even if the model already asked something."""
         return self.s.pending_action is not None and self.s.pending_action.turn_id == self.s.turn_id
 
+    def _message_node_said(self) -> bool:
+        """The flow is at a prompt-written conversation node marked "don't wait for the caller" and the model just
+        said its message: record that, so the flow moves on to the next node in the same turn."""
+        skill = self._flow_skill()
+        node_of = getattr(self.skills, "node", None)
+        node = node_of(skill, self.s) if node_of else None
+        if node is None or node.type != "conversation" or not node.skip_response or node.say:
+            return False
+        state = self.skills.graph_state(skill, self.s)
+        state["said"] = (node.id, state.get("entered"))
+        return True
+
     def _track_step(self, ev: BoundEmitter) -> None:
         current_step = getattr(self.skills, "current_step", None)
         if not current_step:
@@ -1039,7 +1061,7 @@ class Agent:
             return
         if self.s.language.language == "ar" and self.s.gender.known == "female":
             text = to_feminine(text)
-        if not text:
+        if not text or not re.search(r"\w", text):          # nothing to say (the TTS rejects text without a letter / digit)
             return
         self._spoken.append(text)
         for hook in self._turn_hooks():

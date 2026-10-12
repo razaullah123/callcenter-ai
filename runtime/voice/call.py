@@ -250,7 +250,8 @@ class VoiceCall:
         """Keep the call row's mobile current: the number the caller gave (looked up in the HIS) wins over the
         calling number. Only the call row sees it; events and logs stay masked."""
         s = self.session
-        mobile = s.auth.mobile_no or (normalize_mobile(s.ani) if s.ani else None)
+        flow_mobile = str(s.slots.get("search_mobile") or "").strip()        # a flow agent looks the number up itself (no identity role)
+        mobile = s.auth.mobile_no or (normalize_mobile(flow_mobile) if flow_mobile else None) or (normalize_mobile(s.ani) if s.ani else None)
         store = getattr(self.rt, "store", None)          # no store: text chat, tests
         if not mobile or mobile == getattr(self, "_mobile_recorded", None) or store is None:
             return
