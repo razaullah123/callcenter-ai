@@ -130,6 +130,16 @@ def test_noise_transcripts_are_dropped():
     assert noise_reason("I want to take this picture", seg(0.8, -1.4)) == "no_speech"
     assert noise_reason("0551234567", seg(0.01, -0.1)) is None
     assert noise_reason("ابي احجز موعد", seg(0.05, -0.3)) is None
+    for phantom in ("نهاية الدرس", "ترجمة نانسي قنقر", "إلى اللقاء في الحلقة القادمة"):   # subtitle credits Whisper invents on noise
+        assert noise_reason(phantom, {}) == "hallucination"
+    assert noise_reason("نعم أكدي الموعد", seg(0.01, -0.2)) is None
+
+
+def test_tool_failed_reads_the_error_result():
+    from runtime.harness.engine import _tool_failed
+    assert _tool_failed('{"error": "ask the caller to confirm this action first"}')
+    assert not _tool_failed('{"success": true}')
+    assert not _tool_failed("not json")
 
 
 class _Player:

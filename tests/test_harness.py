@@ -316,6 +316,9 @@ async def test_write_in_flight_survives_barge_in(rig):
         await task
     assert mock.calls and mock.calls[0][0] == "mssql_confirm_appointment"   # completed despite barge-in
     assert any(m.get("role") == "tool" and "success" in m["content"] for m in agent.s.history)
+    # …and it is recorded like any finished write, so the next reply may say "confirmed"
+    assert "mssql_confirm_appointment" in agent._done_tools
+
 
 # ---------------------------------------------------------------- utilities
 

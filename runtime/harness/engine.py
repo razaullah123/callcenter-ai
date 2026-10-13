@@ -44,6 +44,15 @@ from .session import VERIFY_SKILL, Session
 from .skills import SkillSet
 
 MAX_HOPS = 6
+
+
+def _tool_failed(content: str) -> bool:
+    """A tool result the harness fed back as an error ({"error": ...})."""
+    try:
+        data = json.loads(content)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get("error"))
 STILL_WORKING_AFTER_S = 6.0
 # The only sentence allowed after the reply's question: the note that more time slots exist (agreed wording).
 _MORE_TIMES_NOTE = re.compile(r"(more|other) (time )?slots|another time|أوقات ثانية|وقت ثاني", re.IGNORECASE)
@@ -628,6 +637,8 @@ class Agent:
 
     async def _llm_loop(self, ev: BoundEmitter) -> None:
         s = self.s
+        failed: dict[str, int] = {}          # identical tool calls that failed again this turn
+        stuck = False                        # the same call failed twice: answer in words, stop calling tools
         for hop in range(MAX_HOPS):
             self._track_step(ev)
             await self._run_auto_calls(ev)
@@ -641,8 +652,12 @@ class Agent:
                 verified=s.auth.verified, routable={} if s.flow_skill else self.skills.routable(),
                 disambiguating=s.auth.stage == "awaiting_dob_and_name", awaiting=self._awaiting_answer())
             spoken_before = len(self._spoken)
+            if stuck:
+                messages = messages + [{"role": "system", "content": (
+                    "The same tool call failed twice with the same error. Do not call any tool now: tell the caller in "
+                    "one short sentence what is needed (e.g. ask them to say yes or repeat their answer).")}]
             try:
-                text, calls = await self._stream(messages, tools, ev.bind(skill=s.active_skill), hop)
+                text, calls = await self._stream(messages, tools, ev.bind(skill=s.active_skill), hop, no_calls=stuck)
             except Exception as e:
                 # Groq rejects the whole request when the model invents a tool name or writes a malformed tool
                 # call (tool_use_failed); retry once with a correction.
@@ -696,6 +711,10 @@ class Agent:
                     content = json.dumps({"not_executed": "you asked the caller a question; wait for their answer"})
                 else:
                     content = await self._run_call(call, ev)
+                    if _tool_failed(content):
+                        key = call.name + json.dumps(call.arguments, sort_keys=True, default=str)
+                        failed[key] = failed.get(key, 0) + 1
+                        stuck = stuck or failed[key] >= 2
                 s.history.append({"role": "tool", "tool_call_id": call.id, "content": content})
             if s.handoff or s.ended or self._turn_answered:
                 return
@@ -813,6 +832,7 @@ class Agent:
             if critical:   # never abandon a booking / cancellation half-way: finish and record it
                 result = await task
                 self.s.history.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
+                self._after_tool(call, result, ev)       # slots, the claim it backs ("confirmed"), hooks — as if not cut off
             else:
                 task.cancel()
             raise

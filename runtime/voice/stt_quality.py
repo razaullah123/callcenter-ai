@@ -13,6 +13,8 @@ import numpy as np
 
 HALLUCINATIONS = re.compile(
     r"(ترجمة نانسي قنقر|اشتركوا? في القناة|شكرا للمشاهدة|thanks? for watching|subtitles? by|amara\.org|"
+    r"نهاية (الدرس|الحلقة|الفيديو)|إلى اللقاء في (الحلقة|الفيديو) القادم[ةه]|شكرا على المشاهدة|"
+    r"لا تنسوا الاشتراك|"
     r"^\W*$|^(you|\.+)$)", re.IGNORECASE)
 
 # Short closings Whisper produces on noise; only trusted when Whisper is confident there was speech.
