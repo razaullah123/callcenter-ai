@@ -4,7 +4,7 @@ import pytest
 
 from runtime.harness.nlu.dates import resolve_date, resolve_dob
 from runtime.harness.nlu.gender import GenderResolver, gender_from_name, gender_from_text
-from runtime.harness.nlu.intents import red_flag, wants_human, yes_no
+from runtime.harness.nlu.intents import wants_human, yes_no
 from runtime.harness.nlu.lang import LanguageTracker
 from runtime.harness.nlu.numbers import extract_code, normalize_mobile, spoken_number
 
@@ -87,13 +87,6 @@ def test_gender_resolver_prefers_stronger_evidence():
     assert g.known == "female"
 
 
-@pytest.mark.parametrize("text,flag", [("عندي ألم في صدري", True), ("صدري يوجعني", True), ("ما اقدر اتنفس", True),
-                                       ("I have chest pain", True), ("اسمي محمد", False),
-                                       ("عندي حبوب في وجهي", False)])
-def test_red_flags(text, flag):
-    assert red_flag(text) is flag
-
-
 @pytest.mark.parametrize("text,human", [("ابي اكلم موظف", True), ("حولني على خدمة العملاء", True),
                                         ("I want a human", True), ("ابي احجز", False)])
 def test_wants_human(text, human):
@@ -121,10 +114,3 @@ def test_greeting_only(text, greet):
     from runtime.harness.nlu.intents import greeting_only
     assert greeting_only(text) is greet
 
-
-def test_red_flag_clinic_routing():
-    from runtime.harness.nlu.intents import red_flag, red_flag_clinic
-    assert "القلب" in red_flag_clinic("عندي ألم في صدري من أسبوع")
-    assert "cardiology" in red_flag_clinic("I have chest pain")
-    assert red_flag("I can't breathe well") and "pulmonary" in red_flag_clinic("I can't breathe well")
-    assert "neurology" in red_flag_clinic("وجهي مايل فجأة")

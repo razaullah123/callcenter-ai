@@ -19,6 +19,25 @@ DIAGNOSIS = re.compile("|".join([
 ]), re.IGNORECASE)
 
 
+_TITLES = re.compile(r"\b(dr|doctor)\b\.?|(^|\s)(الدكتورة|الدكتور|دكتورة|دكتور|د)\.?(?=\s)", re.IGNORECASE)
+
+
+def _plain(text: str) -> str:
+    from runtime.text.arabic import normalize
+    return " ".join(_TITLES.sub(" ", normalize(text)).split())
+
+
+def first_named_doctor(result: dict) -> int | None:
+    """The doctor the agent named first in what it said (a doctor from the slot searches), else None."""
+    names = {int(k): [_plain(n) for n in v if n] for k, v in (result.get("offered_doctor_names") or {}).items()}
+    for line in _agent_lines(result):
+        text = _plain(line)
+        hits = [(text.find(n), d) for d, ns in names.items() for n in ns if n and n in text]
+        if hits:
+            return min(hits)[1]
+    return None
+
+
 def _int(v: Any) -> int | None:
     try:
         return int(v)
@@ -58,11 +77,17 @@ def check_all(expect: dict[str, Any], result: dict[str, Any]) -> list[dict[str, 
     booked_doctor = next((_int(a.get("DoctorID")) for t, a in result["tool_calls"] if t == "api_book_Appointment"), None)
     offered = result.get("offered_doctors") or []
     first_offered = next((ids[0] for ids in offered if ids), None)
+    suggested = first_named_doctor(result) or first_offered           # the doctor the agent first named (else the list's first)
     if "booked_first_doctor" in expect:
         # true: accepted the first suggestion; false: declined it and chose another doctor
-        same = booked_doctor is not None and booked_doctor == first_offered
+        same = booked_doctor is not None and booked_doctor == suggested
         add("booked_first_doctor", booked_doctor is not None and same == expect["booked_first_doctor"],
-            f"booked doctor {booked_doctor}, first suggested {first_offered}")
+            f"booked doctor {booked_doctor}, first suggested {suggested}")
+    if expect.get("suggested_list_first"):
+        # the step says "suggest the FIRST doctor only": did the agent name the first doctor of the search result?
+        named = first_named_doctor(result)
+        add("suggested_list_first", named is not None and named == first_offered,
+            f"agent named {named}, the list starts with {first_offered}")
     if expect.get("booked_offered_doctor"):
         known = {d for ids in offered for d in ids}
         add("booked_offered_doctor", booked_doctor in known, f"booked doctor {booked_doctor}")

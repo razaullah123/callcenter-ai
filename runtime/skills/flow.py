@@ -24,11 +24,17 @@ flow.yaml:
         ...
 """
 
+import functools
+import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,10 +125,23 @@ def _filled(v: Any) -> bool:
 def _eval(expr: Any, ctx: dict[str, Any]) -> Any:
     if not isinstance(expr, str):
         return expr
+    if is_template(expr):
+        return render(expr, ctx)
+    if _JSONPATH.match(expr):                                     # $.data.items[0].name → result.data.items.0.name
+        return _get(ctx, jsonpath_to_path(expr))
     if expr.startswith("="):
         literal = expr[1:]
         return {"true": True, "false": False}.get(literal, literal)
     return _get(ctx, expr)
+
+
+_JSONPATH = re.compile(r"^\$(\.|\[|$)")
+
+
+def jsonpath_to_path(expr: str) -> str:
+    """A JSONPath ($.a.b[0].c, $['a'], or $ alone) as one of our dotted paths on the tool result (result.a.b.0.c)."""
+    p = re.sub(r"\[\s*['\"]?([^\]'\"]+?)['\"]?\s*\]", r".\1", expr[1:])
+    return "result" + (p if p.startswith(".") or not p else "." + p)
 
 
 def _get(ctx: Any, path: str) -> Any:
@@ -152,3 +171,39 @@ def _deep_find(obj: Any, key: str) -> Any:
             if (found := _deep_find(v, key)) is not None:
                 return found
     return None
+
+
+# ---------------------------------------------------------------- templates
+
+# Values and node instructions may be Jinja templates over the call's variables — "{{ patient_name }}",
+# "{{ '2' if lang == 'en' else '1' }}", "{% if symptom %}…{% endif %}" (flows imported from Hamsa use them a lot).
+# Sandboxed; an unknown name is empty (and `x|default(…)` / `(a|default({})).b` work).
+
+def is_template(text: str) -> bool:
+    return "{{" in text or "{%" in text
+
+
+_FALLBACK = re.compile(r"\{\{\s*([^{}|]+?)\s*\|\|\s*([^{}]+?)\s*\}\}")
+
+
+def _fallback_sugar(text: str) -> str:
+    """Hamsa's `{{ var || 'default' }}` as Jinja: the default applies when the value is missing or empty."""
+    return _FALLBACK.sub(lambda m: "{{ (" + m.group(1) + ") | default(" + m.group(2) + ", true) }}", text)
+
+
+@functools.lru_cache(maxsize=2048)
+def _template(text: str):
+    from jinja2 import ChainableUndefined
+    from jinja2.sandbox import SandboxedEnvironment
+    return SandboxedEnvironment(undefined=ChainableUndefined, autoescape=False).from_string(_fallback_sugar(text))
+
+
+def render(text: str, ctx: dict[str, Any]) -> str:
+    """`text` rendered with the slots as plain names (plus `slots`, `parsed` and any other ctx keys). A template
+    error leaves the text as it was (logged) — a typo in a prompt must not break the call."""
+    slots = ctx.get("slots") or {}
+    try:
+        return _template(text).render({**slots, **ctx})
+    except Exception as e:                                    # noqa: BLE001 — any template error
+        log.warning("template error %r in %.80r", e, text)
+        return text

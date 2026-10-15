@@ -20,8 +20,8 @@ LIVE_SAFE = {
     "mssql_get_TopFive_nearestClinic_have_doctorSlots", "mssql_get_nearestClinic_have_doctorSlots",
     "mssql_get_TopFive_availableDoctors_with_slots_byDate", "mssql_get_availableDoctors_with_slots_byDate",
 }
-AUTH_TOOLS = {"mssql_get_patient_info", "api_send_otp_request", "api_verify_otp"}
-BOOKING_TOOLS = {"api_book_Appointment", "mssql_confirm_appointment"}
+AUTH_TOOLS = {"mssql_get_patient_info", "api_send_otp_request", "api_verify_otp", "mssql_get_upcoming_appointment"}
+BOOKING_TOOLS = {"api_book_Appointment", "mssql_confirm_appointment", "mssql_cancel_appointment", "api_Rescheduling_book_appointment"}
 
 TEST_MOBILES, TEST_OTP = {"0500000001", "0551234567"}, "1234"   # 0551234567: varied digits survive STT
 
@@ -37,6 +37,8 @@ def fake_backend() -> MockMCP:
         **{k: a.get(k) for k in ("ProjectID", "ClinicID", "DoctorID", "StartTime")},
         "AppointmentDate": a.get("StrAppointmentDate"), "AppointmentNo": "7700001"}})
     mock.on("mssql_confirm_appointment", "Status: Successfully Confirmed (simulated)")
+    mock.on("mssql_cancel_appointment", {"success": True, "message": "The appointment is cancelled (simulated)."})
+    mock.on("api_Rescheduling_book_appointment", {"success": True, "message": "The appointment is rescheduled (simulated)."})
     for name in ("api_send_AppointmentWhatsapp", "api_send_AppointmentSms", "api_send_ProjectLocationWhatsapp",
                  "api_send_ProjectLocationSms"):
         mock.on(name, {"success": True, "message": "simulated"})
@@ -50,6 +52,13 @@ class HybridMCP:
                  live_booking: bool = False, echo=print) -> None:
         self.live, self.fake, self.echo = live, fake or fake_backend(), echo
         self.live_tools = LIVE_SAFE | (AUTH_TOOLS if live_auth else set()) | (BOOKING_TOOLS if live_booking else set())
+
+    def scoped(self, names: set[str]) -> "HybridMCP":
+        """The same simulation rules over one project's MCP servers only."""
+        import copy
+        view = copy.copy(self)
+        view.live = self.live.scoped(names) if self.live is not None and hasattr(self.live, "scoped") else self.live
+        return view
 
     async def start(self) -> None:
         if self.live:

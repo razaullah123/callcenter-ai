@@ -1,0 +1,234 @@
+"""Console sign-in: users, sessions, project roles (Hamsa-style projects with members and invitations).
+
+Who is calling a console API (set per request by `require_console`, read with `principal()`):
+  • a signed-in user — bearer token from /api/auth/login (sessions last 14 days; only a hash is stored), who sees
+    only the projects they are a member of (owner / admin);
+  • the CONSOLE_TOKEN from .env — scripts and automation, every project;
+  • nobody, while no user account exists yet and no CONSOLE_TOKEN is set (development) — every project. The console
+    then asks for the first account, which becomes owner of every existing project.
+"""
+
+import hashlib
+import hmac
+import logging
+import secrets
+import smtplib
+import ssl
+import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+SESSION_DAYS = 14
+INVITE_HOURS = 2
+ROLES = ("owner", "admin", "viewer")             # viewer: read-only
+DEFAULT_PROJECT = "hmg"
+
+
+@dataclass
+class Principal:
+    kind: str                                  # user | token | open | key
+    user: dict[str, Any] | None = None
+    memberships: dict[str, dict] = field(default_factory=dict)   # project → membership row
+    key: dict[str, Any] | None = None          # kind "key": the API key row (it belongs to one project)
+    platform: bool = False                     # kind "user": the platform owner — owner of every project, members or not
+
+    @property
+    def is_user(self) -> bool:
+        return self.kind == "user"
+
+    @property
+    def actor(self) -> str:
+        if self.kind == "key":
+            return f"API key {(self.key or {}).get('name', '')} ({(self.key or {}).get('prefix', '')}…)"
+        return (self.user or {}).get("email") or ("console token" if self.kind == "token" else "console")
+
+    def role(self, ws: str) -> str | None:
+        """owner / admin of `ws`; the token and the open console act as owner everywhere."""
+        if self.kind == "key":                  # an API key acts as an admin of its own project only
+            return "admin" if ws == (self.key or {}).get("workspace_id") else None
+        if not self.is_user or self.platform:
+            return "owner"
+        m = self.memberships.get(ws)
+        return m["role"] if m else None
+
+    def agents(self, ws: str) -> list[str] | None:
+        """The agents of `ws` this person is limited to; None = all of them."""
+        if self.kind != "user" or self.platform:
+            return None
+        ids = (self.memberships.get(ws) or {}).get("agent_ids")
+        return list(ids) if ids is not None else None
+
+    def can_manage(self, ws: str) -> bool:
+        """Owner / admin with access to every agent (members and the project's setup are theirs to manage)."""
+        return self.role(ws) in ("owner", "admin") and self.agents(ws) is None
+
+
+_PRINCIPAL: ContextVar[Principal] = ContextVar("principal", default=Principal("open"))
+
+
+def principal() -> Principal:
+    return _PRINCIPAL.get()
+
+
+def set_principal(p: Principal) -> None:
+    _PRINCIPAL.set(p)
+
+
+# ---------------------------------------------------------------- secrets: passwords, tokens
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def check_password(password: str, stored: str) -> bool:
+    try:
+        _, salt, digest = stored.split("$")
+        got = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1, dklen=32)
+        return hmac.compare_digest(got.hex(), digest)
+    except Exception:
+        return False
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def new_token(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_urlsafe(32)}"
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def check_new_password(password: str) -> str | None:
+    return "password: at least 8 characters" if len(password or "") < 8 else None
+
+
+def public_user(u: dict) -> dict:
+    return {"id": u["id"], "email": u["email"], "name": u.get("name") or u["email"].split("@")[0],
+            "default_project": u.get("default_project")}
+
+
+async def start_session(store, user: dict) -> str:
+    token = new_token("s")
+    await store.create_session(token_hash(token), user["id"], now() + timedelta(days=SESSION_DAYS))
+    await store.update_user(user["id"], last_login_at=now())
+    return token
+
+
+async def create_user(store, email: str, name: str, password: str) -> dict:
+    row = {"id": uuid.uuid4().hex[:16], "email": email.strip().lower(), "name": name.strip(),
+           "password_hash": hash_password(password)}
+    await store.create_user(row)
+    return await store.user(row["id"])
+
+
+KEY_PREFIX = "hmg_"
+
+
+def new_api_key() -> str:
+    return KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+async def resolve_key(store, bearer: str) -> Principal | None:
+    """The principal of a valid API key (not revoked, not expired); None otherwise. Last use is noted at most every 5 minutes."""
+    row = await store.api_key_by_hash(token_hash(bearer)) if store is not None else None
+    if row is None or row.get("revoked_at") or (row.get("expires_at") and row["expires_at"] <= now()):
+        return None
+    last = row.get("last_used_at")
+    if last is None or now() - last > timedelta(minutes=5):
+        await store.touch_api_key(row["id"])
+    return Principal("key", key=row)
+
+
+def is_platform_owner(user: dict, memberships: dict[str, dict], settings) -> bool:
+    """The platform owner sees and manages every project. Named by PLATFORM_OWNER_EMAILS; when that is empty, it is the owner of
+    the default project (the person who set the platform up)."""
+    emails = {e.strip().lower() for e in (getattr(settings, "platform_owner_emails", "") or "").split(",") if e.strip()}
+    if emails:
+        return (user.get("email") or "").strip().lower() in emails
+    return (memberships.get(DEFAULT_PROJECT) or {}).get("role") == "owner"
+
+
+async def resolve(store, settings, bearer: str | None) -> Principal | None:
+    """Who presents `bearer`; None = not allowed in."""
+    if bearer and bearer.startswith(KEY_PREFIX):                  # an API key is a key or nothing: it never falls through to "open"
+        return await resolve_key(store, bearer)
+    token = settings.console_token.get_secret_value() if settings.console_token else None
+    if token and bearer and hmac.compare_digest(bearer, token):
+        return Principal("token")
+    if store is not None and bearer and bearer.startswith("s_"):
+        user = await store.session_user(token_hash(bearer))
+        if user is not None:
+            ms = {m["workspace_id"]: m for m in await store.memberships(user["id"])}
+            return Principal("user", user, ms, platform=is_platform_owner(user, ms, settings))
+    if token is None and (store is None or await store.count_users() == 0):
+        return Principal("open")
+    return None
+
+
+# ---------------------------------------------------------------- invitation email (optional: SMTP_* in .env)
+
+def mail_configured(settings) -> bool:
+    return bool(getattr(settings, "smtp_host", None) and getattr(settings, "smtp_from", None))
+
+
+def send_invitation_email(settings, to: str, project: str, inviter: str, link: str) -> None:
+    msg = EmailMessage()
+    msg["Subject"] = f"{inviter} invited you to the project {project}"
+    msg["From"] = settings.smtp_from
+    msg["To"] = to
+    msg.set_content(f"{inviter} invited you to join the project \"{project}\" on the voice agent console.\n\n"
+                    f"Accept the invitation: {link}\n\nThe link is valid for {INVITE_HOURS} hours; after that ask for a new one.")
+    password = settings.smtp_password.get_secret_value() if settings.smtp_password else None
+    if settings.smtp_port == 465:
+        server = smtplib.SMTP_SSL(settings.smtp_host, 465, context=ssl.create_default_context(), timeout=15)
+    else:
+        server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+        server.starttls(context=ssl.create_default_context())
+    with server:
+        if settings.smtp_user:
+            server.login(settings.smtp_user, password or "")
+        server.send_message(msg)
+
+
+# ---------------------------------------------------------------- what a member may do (checked on every console request)
+
+SELF_SERVICE = ("/api/me", "/api/auth/")                     # your own profile, default project, sign-out
+LIMITED_WRITES = ("calls", "evals", "live")                   # what an agent-limited member may still change besides their agents
+
+
+def access_refusal(method: str, path: str, query_agent: str | None, who: Principal, ws: str) -> tuple[int, str] | None:
+    """(status, message) when a signed-in member may not make this request, else None.
+
+    - viewer: reads only;
+    - limited to some agents: sees and changes only those agents (and their calls); reads the project's shared setup
+      (skills, tools, connections ...) because building an agent needs it, but never the API keys.
+    """
+    if not who.is_user or who.platform:
+        return None
+    write = method not in ("GET", "HEAD", "OPTIONS")
+    own = path.startswith(SELF_SERVICE) or path.endswith("/label")
+    role, limit = who.role(ws), who.agents(ws)
+    if role == "viewer" and write and not own:
+        return 403, "you have read-only access to this project"
+    if limit is None:
+        return None
+    parts = path.removeprefix("/api/").split("/")
+    if parts[0] == "api-keys":
+        return 403, "your access is limited to some agents - API keys are managed by the project's owner"
+    if query_agent and query_agent not in limit:
+        return 404, "agent not found"
+    if parts[0] in ("agents", "voice-agents") and len(parts) > 1 and parts[1] != "import":
+        return (404, "agent not found") if parts[1] not in limit else None
+    if write and not own and parts[0] not in LIMITED_WRITES:
+        return 403, "your access is limited to your agents - ask the project's owner for more"
+    return None

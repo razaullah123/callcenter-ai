@@ -1,3 +1,4 @@
+import AgentPicker from "../AgentPicker";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -32,14 +33,18 @@ import { summary } from "./CallDetail";
 
 export default function Live() {
   const [selected, setSelected] = useState<string | undefined>();
-  const { active, events, connected } = useLive(selected);
-  const current = active.find(c => c.call_id === selected);
+  const [agent, setAgent] = useState("");
+  const live = useLive(selected);
+  const { events, connected } = live;
+  const active = live.active.filter(c => !agent || c.agent_id === agent);
+  const current = live.active.find(c => c.call_id === selected);
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold">Live calls</h1>
         <Badge tone={connected ? "good" : "bad"}>{connected ? "connected" : "reconnecting…"}</Badge>
+        <span className="ml-auto"><AgentPicker value={agent} onChange={setAgent} /></span>
       </div>
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title={`Active now · ${active.length}`}>
@@ -72,7 +77,7 @@ export default function Live() {
           actions={selected && (
             <span className="flex items-center gap-3">
               {current && <EndCall callId={selected} />}
-              <Link to={`/calls/${selected}`} className="text-xs text-accent">Open call →</Link>
+              <Link to={`/calls/${selected}`} className="text-xs text-accent-text">Open call →</Link>
             </span>
           )}>
           {current && (

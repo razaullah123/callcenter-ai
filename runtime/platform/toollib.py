@@ -13,7 +13,11 @@ Policy fields (all optional except kind):
   hooks         named hooks from a pack (runtime.tools.hooks)
   backs         booked | confirmed | cancelled | sent — the claim a success makes true
   success_line  phrase said when the confirmed call succeeds (e.g. BOOKED_LINE)
-  source        mcp | local | http;  http tools also: description, input_schema, http {method, url, headers}
+  enabled       false = inactive: not offered to the agent, refuses to run (default true)
+  async         write / send only: the agent gets {queued: true} at once and the call finishes in the background
+  say_start, say_done   {ar, en} lines (templated, {{args.x}}) spoken when the call starts / succeeds
+  source        mcp | local | http | web;  http tools also: description, input_schema, http {method, url, headers};
+                web tools (run in the visitor's browser, see runtime/tools/web.py): description, input_schema
 """
 
 import copy
@@ -22,16 +26,16 @@ from typing import Any
 from runtime.harness.prompts import PHRASE_NAMES
 from runtime.tools.hooks import TOOL_HOOKS, load_packs
 
-from .store import WORKSPACE
+from .store import WORKSPACE, current_project
 
 KINDS = ("read", "write", "send")
 CONFIRM = ("none", "affirm", "readback")
 ROLES = ("identity.lookup", "identity.send_code", "identity.verify_code")
 CLAIMS = ("booked", "confirmed", "cancelled", "sent")
-SOURCES = ("mcp", "local", "http")
+SOURCES = ("mcp", "local", "http", "web")
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 FIELDS = {"kind", "confirm", "timeout_s", "cache_ttl", "idempotent", "role", "args", "hooks", "backs",
-          "success_line", "source", "description", "input_schema", "http"}
+          "success_line", "source", "description", "input_schema", "http", "enabled", "async", "say_start", "say_done"}
 
 
 def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], local_tools: set[str]) -> list[str]:
@@ -51,6 +55,15 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
     for k in ("timeout_s", "cache_ttl"):
         if k in policy and not (isinstance(policy[k], (int, float)) and policy[k] >= 0):
             e.append(f"{k} must be a number ≥ 0")
+    for k in ("enabled", "async"):
+        if k in policy and not isinstance(policy[k], bool):
+            e.append(f"{k} must be true or false")
+    if policy.get("async") and kind == "read" and policy.get("source") != "web":
+        e.append("read tools return data the agent needs, so they cannot be async")
+    for k in ("say_start", "say_done"):
+        v = policy.get(k)
+        if v is not None and not (isinstance(v, dict) and set(v) <= {"ar", "en"} and all(isinstance(x, str) for x in v.values())):
+            e.append(f"{k} must be {{ar, en}} text lines")
     if policy.get("role") and policy["role"] not in ROLES:
         e.append(f"role must be one of {', '.join(ROLES)}")
     if policy.get("backs") and policy["backs"] not in CLAIMS:
@@ -74,6 +87,18 @@ def validate_policy(name: str, policy: dict[str, Any], *, mcp_tools: set[str], l
             e.append("http.url must start with http:// or https://")
         if str(http.get("method", "GET")).upper() not in METHODS:
             e.append(f"http.method must be one of {', '.join(METHODS)}")
+        from runtime.tools.http_tool import auth_errors
+        e += auth_errors(http.get("auth"))
+        schema = policy.get("input_schema") or {"type": "object", "properties": {}}
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            e.append("input_schema must be a JSON schema object ({\"type\": \"object\", \"properties\": {...}})")
+        if not policy.get("description"):
+            e.append("description is required (the model reads it to decide when to call the tool)")
+    elif source == "web":
+        if policy.get("http"):
+            e.append("a web tool has no http settings: it runs in the visitor's browser")
+        if not name.replace("_", "").replace("-", "").isalnum() or not name[0].isalpha():
+            e.append("name: a web tool's name is the function name the website registers — a letter first, then letters, digits, _ or -")
         schema = policy.get("input_schema") or {"type": "object", "properties": {}}
         if not isinstance(schema, dict) or schema.get("type") != "object":
             e.append("input_schema must be a JSON schema object ({\"type\": \"object\", \"properties\": {...}})")
@@ -105,10 +130,25 @@ def tools_in(cfg: dict[str, Any]) -> dict[str, tuple[str, dict]]:
     return {n: (g, p or {}) for g, entries in (cfg.get("skills") or {}).items() for n, p in (entries or {}).items()}
 
 
+async def attach_library(store, bundle: dict[str, Any], names: set[str] | None = None) -> list[str]:
+    """Adds the project's library tools (all of them, or only `names`) that `bundle` doesn't have yet, with their current
+    policies. The library is the project's: connect an MCP server or define a tool once and every agent of the project can use
+    it; an agent keeps the policies it was released with (releases are frozen). Returns the names added."""
+    have = tools_in(bundle.get("tools") or {})
+    added = []
+    for row in await store.tools(current_project()):
+        name = row["name"]
+        if name in have or (names is not None and name not in names) or (row["policy"] or {}).get("enabled") is False:
+            continue
+        bundle["tools"] = put_in_config(bundle.get("tools") or {}, name, row["grp"], row["policy"] or {})
+        added.append(name)
+    return added
+
+
 async def usage(store) -> dict[str, list[str]]:
     """tool name → agents whose published release has it."""
     used: dict[str, list[str]] = {}
-    for agent in await store.agents(WORKSPACE):
+    for agent in await store.agents(current_project()):
         if agent.get("published_release_id"):
             bundle = (await store.release(agent["published_release_id"]))["bundle"]
             for name in tools_in(bundle.get("tools") or {}):
@@ -120,7 +160,7 @@ async def publish_tool(store, name: str, group: str, policy: dict[str, Any], *, 
                        note: str) -> list[dict]:
     """New release for each agent in `agents` (and every agent that already has the tool) with this policy."""
     out = []
-    for agent in await store.agents(WORKSPACE):
+    for agent in await store.agents(current_project()):
         if not agent.get("published_release_id"):
             continue
         bundle = (await store.release(agent["published_release_id"]))["bundle"]

@@ -24,6 +24,7 @@ from runtime.tools.factory import build_tooling
 from runtime.tools.summarizers import doctor_rows
 
 from .caller import END, LLMCaller, ScriptCaller
+from .errors import is_provider_error
 from .checks import check_all
 from .fixtures import PATIENTS, fixture_backend
 
@@ -47,13 +48,23 @@ class Case:
         return self.caller.get("language", "ar")
 
 
+def case_from_spec(case_id: str, raw: dict[str, Any], suite: str = "general") -> Case:
+    """A case from its YAML / database form (an agent's test cases are stored as these specs, Phase 12.7)."""
+    return Case(id=case_id, suite=raw.get("suite") or suite, title=raw.get("title") or case_id,
+                caller=raw["caller"], expect=raw.get("expect") or {}, max_turns=raw.get("max_turns", 18),
+                tags=raw.get("tags") or [], judge_note=raw.get("judge_note", ""))
+
+
+def case_spec(case: Case) -> dict[str, Any]:
+    return {"suite": case.suite, "title": case.title, "caller": case.caller, "expect": case.expect,
+            "max_turns": case.max_turns, "tags": case.tags, "judge_note": case.judge_note}
+
+
 def load_cases(suite: str | None = None, ids: list[str] | None = None) -> list[Case]:
     cases = []
     for path in sorted(CASES_DIR.glob("*.yaml")):
         for raw in yaml.safe_load(path.read_text(encoding="utf-8")) or []:
-            c = Case(id=raw["id"], suite=raw.get("suite", path.stem), title=raw.get("title", raw["id"]),
-                     caller=raw["caller"], expect=raw.get("expect", {}), max_turns=raw.get("max_turns", 18),
-                     tags=raw.get("tags", []), judge_note=raw.get("judge_note", ""))
+            c = case_from_spec(raw["id"], raw, path.stem)
             if (suite is None or c.suite == suite) and (not ids or c.id in ids):
                 cases.append(c)
     return cases
@@ -74,12 +85,33 @@ class _Collect:
         pass
 
 
-async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvider | None, mode: str = "auto",
-                   judge_llm: LLMProvider | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+TOOLING_TIMEOUT_S = 60.0                         # the simulated caller / judge wait this long for a reply (a live call: 10 s)
+ATTEMPTS = 3                                     # a case that dies on a provider error is played again, up to this many times
+async def run_case(case: Case, *, attempts: int = ATTEMPTS, **kw: Any) -> dict[str, Any]:
+    """Play a case. When the model provider fails mid-conversation (a slow answer, a timeout, a 5xx) the whole case is played
+    again — up to `attempts` times — because that says nothing about the agent; if it never gets through, the result says the
+    provider failed (`provider_problem`) so it isn't mistaken for the agent's mistake. Other errors and failed checks count at once."""
+    result: dict[str, Any] = {}
+    for n in range(1, max(1, attempts) + 1):
+        result = await _run_case_once(case, **kw)
+        result["attempts"] = n
+        if not is_provider_error(result.get("error")):
+            return result
+    result["provider_problem"] = True
+    for ch in result["checks"]:
+        if ch["check"] == "no_error":
+            ch["detail"] = (f"the model provider failed on all {result['attempts']} attempts ({result['error']}) — this is not a verdict "
+                            "on the agent; run the case again")
+    return result
+
+
+async def _run_case_once(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvider | None, mode: str = "auto",
+                         judge_llm: LLMProvider | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     """`bundle`: an agent release with inline skill files (LoadedAgent.inline_bundle()); None → the repo copy."""
     t0 = time.perf_counter()
     calls: list[tuple[str, dict]] = []
     offered_doctors: list[list[int]] = []          # doctor ids per successful slot search, in the order returned
+    offered_names: dict[int, list[str]] = {}       # doctor id -> the names the agent may say (Arabic / English)
     executor = await build_tooling(fixture_backend(), tools_config=(bundle or {}).get("tools"))
     original_execute = executor.execute
 
@@ -89,7 +121,10 @@ async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvide
         calls.append((call.name, dict(call.arguments)))
         result = await original_execute(call, ctx, emitter)
         if result.ok and ("doctorSlots" in call.name or "availableDoctors" in call.name) and isinstance(result.data, dict):
-            offered_doctors.append([d["doctor_id"] for d in doctor_rows(result.data)])
+            rows = doctor_rows(result.data)
+            offered_doctors.append([d["doctor_id"] for d in rows])
+            for d in rows:
+                offered_names[d["doctor_id"]] = [n for n in (d.get("name_ar"), d.get("name_en")) if n]
         return result
 
     executor.execute = recording_execute
@@ -146,7 +181,8 @@ async def run_case(case: Case, *, agent_llm: LLMProvider, caller_llm: LLMProvide
     result: dict[str, Any] = {
         "case": case.id, "suite": case.suite, "title": case.title, "mode": "script" if use_script else "llm",
         "transcript": transcript, "tool_calls": calls, "turns": session.turn_id, "error": error,
-        "offered_doctors": offered_doctors, "caller_raw": getattr(caller, "raw", []),
+        "offered_doctors": offered_doctors, "offered_doctor_names": {str(k): v for k, v in offered_names.items()},
+        "caller_raw": getattr(caller, "raw", []),
         "session": {"verified": session.auth.verified, "handoff": session.handoff, "language": session.language.language,
                     "gender": session.gender.known, "slots": _jsonable(session.slots), "skill": session.active_skill},
         "latency": _latency(events), "duration_s": round(time.perf_counter() - t0, 1),
@@ -214,9 +250,11 @@ async def run_suite(cases: list[Case], *, mode: str = "auto", concurrency: int =
                     progress=None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     agent_llm = agent_llm or create("llm", "groq")
     # gpt-oss spends part of max_tokens on hidden reasoning: give the caller / judge room for it
-    caller_cfg = {"temperature": 0.7, "max_tokens": 1500, **({"model": caller_model} if caller_model else {})}
+    # the simulated caller and the judge are test tooling: a slow answer (gpt-oss sometimes takes 6+ s to start) is fine, so
+    # they wait much longer than a live call would
+    caller_cfg = {"temperature": 0.7, "max_tokens": 1500, "timeout_s": TOOLING_TIMEOUT_S, **({"model": caller_model} if caller_model else {})}
     caller_llm = create("llm", "groq", caller_cfg)
-    judge_llm = create("llm", "groq", {"temperature": 0.0, "max_tokens": 2000}) if use_judge else None
+    judge_llm = create("llm", "groq", {"temperature": 0.0, "max_tokens": 2000, "timeout_s": TOOLING_TIMEOUT_S}) if use_judge else None
     sem = asyncio.Semaphore(concurrency)
     started = datetime.now(timezone.utc)
 
@@ -266,8 +304,9 @@ async def store_run(run: dict[str, Any]) -> None:
     pool = await get_pool()
     async with pool.acquire() as c:
         await c.execute(
-            """INSERT INTO eval_runs (id, started_at, finished_at, model, mode, summary, results)
-               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) ON CONFLICT (id) DO NOTHING""",
+            """INSERT INTO eval_runs (id, started_at, finished_at, model, mode, summary, results, agent_id, target)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb) ON CONFLICT (id) DO NOTHING""",
             run["id"], datetime.fromisoformat(run["started_at"]), datetime.fromisoformat(run["finished_at"]),
             run["model"], run["mode"], json.dumps(run["summary"], default=str),
-            json.dumps(run["results"], ensure_ascii=False, default=str))
+            json.dumps(run["results"], ensure_ascii=False, default=str), run.get("agent_id"),
+            json.dumps(run["target"], default=str) if run.get("target") else None)

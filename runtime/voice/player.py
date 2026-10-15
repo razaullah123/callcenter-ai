@@ -63,6 +63,7 @@ class SpeechPlayer:
         self.turn_started_at: float | None = None   # set by the call when the caller stops speaking
         self.speaking_since: float | None = None    # start of the current uninterrupted speech burst
         self.last_audio_at: float = 0.0             # when the agent's audio last played (echo tail)
+        self.voices: dict[str, str] = {}        # per-language voice chosen for this call (flow "change settings" node)
         self._tasks: list[asyncio.Task] = []
         self._start_workers()
 
@@ -83,9 +84,9 @@ class SpeechPlayer:
         await self._texts.put((text, language))
         await self._send_event({"event": "transcript", "role": "agent", "text": text})
 
-    async def transfer(self, reason: str) -> None:
+    async def transfer(self, reason: str, **options) -> None:
         await self.drained()
-        await self._send_event({"event": "transfer", "reason": reason})
+        await self._send_event({"event": "transfer", "reason": reason, **options})
 
     async def hangup(self) -> None:
         await self.drained()
@@ -147,7 +148,7 @@ class SpeechPlayer:
             text, language = await self._texts.get()
             clip = _Clip(text, cached=False)
             t0 = time.perf_counter()
-            if self.phrases and (hit := self.phrases.get(language, text)):
+            if self.phrases and not self.voices.get(language) and (hit := self.phrases.get(language, text)):
                 pcm, rate = hit
                 clip.cached = True
                 await self._clips.put(clip)
@@ -156,6 +157,7 @@ class SpeechPlayer:
                 await self._clips.put(clip)
                 try:
                     async for chunk in self.tts.synthesize(normalize_for_tts(text, language), language=language,
+                                                           voice=self.voices.get(language) or None,
                                                            encoding=self.fmt.encoding,
                                                            sample_rate=self.fmt.sample_rate):
                         await self._push(clip, chunk.data)

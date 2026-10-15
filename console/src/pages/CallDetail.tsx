@@ -1,58 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+/** Pieces of a call's details (the Call History side panel, the Live page): latency waterfall and event timeline. */
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { api, type CallDetail as Detail, type EventRow, type TurnLatency } from "../api";
-import { Badge, Card, Empty, ErrorBox, cx, fmtClock, fmtMs, fmtTime, levelTone, outcome } from "../ui";
-
-export default function CallDetail() {
-  const { id = "" } = useParams();
-  const q = useQuery({ queryKey: ["call", id], queryFn: () => api.call(id), refetchInterval: d => (d.state.data?.call.ended_at ? false : 3000) });
-  if (q.error) return <ErrorBox error={q.error} />;
-  if (!q.data) return <Empty>Loading…</Empty>;
-  const { call } = q.data;
-  return (
-    <div className="mx-auto max-w-6xl space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <Link to="/calls" className="text-sm text-muted">← Calls</Link>
-        <h1 className="font-mono text-lg font-semibold">{call.call_id}</h1>
-        {outcome(call)}
-        {call.verified && <Badge tone="info">verified</Badge>}
-      </div>
-      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted">
-        {call.mobile && <span>Mobile <span className="font-mono text-ink">{call.mobile}</span></span>}
-        <span>Started {fmtTime(call.started_at)}</span>
-        {call.ended_at && <span>Ended {fmtTime(call.ended_at)}</span>}
-        {call.duration_s != null && <span>Duration {Math.floor(call.duration_s / 60)}:{String(call.duration_s % 60).padStart(2, "0")}</span>}
-        <span>Channel {call.channel}</span><span>Language {call.language ?? "—"}</span>
-        <span>{call.turns} turns</span><span>Latency p50 {fmtMs(call.latency_p50_ms)}</span>
-        {call.config_version && <span>Config v{call.config_version}</span>}
-        {call.handoff && <span className="text-warn">Handoff: {call.handoff}</span>}
-      </div>
-      <div className="grid gap-4 lg:grid-cols-5">
-        <Card title="Conversation" className="lg:col-span-2"><Transcript data={q.data} /></Card>
-        <Card title="Latency per turn" className="lg:col-span-3"><Waterfall turns={q.data.turns} /></Card>
-      </div>
-      <Card title={`Timeline · ${q.data.events.length} events`}><Timeline events={q.data.events} /></Card>
-    </div>
-  );
-}
-
-function Transcript({ data }: { data: Detail }) {
-  if (!data.transcript.length) return <Empty>No speech recorded.</Empty>;
-  return (
-    <div className="flex max-h-[32rem] flex-col gap-2 overflow-y-auto pr-1">
-      {data.transcript.map((l, i) => (
-        l.role === "system"
-          ? <div key={i} className="self-center text-xs text-warn">⚑ {l.text}</div>
-          : <div key={i} dir="auto" className={cx("max-w-[88%] rounded-xl px-3 py-2 text-sm",
-              l.role === "user" ? "self-end bg-accent/10" : "self-start bg-soft")}>
-              <div className="mb-0.5 text-[10px] text-muted" dir="ltr">{l.role === "user" ? "Caller" : "Agent"} · {fmtClock(l.ts)}</div>
-              {l.text}
-            </div>
-      ))}
-    </div>
-  );
-}
+import { type EventRow, type TurnLatency } from "../api";
+import { Badge, Empty, cx, fmtClock, fmtMs, levelTone } from "../ui";
 
 const SEG = [
   { key: "stt_ms", label: "STT", cls: "bg-sky-500" },
@@ -60,7 +9,7 @@ const SEG = [
   { key: "tools_ms", label: "Tools", cls: "bg-amber-500" },
 ] as const;
 
-function Waterfall({ turns }: { turns: TurnLatency[] }) {
+export function Waterfall({ turns }: { turns: TurnLatency[] }) {
   if (!turns.length) return <Empty>No turns.</Empty>;
   const rows = turns.map(t => ({ ...t, tools_ms: t.tools.reduce((a, x) => a + (x.cached ? 0 : x.ms ?? 0), 0) }));
   const max = Math.max(1, ...rows.map(r => Math.max(r.first_audio_ms ?? 0, (r.stt_ms ?? 0) + (r.total_ms ?? 0))));

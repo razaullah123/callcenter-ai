@@ -130,6 +130,16 @@ def test_noise_transcripts_are_dropped():
     assert noise_reason("I want to take this picture", seg(0.8, -1.4)) == "no_speech"
     assert noise_reason("0551234567", seg(0.01, -0.1)) is None
     assert noise_reason("ابي احجز موعد", seg(0.05, -0.3)) is None
+    for phantom in ("نهاية الدرس", "ترجمة نانسي قنقر", "إلى اللقاء في الحلقة القادمة"):   # subtitle credits Whisper invents on noise
+        assert noise_reason(phantom, {}) == "hallucination"
+    assert noise_reason("نعم أكدي الموعد", seg(0.01, -0.2)) is None
+
+
+def test_tool_failed_reads_the_error_result():
+    from runtime.harness.engine import _tool_failed
+    assert _tool_failed('{"error": "ask the caller to confirm this action first"}')
+    assert not _tool_failed('{"success": true}')
+    assert not _tool_failed("not json")
 
 
 class _Player:
@@ -257,3 +267,76 @@ async def test_end_call_from_console():
     assert call.player.interrupted and sent == [{"event": "hangup"}] and closed == [True]
     await call.stop()                                  # the transport's cleanup then stops the call
     assert call.end_reason == "ended_from_console"
+
+
+async def test_agent_call_limits(monkeypatch):
+    """Per-agent call settings: no interruptions, the inactivity check-in, and the maximum call length."""
+    from runtime.harness.prompts import Phrases
+    from runtime.harness.session import Session
+    from runtime.platform.bundle import knob_errors
+    from runtime.voice.call import VoiceCall
+    assert not knob_errors({"voice_interrupt": False, "voice_vad_threshold": 0.6, "voice_inactivity_s": 15,
+                            "call_max_minutes": 10})
+    call = VoiceCall.__new__(VoiceCall)
+    call.interrupt, call.barge_in_grace_ms, call.aec = False, 0, None
+    call.player = type("P", (), {"speaking_since": None})()
+    assert call._barge_in_allowed() is False                       # this agent always finishes what it says
+
+    said, sent, closed = [], [], []
+
+    async def say(text):
+        said.append(text)
+
+    async def send_event(msg):
+        sent.append(msg)
+
+    async def close_transport():
+        closed.append(True)
+
+    call = VoiceCall.__new__(VoiceCall)
+    call.session, call.ev = Session(call_id="c"), _Ev()
+    call.player = type("P", (), {"active": False})()
+    call.turns = type("T", (), {"in_speech": False})()
+    call.agent = type("A", (), {"ph": Phrases(), "_say": staticmethod(say)})()
+    call._stopped, call._forced_reason, call._agent_task = False, None, None
+    call._send_event, call.close_transport = send_event, close_transport
+    call.inactivity_s, call.max_call_s = 0.6, 2.5
+    import time
+    call._last_activity = time.monotonic()
+    await asyncio.wait_for(call._watch_limits(), 5)
+    en = Phrases()
+    assert said[0] == en.STILL_THERE["ar"] and said[-1] == en.CALL_TIME_LIMIT["ar"]
+    assert said.count(en.STILL_THERE["ar"]) == 1                   # once per silence, not every half second
+    assert sent == [{"event": "hangup"}] and closed == [True] and call._forced_reason == "max_duration"
+
+
+async def test_max_call_duration_cuts_in_mid_answer():
+    """Time is up while the agent is still answering: the answer stops, the closing line plays, the call ends."""
+    from runtime.harness.prompts import Phrases
+    from runtime.harness.session import Session
+    from runtime.voice.call import VoiceCall
+    said, sent, heard = [], [], []
+
+    async def say(text):
+        said.append(text)
+
+    async def send_event(msg):
+        sent.append(msg)
+
+    async def long_answer():
+        await asyncio.sleep(3600)
+
+    call = VoiceCall.__new__(VoiceCall)
+    call.session, call.ev = Session(call_id="c"), _Ev()
+    call.session.language.language = "en"
+    call.player = _Player("Your appointment options are")          # the agent is speaking
+    call.turns = type("T", (), {"in_speech": False})()
+    call.agent = type("A", (), {"ph": Phrases(), "_say": staticmethod(say), "on_interrupted": lambda self, h: heard.append(h)})()
+    call._stopped, call._forced_reason = False, None
+    call._agent_task = asyncio.create_task(long_answer())
+    call._send_event, call.close_transport = send_event, None
+    call.inactivity_s, call.max_call_s = 0, 0.6
+    await asyncio.wait_for(call._watch_limits(), 5)
+    assert call.player.interrupted and heard and call._agent_task.cancelled()
+    assert said == [Phrases().CALL_TIME_LIMIT["en"]] and sent == [{"event": "hangup"}]
+    assert call._forced_reason == "max_duration"

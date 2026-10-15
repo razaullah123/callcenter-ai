@@ -19,6 +19,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from runtime.events import EventType, Level
 from runtime.harness.engine import Agent
+from runtime.harness.handoff import carry_over
+from runtime.harness.variables import build_custom, declared_variables
 from runtime.harness.session import Session
 
 from . import CLOSED_ERRORS
@@ -35,8 +37,8 @@ class _TextOutput:
     async def say(self, text: str, *, language: str, interruptible: bool = True) -> None:
         await self.send({"event": "transcript", "role": "agent", "text": text})
 
-    async def transfer(self, reason: str) -> None:
-        await self.send({"event": "transfer", "reason": reason})
+    async def transfer(self, reason: str, **options) -> None:
+        await self.send({"event": "transfer", "reason": reason, **options})
         self.ended.set()
 
     async def hangup(self) -> None:
@@ -81,14 +83,45 @@ async def chat(ws: WebSocket) -> None:
             await send({"event": "error", "message": str(e)})
             await ws.close(code=1008, reason="unknown agent")
             return
-        session = Session(call_id=call_id)
+        try:                                   # custom variables: the agent's defaults + the start's `params`
+            session = Session(call_id=call_id, agent_name=loaded.name, agent_id=loaded.agent_id,
+                              params=dict(first.get("params") or {}),
+                              custom=build_custom(declared_variables(loaded.bundle), first.get("params")))
+        except (ValueError, TypeError) as e:
+            await send({"event": "error", "message": str(e)})
+            await ws.close(code=1008, reason="bad params")
+            return
         if first.get("language") in ("ar", "en"):
             session.language.language = first["language"]
         out = _TextOutput(send)
-        agent = Agent(session, loaded.executor, loaded.llm, loaded.skills, out, rt.bus.bind(),
-                      filler_after_s=loaded.settings.voice_filler_after_s, settings=loaded.settings)
-        agent.config_version = loaded.version
-        agent.agent_ref = {"agent_id": loaded.agent_id, "release_id": loaded.release_id}
+        def make_agent(target, sess: Session) -> Agent:
+            a = Agent(sess, target.executor, target.llm, target.skills, out, rt.bus.bind(),
+                      filler_after_s=target.settings.voice_filler_after_s, settings=target.settings)
+            a.config_version = target.version
+            a.agent_ref = {"agent_id": target.agent_id, "release_id": target.release_id}
+            a.transfer_agent = switch_agent
+            return a
+
+        async def switch_agent(req) -> bool:
+            """A flow's \"transfer agent\" node: another agent of this project takes over the chat."""
+            nonlocal agent, session, loaded
+            try:
+                target = await rt.agent_for_call(agent_id=req.agent_id)
+            except Exception as e:                                              # noqa: BLE001
+                ev.emit(EventType.ERROR, level=Level.WARNING, during="agent_transfer", agent=req.agent_id, error=repr(e)[:160])
+                return False
+            previous = loaded.agent_id
+            session, loaded = carry_over(session, target.name, req, agent_id=target.agent_id,
+                                         declared=declared_variables(target.bundle)), target
+            agent = make_agent(target, session)
+            rt.calls[call_id] = _ChatCall(session, out)
+            ev.emit(EventType.AGENT_TRANSFER, agent_id=target.agent_id, release_id=target.release_id,
+                    config_version=target.version, previous=previous, history=req.history, variables=req.variables)
+            await send({"event": "agent_transfer", "agent_id": target.agent_id, "name": target.name})
+            await agent.start(resumed=True, greet=not req.history)
+            return True
+
+        agent = make_agent(loaded, session)
         rt.calls[call_id] = _ChatCall(session, out)
         await send({"event": "ready", "call_id": call_id})
         await agent.start()

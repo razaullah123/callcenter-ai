@@ -43,12 +43,6 @@ class Settings(BaseSettings):
     embedding_url: str | None = None
     embedding_dim: int = 1024
 
-    # Emergency symptoms during a call (chest pain, can't breathe, ...):
-    #   advise_and_continue — empathy + one short ER / 997 safety line, then continue booking
-    #   empathy_only        — empathy, then continue booking (no safety line) — default (user decision)
-    #   stop                — safety message only, no booking
-    red_flag_mode: str = "empathy_only"   # user decision: no ER / 997 line; advise_and_continue | stop also exist
-
     # Tool backend: live (production) | hybrid (live lookups, simulated patient/auth/writes) | mock
     tools_mode: str = "hybrid"
     hybrid_live_auth: bool = False       # hybrid: real patient lookup + OTP
@@ -60,7 +54,20 @@ class Settings(BaseSettings):
     voice_barge_in_confirm: bool = True  # transcribe that speech first: interrupt only for real words, not echo / noise
     voice_level_gate_db: float = 12.0    # ignore speech this far below the caller's own level (background voices); 0 = off
     voice_filler_after_s: float = 0.7
+    voice_wait_for_user: str = "never"   # who speaks first: never (agent greets) | always (agent waits for the caller) | outbound (waits only on outbound calls)
+    voice_interrupt: bool = True         # the caller may interrupt the agent (barge-in); off: the agent always finishes
+    voice_vad_threshold: float = 0.5     # speech probability that counts as speech (higher: less sensitive to noise)
+    voice_inactivity_s: float = 0.0      # caller silent this long after the agent spoke → "are you still there?"; 0 = off
+    call_max_minutes: float = 0.0        # the call ends (with a closing line) after this many minutes; 0 = no limit
+    record_calls: bool = False           # record the call's audio (stereo, encrypted, kept `recording_retention_days`); the agent says a notice first
+    recording_retention_days: int = 30   # a recording is deleted this long after the call
     llm_hedge_after_s: float = 2.5
+    api_key_rate_per_min: int = 120      # requests an API key may make per minute (per server process)
+    public_base_url: str = ""            # the address the IVR / PBX reaches this server on (dial requests carry it), e.g. https://agent.example.com
+    batch_live_dial: bool = False         # batch calls: False = nothing is dialed (every recipient is 'simulated'); True = POST to the number's dial URL
+    batch_max_concurrent: int = 5         # batch calls in progress at once (all batches together)
+    batch_ring_timeout_s: int = 90        # a dialed call that never connects is a no-answer after this
+    public_trust_proxy: bool = False     # behind a reverse proxy: take the visitor address for the public link limits from X-Forwarded-For
     # Agents (per release knobs): does the caller have to be verified first, and where does the conversation start?
     require_verification: bool = True    # False: e.g. an information line — no mobile / OTP, starts in entry_skill
     entry_skill: str = "home"            # the skill after verification (or from the start when none is required)
@@ -68,8 +75,7 @@ class Settings(BaseSettings):
 
     # IVR endpoint /ws/voice-pipeline (compatible with the existing IVR integration)
     auth_secret: SecretStr | None = None      # HS256 JWT secret shared with the IVR auth service (AUTH_SECRET)
-    auth_database_url: SecretStr | None = None  # DB with blacklisted_tokens / white_listed_numbers (default SOURCE_DATABASE_URL)
-    source_database_url: SecretStr | None = None
+    source_database_url: SecretStr | None = None  # ONLY for scripts/clone_reference_data.py — never read at run time
     ivr_inbound_rate: int = 8000              # caller audio: raw PCM16 mono
     ivr_outbound_rate: int = 8000             # agent audio WAV pieces (TTS resampled; 0 = keep TTS rate)
     ivr_chunk_ms: int = 300                   # outbound WAV piece size (real-time paced)
@@ -94,10 +100,19 @@ class Settings(BaseSettings):
 
     # Console / control plane
     console_token: SecretStr | None = None    # if set, /api requires "Authorization: Bearer <token>"
+    # invitation emails (optional — without them the console shows the invitation link to copy)
+    platform_owner_emails: str = ""      # comma-separated e-mails that see and manage EVERY project; empty: the owner of the default project
+    invited_users_can_create_projects: bool = True   # false: only the platform owner and people who already own a project
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None
 
     # Runtime
     default_language: str = "ar"
     log_dir: Path = Field(default=ROOT_DIR / "logs")
+    recordings_dir: Path = Field(default=ROOT_DIR / "recordings")   # call recordings (encrypted with MASTER_KEY)
     log_console: bool = True
     log_level: str = "info"
 

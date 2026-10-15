@@ -58,7 +58,7 @@ class Catalog:
         for skill, entries in cfg["skills"].items():
             for name, policy in entries.items():
                 source = policy.get("source", "mcp")
-                if source == "http":           # API-request tool: its schema is part of its own definition
+                if source in ("http", "web"):  # API-request / web tool: its schema is part of its own definition
                     schema = {"description": policy.get("description", ""),
                               "input_schema": policy.get("input_schema") or {"type": "object", "properties": {}}}
                 else:
@@ -78,6 +78,8 @@ class Catalog:
                     role=policy.get("role"), role_args=dict(policy.get("args") or {}),
                     hooks=tuple(policy.get("hooks") or ()), backs=policy.get("backs"),
                     success_line=policy.get("success_line"), http=policy.get("http"),
+                    enabled=policy.get("enabled", True) is not False, run_async=bool(policy.get("async", False)),
+                    say_start=policy.get("say_start") or None, say_done=policy.get("say_done") or None,
                 )
         if missing:
             raise ValueError(f"tools in catalog but not provided by any server: {missing}")

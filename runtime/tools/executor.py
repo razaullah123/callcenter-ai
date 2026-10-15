@@ -38,6 +38,7 @@ class ToolExecutor:
     def __init__(self, catalog: Catalog, mcp: MCPBackend) -> None:
         self.catalog = catalog
         self.mcp = mcp
+        self.knowledge: dict[str, Any] | None = None     # the agent's knowledge base (search_knowledge_base)
         self.pre_hooks: list[PreHook] = []     # may return replacement args; raise ToolError to block
         self.post_hooks: list[PostHook] = []   # may rewrite result.content / update session
         self._cache: dict[str, tuple[float, Any]] = {}
@@ -52,7 +53,7 @@ class ToolExecutor:
         """OpenAI-format tool specs with injected parameters removed."""
         selected = self.catalog.tools.values() if names is None else \
             [self.catalog.tools[n] for n in sorted(names) if n in self.catalog.tools]
-        return [self._llm_spec(t) for t in selected]
+        return [self._llm_spec(t) for t in selected if t.enabled]
 
     def _llm_spec(self, tool: ToolDef) -> dict[str, Any]:
         if tool.name not in self._llm_specs:
@@ -77,6 +78,8 @@ class ToolExecutor:
         try:
             if tool is None:
                 raise ToolError(f"unknown tool {call.name}")
+            if not tool.enabled:
+                raise ToolError(f"tool {tool.name} is inactive")
             if ctx.allowed_tools is not None and tool.name not in ctx.allowed_tools:
                 raise ToolError(f"tool {tool.name} is not available in the current step")
             if "__invalid_json__" in call.arguments:
@@ -85,6 +88,14 @@ class ToolExecutor:
             for hook in self.pre_hooks:
                 args = (await hook(tool, args, ctx)) or args
             args = self._prepare_args(tool, args, ctx)
+            if tool.run_async and (tool.kind != "read" or tool.source == "web"):
+                self._start_async(tool, args, ctx, emitter)
+                data = {"success": True, "queued": True}
+                result = ToolResult(ok=True, data=data, content=to_llm_content(tool.name, data))
+                result.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                emitter.emit(EventType.TOOL_END, tool=call.name, latency_ms=result.latency_ms, cached=False,
+                             result_chars=len(result.content), queued=True)
+                return result
             result = await self._run(tool, args, ctx)
             for hook in self.post_hooks:
                 await hook(tool, args, result, ctx)
@@ -104,6 +115,27 @@ class ToolExecutor:
             emitter.emit(EventType.TOOL_ERROR, level=Level.WARNING, tool=call.name, latency_ms=result.latency_ms,
                          error=result.error)
         return result
+
+    def _start_async(self, tool: ToolDef, args: dict[str, Any], ctx: ToolContext, emitter: BoundEmitter) -> None:
+        """Run an async tool's call in the background; its outcome is only logged (the agent already moved on)."""
+        async def run() -> None:
+            t0 = time.perf_counter()
+            try:
+                result = await self._run(tool, args, ctx)
+                for hook in self.post_hooks:
+                    await hook(tool, args, result, ctx)
+                ms = round((time.perf_counter() - t0) * 1000, 1)
+                if result.ok:
+                    emitter.emit(EventType.TOOL_END, tool=tool.name, latency_ms=ms, background=True)
+                else:
+                    emitter.emit(EventType.TOOL_ERROR, level=Level.WARNING, tool=tool.name, latency_ms=ms,
+                                 background=True, error=result.error)
+            except Exception as e:
+                emitter.emit(EventType.TOOL_ERROR, level=Level.WARNING, tool=tool.name, background=True, error=repr(e))
+
+        task = asyncio.create_task(run(), name=f"async:{tool.name}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def prefetch(self, name: str, args: dict[str, Any], ctx: ToolContext, emitter: BoundEmitter) -> None:
         """Warm the cache in the background for a read the LLM is likely to request next."""
@@ -221,9 +253,23 @@ class ToolExecutor:
 
     async def _dispatch(self, tool: ToolDef, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, Any]:
         if tool.source == "local":
+            if self.knowledge is not None:
+                ctx.extra.setdefault("knowledge", self.knowledge)
             return True, await call_local(tool.name, args, ctx)
+        if tool.source == "web":                    # runs in the visitor's browser, through the call's bridge
+            from .web import WebToolError
+            bridge = ctx.extra.get("web_bridge")
+            if bridge is None:
+                return False, {"success": False, "error": "this tool runs in the visitor's browser, which this call doesn't have"}
+            try:
+                value = await bridge.call(tool.name, args, max(1.0, (tool.timeout_s or 10) - 0.5))
+            except WebToolError as e:
+                return False, {"success": False, "error": str(e)}
+            return True, value if isinstance(value, dict) else {"result": value}
         if tool.source == "http":
-            from .http_tool import call_http
+            from .http_tool import call_http, simulated
+            if (fake := simulated(tool.kind)) is not None:      # TOOLS_MODE: nothing real happens while testing
+                return fake
             return await call_http(tool.http or {}, args, tool.timeout_s or 10)
         return await self.mcp.call(tool.name, args, tool.timeout_s or 10)
 

@@ -23,7 +23,7 @@ class FakeSTT(STTProvider):
         text: str = "ابي احجز موعد"
 
     async def transcribe(self, audio: AudioInput, *, language: str | None = None,
-                         prompt: str | None = None) -> Transcript:
+                         prompt: str | None = None, model: str | None = None) -> Transcript:
         await asyncio.sleep(self.settings.latency_ms / 1000)
         return Transcript(self.settings.text, language or "ar", audio.duration_ms)
 

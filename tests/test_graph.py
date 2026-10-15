@@ -147,3 +147,85 @@ def test_one_flow_lets_its_steps_decide_when_to_verify():
     assert "handle it after verification" not in prompt and "Current step: ask" in prompt
     s.flow_skill, s.active_skill = None, "authenticate"
     assert "Verify before helping" in system_prompt(s, skills)          # step-based agents: unchanged
+
+
+# ---------------------------------------------------------------- Hamsa parity: operators, static messages
+
+
+def test_condition_operators():
+    from runtime.skills.graph import _holds
+    s = {"age": "42", "city": "Riyadh Olaya", "phone": "0548802968", "plan": "gold", "empty": ""}
+    ok = lambda c: _holds(c, s, None, {})                                                  # noqa: E731
+    assert ok({"ne": {"plan": "silver"}}) and not ok({"ne": {"plan": "gold"}})
+    assert ok({"gt": {"age": 41}}) and not ok({"gt": {"age": 42}}) and ok({"gte": {"age": 42}})
+    assert ok({"lt": {"age": "43"}}) and not ok({"lt": {"age": 42}}) and ok({"lte": {"age": 42}})
+    assert not ok({"gt": {"city": 1}}) and not ok({"gt": {"missing": 1}})                  # not a number: never holds
+    assert ok({"contains": {"city": "olaya"}}) and not ok({"contains": {"city": "jeddah"}})
+    assert ok({"not_contains": {"city": "jeddah"}}) and not ok({"not_contains": {"city": "Riyadh"}})
+    assert ok({"regex": {"phone": r"^05\d{8}$"}}) and not ok({"regex": {"phone": r"^\+1"}})
+    assert not ok({"regex": {"phone": "("}})                                               # a bad pattern never holds
+    assert ok({"exists": ["plan"]}) and not ok({"exists": ["empty"]}) and ok({"not_exists": ["empty", "nope"]})
+    assert ok({"all": [{"gt": {"age": 18}}, {"any": [{"equals": {"plan": "silver"}}, {"contains": {"city": "Riyadh"}}]}]})
+
+
+def test_bad_regex_is_a_graph_error():
+    g = Graph.from_dict({"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"from": "a", "to": "b", "when": {"regex": {"x": "("}}}]})
+    assert any("bad regex" in e for e in g.errors())
+    ok = Graph.from_dict({"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"from": "a", "to": "b", "when": {"gt": {"x": 1}}}]})
+    assert ok.errors() == []
+
+
+def test_router_uses_numeric_operator():
+    g = Graph.from_dict({"start": "r", "nodes": [{"id": "r", "type": "router"}, {"id": "adult"}, {"id": "minor"}],
+                         "edges": [{"from": "r", "to": "adult", "when": {"gte": {"age": 18}}}, {"from": "r", "to": "minor"}]})
+    assert g.current({}, {"age": "30"}).id == "adult" and g.current({}, {"age": 7}).id == "minor"
+
+
+STATIC = """
+start: hello
+nodes:
+  - {id: hello, type: conversation, say: {en: "Hello {{ name }}, welcome.", ar: "أهلاً {{ name }}"}}
+  - {id: ask, type: conversation, instructions: "Ask what they need."}
+  - {id: bye, type: end, say: {en: "Bye {{ name }}.", ar: "مع السلامة {{ name }}"}}
+edges:
+  - {from: hello, to: ask, when: {replied: true}}
+  - {from: ask, to: bye, when: {llm: "the caller says goodbye"}}
+"""
+
+
+async def _static_agent():
+    set_reference(REF)
+    mcp = MockMCP()
+    await mcp.start()
+    executor = executor_for(mcp)
+    skills = SkillSet(executor.catalog, {"line": {"SKILL.md": "---\ndescription: Line\n---\nBe brief.", "flow.yaml": STATIC}})
+    settings = get_settings().model_copy(update={"require_verification": False, "entry_skill": "line"})
+    llm, out = ScriptedLLM(), Output()
+    s = Session(call_id="static-1")
+    s.language.language = "en"
+    s.slots["name"] = "Sara"
+    agent = Agent(s, executor, llm, skills, out, EventBus().bind(), filler_after_s=5, settings=settings)
+    return agent, s, llm, out
+
+
+async def test_static_conversation_message_is_said_without_the_model():
+    agent, s, llm, out = await _static_agent()
+    await agent.start()
+    greeting = len(out.said)
+    llm.then(json.dumps({"answers": {"the caller says goodbye": False}, "values": {}}))
+    await agent.handle("hi", "en")                                      # the first turn reaches the static node...
+    assert out.said[greeting:] == ["Hello Sara, welcome."]              # ...said as written, {{ name }} filled in
+    assert llm.requests == []                                           # no model call for it
+
+
+async def test_static_message_then_next_node_and_templated_goodbye():
+    agent, s, llm, out = await _static_agent()
+    await agent.start()
+    await agent.handle("hi", "en")
+    llm.then(json.dumps({"answers": {"the caller says goodbye": False}, "values": {}}))
+    llm.then("What do you need?")
+    await agent.handle("I have a question", "en")                       # caller replied → the next (prompt) node
+    assert out.said[-1].startswith("What do you need")
+    llm.then(json.dumps({"answers": {"the caller says goodbye": True}, "values": {}}))
+    await agent.handle("goodbye", "en")
+    assert out.said[-1] == "Bye Sara." and out.hung_up                  # End line rendered as a template

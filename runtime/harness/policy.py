@@ -323,13 +323,27 @@ def is_garbled(sentence: str) -> bool:
 _BRACKETED = re.compile(r"\[[^\]\n]{0,40}\]")
 
 
+_JSON_BLOB = re.compile(r"\{[^{}]*\"[\w ]+\"\s*:[^{}]*\}")
+_JSON_DEBRIS = re.compile(r"^[\s{}\[\]\",:]+$")
+_JSON_PAIR = re.compile(r'^\s*[{,]?\s*"[\w ]+"\s*:.*$')     # one chunk of a JSON object: "intent": "confirm",
+
+
+# the flow templates mark list breaks as <pause_short>; the model copies them (sometimes mangled: "<pause short", "<pause_short")
+_PAUSE_MARK = re.compile(r"<\s*/?\s*pause[\s_-]*(?:short|long|medium)?\s*/?\s*>?", re.I)
+
+
 def clean_for_speech(text: str) -> str:
+    text = re.sub(r"\s*,\s*", ", ", _PAUSE_MARK.sub(",", text)) if _PAUSE_MARK.search(text) else text   # a real (short) pause for the voice instead of reading the tag
+    text = _JSON_BLOB.sub(" ", text)                     # a model that "fills in" variables as text: {"intent": "confirm"}
+    if _JSON_DEBRIS.match(text) or _JSON_PAIR.match(text):
+        return ""                                        # what is left of a JSON blob split across chunks
     text = re.sub("[​-‏⁠﻿]", "", text)     # zero-width / direction marks ("ب​مستشفى")
     text = _BRACKETED.sub(" ", _MD.sub(lambda m: m.group(1) or " ", text))
     text = re.sub(r"\s*\(([^()]*)\)", r" \1", text)          # "(غداً)" → "غداً": keep the words, not the brackets
     text = re.sub(r"\b(\w+)(?:\s+\1\b){2,}", r"\1", text)       # "Home Home Home" → "Home"
     text = _EMOJI.sub("", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"(?:\s*,){2,}", ",", text).strip(" ,") if "," in text else text
 
 
 # ---------------- parsing helpers for HIS responses ----------------

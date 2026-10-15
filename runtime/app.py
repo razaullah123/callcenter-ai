@@ -13,13 +13,23 @@ from runtime.config import Settings, get_settings
 from runtime.data.reference import get_reference
 from runtime.events import ConsoleSink, EventBus, EventType, JsonlSink, Level
 from runtime.harness.redact import redact_event
-from runtime.platform import WORKSPACE, AgentLoader, LoadedAgent, PgStore, mcp_config
+from runtime.platform import AgentLoader, LoadedAgent, PgStore, in_project, mcp_config
 from runtime.providers import LLMProvider, STTProvider, TTSProvider
 from runtime.skills import SkillSet
 from runtime.tools import MCPPool, MockMCP, ToolExecutor
 from runtime.tools.hybrid import HybridMCP
 
 log = logging.getLogger(__name__)
+
+
+async def all_mcp_config(platform, settings, secrets) -> dict[str, dict]:
+    """One MCP pool for every project's servers (names are unique across projects); each server's token comes from
+    its own project's secrets."""
+    cfg: dict[str, dict] = {}
+    for w in await platform.list_workspaces():
+        with in_project(w["id"]):
+            cfg.update(await mcp_config(await platform.mcp_servers(w["id"]), settings, secrets))
+    return cfg
 
 
 @dataclass
@@ -85,7 +95,7 @@ class Runtime:
     async def reload_mcp(self) -> None:
         """MCP servers changed: connect the new set, then new calls use it. Calls in progress keep the old
         connections, which are closed a while later."""
-        cfg = await mcp_config(await self.platform.mcp_servers(WORKSPACE), self.settings, self.secrets)
+        cfg = await all_mcp_config(self.platform, self.settings, self.secrets)
         backend = _make_backend(self.settings, cfg)
         await backend.start()
         old, self.backend = self.backend, backend
@@ -120,6 +130,16 @@ class Runtime:
             return True
         return False
 
+    async def instruct_call(self, call_id: str, text: str) -> bool:
+        """A live instruction for a call, wherever it runs. False if no worker has it."""
+        if (call := self.calls.get(call_id)) is not None:
+            call.add_supervisor_note(text)
+            return True
+        if self.sync is not None and self.live is not None and call_id in self.live.active:
+            await self.sync.instruct_call(call_id, text)
+            return True
+        return False
+
     # ---- messages from the other workers
 
     async def _on_config(self, msg: dict) -> None:
@@ -129,6 +149,8 @@ class Runtime:
     async def _on_control(self, msg: dict) -> None:
         if msg.get("action") == "end" and (call := self.calls.get(msg.get("call_id"))) is not None:
             await call.end_from_console()
+        elif msg.get("action") == "instruct" and (call := self.calls.get(msg.get("call_id"))) is not None:
+            call.add_supervisor_note(str(msg.get("text") or ""))
 
     async def _on_live(self, msg: dict) -> None:
         if self.live is not None:
@@ -159,7 +181,7 @@ class Runtime:
         mcp_cfg = s.mcp_server_config()
         if platform is not None:
             try:
-                mcp_cfg = await mcp_config(await platform.mcp_servers(WORKSPACE), s, secrets) or mcp_cfg
+                mcp_cfg = await all_mcp_config(platform, s, secrets) or mcp_cfg
             except Exception as e:
                 log.warning("MCP servers not read from the database (%r) — using .env", e)
         backend = _make_backend(s, mcp_cfg)

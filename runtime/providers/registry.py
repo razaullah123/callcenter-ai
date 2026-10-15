@@ -33,6 +33,11 @@ def schemas() -> dict[str, dict[str, dict[str, Any]]]:
             for kind, impls in _REGISTRY.items()}
 
 
+def provider_class(kind: str, name: str) -> type[Provider]:
+    """The implementation registered as `name` (e.g. to read a TTS provider's VOICES)."""
+    return _REGISTRY[kind][name]
+
+
 def create(kind: str, name: str, config: dict[str, Any] | None = None) -> Provider:
     try:
         cls = _REGISTRY[kind][name]

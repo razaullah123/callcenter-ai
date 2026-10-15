@@ -102,7 +102,7 @@ class STTProvider(Provider):
 
     @abstractmethod
     async def transcribe(self, audio: AudioInput, *, language: str | None = None,
-                         prompt: str | None = None) -> Transcript: ...
+                         prompt: str | None = None, model: str | None = None) -> Transcript: ...
 
 
 class LLMProvider(Provider):
@@ -115,6 +115,9 @@ class LLMProvider(Provider):
 
 class TTSProvider(Provider):
     kind = "tts"
+    # The voices this provider offers (Voices page): {"voice", "language", "gender", "dialect", "model"?, "style"?}.
+    # Empty when the provider doesn't publish a list (any voice name can still be tried).
+    VOICES: list[dict] = []
 
     @abstractmethod
     def synthesize(self, text: str, *, language: str = "ar", voice: str | None = None,

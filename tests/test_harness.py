@@ -228,37 +228,6 @@ async def test_affirm_gate(rig):
 # ---------------------------------------------------------------- safety / handoff
 
 
-async def test_red_flag_empathy_then_continue(rig):
-    agent, llm, mock, out, events = rig
-    verify(agent)
-    llm.then("سلامتك، آسفين نسمع إنك تعاني من ألم في الصدر. بناءً على ألم الصدر، نقترح لك عيادة القلب. تبي تحجز فيها، "
-             "ولا تفضل عيادة ثانية؟")
-    await agent.handle("عندي ألم في صدري من اسبوع")
-    assert len(llm.requests) == 1                       # booking continues through the LLM
-    user_msg = llm.requests[0]["messages"][-1]["content"]
-    # default (user decision): empathy + clinic, no ER / 997 line
-    assert "empathy naming the symptom" in user_msg and "Don't mention emergency departments or 997" in user_msg
-    assert "cardiology" in user_msg                     # chest pain → cardiology hint stays
-
-
-async def test_red_flag_advise_mode_still_available(rig, monkeypatch):
-    from runtime.config import get_settings
-    agent, llm, mock, out, events = rig
-    verify(agent)
-    monkeypatch.setattr(get_settings(), "red_flag_mode", "advise_and_continue")
-    llm.then("سلامتك.")
-    await agent.handle("عندي ألم في صدري من اسبوع")
-    assert "997" in llm.requests[0]["messages"][-1]["content"]
-
-
-async def test_red_flag_stop_mode(rig, monkeypatch):
-    from runtime.config import get_settings
-    agent, llm, mock, out, events = rig
-    monkeypatch.setattr(get_settings(), "red_flag_mode", "stop")
-    await agent.handle("عندي ألم في صدري من ساعة")
-    assert llm.requests == [] and "٩٩٧" in out.said[-1]
-
-
 async def test_human_request_transfers(rig):
     agent, llm, mock, out, _ = rig
     await agent.handle("ابي اكلم موظف")
@@ -347,6 +316,9 @@ async def test_write_in_flight_survives_barge_in(rig):
         await task
     assert mock.calls and mock.calls[0][0] == "mssql_confirm_appointment"   # completed despite barge-in
     assert any(m.get("role") == "tool" and "success" in m["content"] for m in agent.s.history)
+    # …and it is recorded like any finished write, so the next reply may say "confirmed"
+    assert "mssql_confirm_appointment" in agent._done_tools
+
 
 # ---------------------------------------------------------------- utilities
 
@@ -428,7 +400,7 @@ async def test_patient_data_access_is_audited(rig, monkeypatch):
 def test_production_safety_checks():
     from runtime.config import Settings
     from runtime.control.maintenance import production_problems
-    base = dict(auth_database_url=None, source_database_url=None)
+    base = dict(source_database_url=None)
     assert production_problems(Settings(tools_mode="hybrid", console_token=None, auth_secret=None, **base)) == []
     probs = production_problems(Settings(tools_mode="live", console_token=None, auth_secret=None, **base))
     assert any("CONSOLE_TOKEN" in p for p in probs) and any("AUTH_SECRET" in p for p in probs)
@@ -730,6 +702,26 @@ async def test_model_cannot_answer_its_own_question(rig):
     assert mock.calls == [] and agent.s.pending_action is not None
 
 
+async def test_model_cannot_confirm_in_the_turn_that_parked_the_booking(rig):
+    # live 2026-10-04: "Please book for 8 am" → booking parked → the model recorded "yes" itself in the same turn
+    # and the harness booked with no read-back
+    agent, llm, mock, out, _ = rig
+    verify(agent)
+    agent.s.language.update("hello there")
+    mock.on("api_book_Appointment", {"success": True, "appointment_data": {"AppointmentNo": "1"}})
+    agent.s.memory["offered_slots"] = {5018: {"2026-10-01": {"10:00"}}}
+    args = {"ProjectID": 12, "ClinicID": 5, "DoctorID": 5018, "StartTime": "10:00", "StrAppointmentDate": "2026-10-01"}
+    llm.then(("api_book_Appointment", args)) \
+       .then(("record_answer", {"question": "booking_confirmation", "answer": "yes"})) \
+       .then("I'll book you with Dr. Rubeena Quadri on Thursday at 10 AM. Shall I go ahead?")
+    await agent.handle("Please book for 10 am")
+    assert mock.calls == [] and agent.s.pending_action is not None and not agent.s.slots.get("booked")
+    assert out.said[-1].endswith("Shall I go ahead?")
+    llm.then("Your appointment is booked.")
+    await agent.handle("yes")                                          # the real answer, next turn
+    assert [n for n, _ in mock.calls] == ["api_book_Appointment"] and agent.s.slots.get("booked")
+
+
 async def test_chosen_hospital_named_in_the_call_language(rig):
     from runtime.harness.context import system_prompt
     skills = rig[0].skills
@@ -825,3 +817,67 @@ async def test_a_yes_before_the_read_back_does_not_book():
         await p.pre(book, dict(args), ctx)            # same turn, same "yes": still not confirmed
     s.turn_id, s.last_reply = 6, "yes"                # the answer to the read-back
     assert (await p.pre(book, dict(args), ctx))["StartTime"] == "08:30"
+
+
+# ---------------------------------------------------------------- Hamsa parity: prompt variables, greeting, first speaker
+
+
+def test_template_variables_are_hamsa_system_variables():
+    from runtime.skills.loader import area_code, template_vars
+    s = Session(call_id="call-9", ani="+966548802968", agent_name="HMG Care", agent_number="8001")
+    v = template_vars(s)
+    assert v["call_id"] == "call-9" and v["direction"] == "inbound"
+    assert v["user_number"] == v["userNumber"] == "+966548802968" and v["user_number_area_code"] == "54"
+    assert v["agent_name"] == "HMG Care" and v["agent_number"] == "8001"
+    assert len(v["current_time"]) == 5 and len(v["current_date"]) == 10 and v["current_weekday"]
+    assert area_code("0112345678") == "11" and area_code("00966112345678") == "11" and area_code("+14155550123") == ""
+    assert template_vars(Session(call_id="x"))["user_number_area_code"] == ""
+
+
+async def test_dynamic_greeting_is_rendered(rig):
+    from runtime.harness.prompts import Phrases
+    agent, llm, mock, out, _ = rig
+    agent.s.agent_name = "Sara"
+    agent.ph = Phrases({"GREETING": {"ar": "أهلاً، أنا {{ agent_name }}", "en": "Hi, this is {{ agent_name }} ({{ call_id }})"}})
+    await agent.start()
+    lang = agent.s.language.language
+    assert out.said == [("أهلاً، أنا Sara" if lang == "ar" else "Hi, this is Sara (call-1)")]
+    assert agent.s.history[-1]["content"] == out.said[0]
+
+
+async def test_plain_greeting_is_unchanged(rig):
+    agent, llm, mock, out, _ = rig
+    await agent.start()
+    assert out.said == [agent.ph.GREETING[agent.s.language.language]]
+
+
+async def test_wait_for_user_to_speak_first(rig):
+    agent, llm, mock, out, _ = rig
+    agent.settings = agent.settings.model_copy(update={"voice_wait_for_user": "always"})
+    await agent.start()
+    assert out.said == [] and agent.s.history == []                       # silent until the caller speaks
+    llm.then("Hello, how can I help?")
+    await agent.handle("hello")
+    assert out.said                                                       # then the agent answers normally
+
+
+async def test_wait_for_user_outbound_only(rig):
+    agent, llm, mock, out, _ = rig
+    agent.settings = agent.settings.model_copy(update={"voice_wait_for_user": "outbound"})
+    await agent.start()
+    assert len(out.said) == 1                                             # inbound: greets as usual
+    agent.s.direction = "outbound"
+    out.said.clear()
+    await agent.start()
+    assert out.said == []
+
+
+def test_wait_for_user_knob_is_validated():
+    from runtime.platform.bundle import knob_errors
+    assert not knob_errors({"voice_wait_for_user": "always"})
+    assert knob_errors({"voice_wait_for_user": "sometimes"})
+
+
+def test_clean_for_speech_drops_pause_tags():
+    from runtime.harness.policy import clean_for_speech
+    assert clean_for_speech("8 AM <pause short 8:15 AM <pause_short> 8:30 AM") == "8 AM, 8:15 AM, 8:30 AM"
